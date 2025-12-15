@@ -21,12 +21,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/francoismichel/ssh3"
-	"github.com/francoismichel/ssh3/auth/oidc"
-	"github.com/francoismichel/ssh3/client"
-	client_config "github.com/francoismichel/ssh3/client/config"
-	"github.com/francoismichel/ssh3/internal"
-	"github.com/francoismichel/ssh3/util"
+	"github.com/h4sh5/sshoq"
+	"github.com/h4sh5/sshoq/auth/oidc"
+	"github.com/h4sh5/sshoq/client"
+	client_config "github.com/h4sh5/sshoq/client/config"
+	"github.com/h4sh5/sshoq/internal"
+	"github.com/h4sh5/sshoq/util"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"golang.org/x/crypto/ssh/agent"
@@ -65,7 +65,7 @@ func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog 
 	if runtime.GOOS == "darwin" {
 		// on MacOS, the don't fragment (DF) bit is not set on dual-stack socket ("udp")
 		// This causes quic-go to not perform MTU discovery which can prevent the proxy jump from working at all.
-		// cf: - https://github.com/francoismichel/ssh3/issues/129
+		// cf: - https://github.com/h4sh5/sshoq/issues/129
 		//     - https://github.com/quic-go/quic-go/issues/3793
 		//
 		// The fix here is to not use a dual-stack socket on MacOS and detect the IP version from the resolved peer address.

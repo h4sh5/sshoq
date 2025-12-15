@@ -32,13 +32,13 @@ import (
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 
-	"github.com/francoismichel/ssh3"
-	"github.com/francoismichel/ssh3/auth/oidc"
-	client_config "github.com/francoismichel/ssh3/client/config"
-	"github.com/francoismichel/ssh3/client/winsize"
-	"github.com/francoismichel/ssh3/internal"
-	ssh3Messages "github.com/francoismichel/ssh3/message"
-	"github.com/francoismichel/ssh3/util"
+	"github.com/h4sh5/sshoq"
+	"github.com/h4sh5/sshoq/auth/oidc"
+	client_config "github.com/h4sh5/sshoq/client/config"
+	"github.com/h4sh5/sshoq/client/winsize"
+	"github.com/h4sh5/sshoq/internal"
+	ssh3Messages "github.com/h4sh5/sshoq/message"
+	"github.com/h4sh5/sshoq/util"
 )
 
 type ExitStatus struct {

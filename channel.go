@@ -7,8 +7,8 @@ import (
 	"io"
 	"net"
 
-	ssh3 "github.com/francoismichel/ssh3/message"
-	"github.com/francoismichel/ssh3/util"
+	ssh3 "github.com/h4sh5/sshoq/message"
+	"github.com/h4sh5/sshoq/util"
 
 	"github.com/quic-go/quic-go"
 )

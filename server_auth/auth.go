@@ -8,8 +8,8 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/francoismichel/ssh3"
-	"github.com/francoismichel/ssh3/util/unix_util"
+	"github.com/h4sh5/sshoq"
+	"github.com/h4sh5/sshoq/util/unix_util"
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"

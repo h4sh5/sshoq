@@ -85,7 +85,7 @@ var _ = BeforeSuite(func() {
 		for tag, bind := range oldServerBinds {
 			gobin, err := os.MkdirTemp("", fmt.Sprintf("ssh3-backwards-compatible-versions-%s", tag))
 			Expect(err).ToNot(HaveOccurred())
-			cmd := exec.Command("go", "install", fmt.Sprintf("github.com/francoismichel/ssh3/cmd/ssh3-server@%s", tag))
+			cmd := exec.Command("go", "install", fmt.Sprintf("github.com/h4sh5/sshoq/cmd/ssh3-server@%s", tag))
 			cmd.Env = os.Environ()
 			cmd.Env = append(cmd.Env, fmt.Sprintf("GOBIN=%s", gobin))
 			err = cmd.Run()

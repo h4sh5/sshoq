@@ -6,11 +6,11 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/francoismichel/ssh3"
-	"github.com/francoismichel/ssh3/auth"
-	"github.com/francoismichel/ssh3/auth/plugins"
-	"github.com/francoismichel/ssh3/client/config"
-	"github.com/francoismichel/ssh3/util"
+	"github.com/h4sh5/sshoq"
+	"github.com/h4sh5/sshoq/auth"
+	"github.com/h4sh5/sshoq/auth/plugins"
+	"github.com/h4sh5/sshoq/client/config"
+	"github.com/h4sh5/sshoq/util"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/ssh"
@@ -25,7 +25,7 @@ func init() {
 	plugins.RegisterClientAuthPlugin("pubkey_auth", plugin)
 }
 
-const PUBKEY_OPTION_NAME = "github.com/francoismichel/ssh3-pubkey_auth"
+const PUBKEY_OPTION_NAME = "github.com/h4sh5/sshoq-pubkey_auth"
 
 type PubkeyAuthOption struct {
 	filenames []string

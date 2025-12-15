@@ -10,7 +10,7 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/francoismichel/ssh3/util"
+	"github.com/h4sh5/sshoq/util"
 	"golang.org/x/exp/slices"
 
 	"github.com/quic-go/quic-go"

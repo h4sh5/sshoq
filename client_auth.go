@@ -9,9 +9,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/francoismichel/ssh3/auth/oidc"
-	client_config "github.com/francoismichel/ssh3/client/config"
-	"github.com/francoismichel/ssh3/util"
+	"github.com/h4sh5/sshoq/auth/oidc"
+	client_config "github.com/h4sh5/sshoq/client/config"
+	"github.com/h4sh5/sshoq/util"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/kevinburke/ssh_config"

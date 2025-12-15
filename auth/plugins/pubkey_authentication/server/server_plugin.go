@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/francoismichel/ssh3/auth"
-	"github.com/francoismichel/ssh3/auth/plugins"
-	"github.com/francoismichel/ssh3/server_auth"
+	"github.com/h4sh5/sshoq/auth"
+	"github.com/h4sh5/sshoq/auth/plugins"
+	"github.com/h4sh5/sshoq/server_auth"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/ssh"
@@ -16,7 +16,7 @@ import (
 
 // impements server-side pubkey-based authentication
 
-const PLUGIN_NAME = "github.com/francoismichel/ssh3-server_pubkey_auth"
+const PLUGIN_NAME = "github.com/h4sh5/sshoq-server_pubkey_auth"
 
 func init() {
 	if err := plugins.RegisterServerAuthPlugin(PLUGIN_NAME, PubkeyAuthPlugin); err != nil {

@@ -8,11 +8,11 @@ import (
 	"os"
 	"syscall"
 
-	"github.com/francoismichel/ssh3"
-	"github.com/francoismichel/ssh3/auth"
-	"github.com/francoismichel/ssh3/auth/plugins"
-	"github.com/francoismichel/ssh3/client/config"
-	"github.com/francoismichel/ssh3/util"
+	"github.com/h4sh5/sshoq"
+	"github.com/h4sh5/sshoq/auth"
+	"github.com/h4sh5/sshoq/auth/plugins"
+	"github.com/h4sh5/sshoq/client/config"
+	"github.com/h4sh5/sshoq/util"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/rs/zerolog/log"
@@ -29,7 +29,7 @@ func init() {
 	plugins.RegisterClientAuthPlugin("privkey_auth", plugin)
 }
 
-const PRIVKEY_OPTION_NAME = "github.com/francoismichel/ssh3-privkey_auth"
+const PRIVKEY_OPTION_NAME = "github.com/h4sh5/sshoq-privkey_auth"
 
 // implements client-side pubkey-based authentication
 

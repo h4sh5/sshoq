@@ -1,4 +1,4 @@
-module github.com/francoismichel/ssh3
+module github.com/h4sh5/sshoq
 
 require (
 	github.com/caddyserver/certmagic v0.20.0

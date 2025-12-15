@@ -1,8 +1,8 @@
 package plugins
 
 import (
-	"github.com/francoismichel/ssh3/auth"
-	"github.com/francoismichel/ssh3/internal"
+	"github.com/h4sh5/sshoq/auth"
+	"github.com/h4sh5/sshoq/internal"
 )
 
 // Each new plugin package must define an init() method (see https://go.dev/doc/effective_go#init)

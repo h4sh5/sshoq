@@ -3,8 +3,8 @@ package auth
 import (
 	"net/http"
 
-	"github.com/francoismichel/ssh3"
-	client_config "github.com/francoismichel/ssh3/client/config"
+	"github.com/h4sh5/sshoq"
+	client_config "github.com/h4sh5/sshoq/client/config"
 	"github.com/quic-go/quic-go/http3"
 	"golang.org/x/crypto/ssh/agent"
 )

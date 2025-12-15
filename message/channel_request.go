@@ -8,7 +8,7 @@ import (
 	"io"
 	"net"
 
-	util "github.com/francoismichel/ssh3/util"
+	util "github.com/h4sh5/sshoq/util"
 )
 
 var ChannelRequestParseFuncs = map[string]func(util.Reader) (ChannelRequest, error){

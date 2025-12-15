@@ -1,10 +1,13 @@
 package main
 
 import (
+	"github.com/h4sh5/sshoq/cmd"
+	"os"
+
+	// authentication plugins
 	_ "github.com/h4sh5/sshoq/auth/plugins/pubkey_authentication/client"
-	cmd "github.com/h4sh5/sshoq/cmd"
 )
 
 func main() {
-	cmd.ClientMain()
+	os.Exit(cmd.ClientMain())
 }

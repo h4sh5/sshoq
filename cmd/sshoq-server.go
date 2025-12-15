@@ -6,7 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/francoismichel/ssh3/client/winsize"
+	"github.com/h4sh5/sshoq/client/winsize"
 	"io"
 	"net"
 	"net/http"
@@ -36,12 +36,12 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
-	ssh3 "github.com/francoismichel/ssh3"
-	"github.com/francoismichel/ssh3/internal"
-	ssh3Messages "github.com/francoismichel/ssh3/message"
-	"github.com/francoismichel/ssh3/server_auth"
-	util "github.com/francoismichel/ssh3/util"
-	"github.com/francoismichel/ssh3/util/unix_util"
+	ssh3 "github.com/h4sh5/sshoq"
+	"github.com/h4sh5/sshoq/internal"
+	ssh3Messages "github.com/h4sh5/sshoq/message"
+	"github.com/h4sh5/sshoq/server_auth"
+	util "github.com/h4sh5/sshoq/util"
+	"github.com/h4sh5/sshoq/util/unix_util"
 )
 
 var signals = map[string]os.Signal{
@@ -1102,7 +1102,7 @@ func ServerMain() int {
 		fmt.Fprintln(os.Stderr, "No certificate available for the QUIC connection.")
 		fmt.Fprintln(os.Stderr, "If you have no certificate and want a security comparable to traditional SSH host keys, "+
 			"you can generate a self-signed certificate using the -generate-selfsigned-cert arg or using the following script:")
-		fmt.Fprintln(os.Stderr, "https://github.com/francoismichel/ssh3/blob/main/generate_openssl_selfsigned_certificate.sh")
+		fmt.Fprintln(os.Stderr, "https://github.com/h4sh5/sshoq/blob/main/generate_openssl_selfsigned_certificate.sh")
 		return -1
 	} else if *generateSelfSignedCert {
 		if certPathExists {

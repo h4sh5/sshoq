@@ -9,11 +9,11 @@ import (
 	"path"
 	"strings"
 
-	"github.com/francoismichel/ssh3/auth"
-	"github.com/francoismichel/ssh3/auth/oidc"
-	"github.com/francoismichel/ssh3/internal"
-	"github.com/francoismichel/ssh3/util"
-	"github.com/francoismichel/ssh3/util/unix_util"
+	"github.com/h4sh5/sshoq/auth"
+	"github.com/h4sh5/sshoq/auth/oidc"
+	"github.com/h4sh5/sshoq/internal"
+	"github.com/h4sh5/sshoq/util"
+	"github.com/h4sh5/sshoq/util/unix_util"
 
 	"github.com/rs/zerolog/log"
 )
