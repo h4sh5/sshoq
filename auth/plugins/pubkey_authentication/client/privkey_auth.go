@@ -8,12 +8,12 @@ import (
 	"os"
 	"syscall"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/h4sh5/sshoq"
 	"github.com/h4sh5/sshoq/auth"
 	"github.com/h4sh5/sshoq/auth/plugins"
 	"github.com/h4sh5/sshoq/client/config"
 	"github.com/h4sh5/sshoq/util"
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/ssh"

@@ -6,10 +6,10 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/h4sh5/sshoq/auth"
 	"github.com/h4sh5/sshoq/auth/plugins"
 	"github.com/h4sh5/sshoq/server_auth"
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/ssh"
 )
