@@ -29,13 +29,13 @@ integration-tests:
 		go run github.com/onsi/ginkgo/v2/ginkgo ./integration_tests
 
 install:
-	$(GO_OPTS) go install $(BUILDFLAGS) ./cmd/ssh3
-	$(GO_OPTS) go install $(BUILDFLAGS) ./cmd/ssh3-server
+	$(GO_OPTS) go install $(BUILDFLAGS) ./cmd/sshoq
+	$(GO_OPTS) go install $(BUILDFLAGS) ./cmd/sshoq-server
 
 build: client server
 
 client:
-	$(GO_OPTS) go build -tags "$(GO_TAGS)" $(BUILD_FLAGS) -o bin/client ./cmd/ssh3/
+	$(GO_OPTS) go build -tags "$(GO_TAGS)" $(BUILD_FLAGS) -o bin/client ./cmd/sshoq/
 
 server:
-	$(GO_OPTS) go build -tags "$(GO_TAGS)" $(BUILD_FLAGS) -o bin/server ./cmd/ssh3-server/
+	$(GO_OPTS) go build -tags "$(GO_TAGS)" $(BUILD_FLAGS) -o bin/server ./cmd/sshoq-server/
