@@ -19,8 +19,8 @@ import (
 var ssh3Path string
 var ssh3ServerPath string
 
-const DEFAULT_URL_PATH = "/ssh3-tests"
-const DEFAULT_PROXY_URL_PATH = "/ssh3-tests-proxy"
+const DEFAULT_URL_PATH = "/sshoq-tests"
+const DEFAULT_PROXY_URL_PATH = "/sshoq-tests-proxy"
 
 var serverCommand *exec.Cmd
 var serverSessions map[string]*Session = make(map[string]*Session) // bind address to session
@@ -60,14 +60,14 @@ func fileExists(path string) bool {
 
 var _ = BeforeSuite(func() {
 	var err error
-	ssh3Path, err = Build("../cmd/ssh3/main.go")
+	ssh3Path, err = Build("../cmd/sshoq/main.go")
 	Expect(err).ToNot(HaveOccurred())
 	if os.Getenv("SSH3_INTEGRATION_TESTS_WITH_SERVER_ENABLED") == "1" {
 		// Tests implying a server will only work on Linux
 		// (the server currently only builds on Linux)
 		// and the server needs root priviledges, so we only
 		// run them is they are enabled explicitly.
-		ssh3ServerPath, err = BuildWithEnvironment("../cmd/ssh3-server/main.go", []string{fmt.Sprintf("CGO_ENABLED=%s", os.Getenv("CGO_ENABLED"))})
+		ssh3ServerPath, err = BuildWithEnvironment("../cmd/sshoq-server/main.go", []string{fmt.Sprintf("CGO_ENABLED=%s", os.Getenv("CGO_ENABLED"))})
 		Expect(err).ToNot(HaveOccurred())
 		serverCommand = exec.Command(ssh3ServerPath,
 			"-bind", serverBind,
@@ -83,14 +83,14 @@ var _ = BeforeSuite(func() {
 		serverSessions[serverBind] = session
 
 		for tag, bind := range oldServerBinds {
-			gobin, err := os.MkdirTemp("", fmt.Sprintf("ssh3-backwards-compatible-versions-%s", tag))
+			gobin, err := os.MkdirTemp("", fmt.Sprintf("sshoq-backwards-compatible-versions-%s", tag))
 			Expect(err).ToNot(HaveOccurred())
-			cmd := exec.Command("go", "install", fmt.Sprintf("github.com/h4sh5/sshoq/cmd/ssh3-server@%s", tag))
+			cmd := exec.Command("go", "install", fmt.Sprintf("github.com/h4sh5/sshoq/cmd/sshoq-server@%s", tag))
 			cmd.Env = os.Environ()
 			cmd.Env = append(cmd.Env, fmt.Sprintf("GOBIN=%s", gobin))
 			err = cmd.Run()
 			Expect(err).ToNot(HaveOccurred())
-			serverPath := path.Join(gobin, "ssh3-server")
+			serverPath := path.Join(gobin, "sshoq-server")
 			Expect(err).ToNot(HaveOccurred())
 			backwardsCompatibleServerCommand := exec.Command(serverPath,
 				"-bind", bind,
@@ -138,7 +138,7 @@ var _ = AfterSuite(func() {
 	}
 })
 
-var _ = Describe("Testing the ssh3 cli", func() {
+var _ = Describe("Testing the sshoq cli", func() {
 
 	Context("Usage", func() {
 		It("Displays the help", func() {
