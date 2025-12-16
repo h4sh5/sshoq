@@ -391,6 +391,8 @@ func ClientMain() int {
 	reverseUDP := flag.String("reverse-udp", "", "if set, take a remoteip@remoteport reverse forwarding it towards a localport/remoteip@remoteport")
 	proxyJump := flag.String("proxy-jump", "", "if set, performs a proxy jump using the specified remote host as proxy (requires server with version >= 0.1.5)")
 
+	sftpSession := path.Base(os.Args[0]) == "sshoq-sftp"
+
 	var flagValues []*FlagValue
 	cliParsers, err := internal.GetPluginsCLIArgs()
 	if err != nil {
@@ -878,7 +880,7 @@ func ClientMain() int {
 
 	}
 
-	err = c.RunSession(tty, *forwardSSHAgent, command...)
+	err = c.RunSession(tty, sftpSession, *forwardSSHAgent, command...)
 	switch sessionError := err.(type) {
 	case client.ExitStatus:
 		log.Info().Msgf("the process exited with status %d", sessionError.StatusCode)

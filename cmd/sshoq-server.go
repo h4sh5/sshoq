@@ -344,10 +344,13 @@ func execCmdInBackground(channel ssh3.Channel, openPty *openPty, user *unix_util
 			return err
 		}
 	} else {
+		log.Debug().Msgf("Running cmd in background: %v (authAgentSocketPath: %v)", runningCommand, authAgentSocketPath)
 		err := runningCommand.Start()
+		log.Debug().Msgf("Boop")
 		if err != nil {
 			return err
 		}
+		log.Debug().Msgf("No err")
 	}
 
 	go func() {
@@ -500,6 +503,55 @@ func newX11Req(user *unix_util.User, channel ssh3.Channel, request ssh3Messages.
 	return fmt.Errorf("%T not implemented", request)
 }
 
+func newSftpServer(user *unix_util.User, channel ssh3.Channel, sftpCommand string, args ...string) error {
+	var session *runningSession
+	session, ok := runningSessions.Get(channel)
+
+	if !ok {
+		return fmt.Errorf("internal error: cannot find session for current channel")
+	}
+
+	log.Debug().Msgf("[newSftpServer] session: %v", session)
+
+
+	env := ""
+	// create pipes for background process
+	var stdoutR, stderrR, stdinR io.Reader
+	var stdoutW, stderrW, stdinW io.Writer
+	var cmd *exec.Cmd
+	stdoutR, stdoutW, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	stderrR, stderrW, err = os.Pipe()
+	if err != nil {
+		return err
+	}
+	stdinR, stdinW, err = os.Pipe()
+	if err != nil {
+		return err
+	}
+	// sftp-server should be interactive (to interact with foreground sftp session)
+	loginShell := false
+	cmd, stdoutR, stderrR, stdinW, err = user.CreateCommand(env, stdoutW, stderrW, stdinR, loginShell, sftpCommand, args...)
+
+	runningCommand := &runningCommand{
+		Cmd:     *cmd,
+		stdoutR: stdoutR,
+		stderrR: stderrR,
+		stdinW:  stdinW,
+	}
+
+	session.runningCmd = runningCommand
+
+	session.channelState = OPEN
+
+	// no session.authAgentSocketPath needed for sftp server
+	return execCmdInBackground(channel, session.pty, user, session.runningCmd, "")
+
+
+}
+
 func newCommand(user *unix_util.User, channel ssh3.Channel, loginShell bool, command string, args ...string) error {
 	var session *runningSession
 	session, ok := runningSessions.Get(channel)
@@ -514,6 +566,7 @@ func newCommand(user *unix_util.User, channel ssh3.Channel, loginShell bool, com
 	env := ""
 	if session.pty != nil {
 		env = fmt.Sprintf("TERM=%s", session.pty.term)
+		log.Debug().Msgf("Using session.pty: %v", session.pty)
 	}
 
 	var stdoutR, stderrR, stdinR io.Reader
@@ -531,6 +584,7 @@ func newCommand(user *unix_util.User, channel ssh3.Channel, loginShell bool, com
 		stdinW = session.pty.pty
 		cmd, _, _, _, err = user.CreateCommand(env, stdoutW, stderrW, stdinR, loginShell, command, args...)
 	} else {
+		log.Debug().Msgf("Not using session pty")
 		stdoutR, stdoutW, err = os.Pipe()
 		if err != nil {
 			return err
@@ -574,7 +628,25 @@ func newCommandInShellReq(user *unix_util.User, channel ssh3.Channel, wantReply 
 }
 
 func newSubsystemReq(user *unix_util.User, channel ssh3.Channel, request ssh3Messages.SubsystemRequest, wantReply bool) error {
-	return fmt.Errorf("%T not implemented", request)
+
+
+	if request.SubsystemName == "sftp" {
+		log.Debug().Msgf("Got sftp subsystem request.")
+		// XXX location of sftp-server may vary on different systems; they are often not in $PATH either
+		sftp_server_command := "/usr/lib/openssh/sftp-server"
+		if runtime.GOOS == "darwin" {
+		    sftp_server_command = "/usr/libexec/sftp-server"
+		}
+
+		if os.Getenv("SFTP_SERVER_CMD") != "" {
+			sftp_server_command = os.Getenv("SFTP_SERVER_CMD")
+		}
+
+		return newSftpServer(user, channel, sftp_server_command, sftp_server_command)
+	} else {
+		return fmt.Errorf("%T Subsystem not implemented: %v", request, request)
+	}
+	
 }
 
 func newWindowChangeReq(user *unix_util.User, channel ssh3.Channel, request ssh3Messages.WindowChangeRequest, wantReply bool) error {

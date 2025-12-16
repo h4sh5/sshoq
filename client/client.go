@@ -972,9 +972,13 @@ func readFirstMsg(ctx context.Context, ch ssh3.Channel) (byte, []byte, error) {
 	return 0, nil, fmt.Errorf("channel doesn't expose a message-read method")
 }
 
-func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, command ...string) error {
+func (c *Client) RunSession(tty *os.File, sftpSession bool, forwardSSHAgent bool, command ...string) error {
 
 	ctx := c.Context()
+
+	if sftpSession {
+		log.Debug().Msgf("Running in SFTP mode..")
+	}
 
 	//Managing incomming channels globally
 	//TODO: for reverseTCP is required migrating here the management.
@@ -1051,75 +1055,93 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, command ...strin
 		}()
 	}
 
-	if len(command) == 0 {
-		// avoid requesting a pty on the other side if stdin is not a pty
-		// similar behaviour to OpenSSH
-		isATTY := term.IsTerminal(int(tty.Fd()))
-
-		windowSize, err := winsize.GetWinsize(tty)
-		if err != nil {
-			log.Warn().Msgf("could not get window size: %+v", err)
-		}
-		hasWinSize := err == nil
-		if isATTY && hasWinSize {
-			err = channel.SendRequest(
-				&ssh3Messages.ChannelRequestMessage{
-					WantReply: true,
-					ChannelRequest: &ssh3Messages.PtyRequest{
-						Term:        os.Getenv("TERM"),
-						CharWidth:   uint64(windowSize.NCols),
-						CharHeight:  uint64(windowSize.NRows),
-						PixelWidth:  uint64(windowSize.PixelWidth),
-						PixelHeight: uint64(windowSize.PixelHeight),
-					},
-				},
-			)
-
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Could send pty request: %+v", err)
-				return err
-			}
-			log.Debug().Msgf("sent pty request for session")
-		}
-
+	if sftpSession { // for sftp
 		err = channel.SendRequest(
 			&ssh3Messages.ChannelRequestMessage{
 				WantReply:      true,
-				ChannelRequest: &ssh3Messages.ShellRequest{},
-			},
-		)
-		if err != nil {
-			log.Error().Msgf("could not send shell request: %s", err)
-			return err
-		}
-		log.Debug().Msgf("sent shell request, hasWinSize = %t", hasWinSize)
-		// avoid making the terminal raw if stdin is not a TTY
-		// similar behaviour to OpenSSH
-		if isATTY {
-			fd := os.Stdin.Fd()
-			oldState, err := term.MakeRaw(int(fd))
-			if err != nil {
-				log.Warn().Msgf("cannot make tty raw: %s", err)
-			} else {
-				defer term.Restore(int(fd), oldState)
-			}
-		}
-	} else {
-		channel.SendRequest(
-			&ssh3Messages.ChannelRequestMessage{
-				WantReply: true,
-				ChannelRequest: &ssh3Messages.ExecRequest{
-					Command: strings.Join(command, " "),
+				ChannelRequest: &ssh3Messages.SubsystemRequest{
+					SubsystemName: "sftp",
 				},
 			},
 		)
-		log.Debug().Msgf("sent exec request for command \"%s\"", strings.Join(command, " "))
+		if err != nil {
+			log.Error().Msgf("could not send sftp subsystem request: %s", err)
+			return err
+		}
+		log.Debug().Msgf("sent sftp request")
+	} else {
+		if len(command) == 0 {
+			// avoid requesting a pty on the other side if stdin is not a pty
+			// similar behaviour to OpenSSH
+			isATTY := term.IsTerminal(int(tty.Fd()))
+
+			windowSize, err := winsize.GetWinsize(tty)
+			if err != nil {
+				log.Warn().Msgf("could not get window size: %+v", err)
+			}
+			hasWinSize := err == nil
+			if isATTY && hasWinSize {
+				err = channel.SendRequest(
+					&ssh3Messages.ChannelRequestMessage{
+						WantReply: true,
+						ChannelRequest: &ssh3Messages.PtyRequest{
+							Term:        os.Getenv("TERM"),
+							CharWidth:   uint64(windowSize.NCols),
+							CharHeight:  uint64(windowSize.NRows),
+							PixelWidth:  uint64(windowSize.PixelWidth),
+							PixelHeight: uint64(windowSize.PixelHeight),
+						},
+					},
+				)
+
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Could send pty request: %+v", err)
+					return err
+				}
+				log.Debug().Msgf("sent pty request for session")
+			}
+
+			err = channel.SendRequest(
+				&ssh3Messages.ChannelRequestMessage{
+					WantReply:      true,
+					ChannelRequest: &ssh3Messages.ShellRequest{},
+				},
+			)
+			if err != nil {
+				log.Error().Msgf("could not send shell request: %s", err)
+				return err
+			}
+			log.Debug().Msgf("sent shell request, hasWinSize = %t", hasWinSize)
+			// avoid making the terminal raw if stdin is not a TTY
+			// similar behaviour to OpenSSH
+			if isATTY {
+				fd := os.Stdin.Fd()
+				oldState, err := term.MakeRaw(int(fd))
+				if err != nil {
+					log.Warn().Msgf("cannot make tty raw: %s", err)
+				} else {
+					defer term.Restore(int(fd), oldState)
+				}
+			}
+		} else {
+			channel.SendRequest(
+				&ssh3Messages.ChannelRequestMessage{
+					WantReply: true,
+					ChannelRequest: &ssh3Messages.ExecRequest{
+						Command: strings.Join(command, " "),
+					},
+				},
+			)
+			log.Debug().Msgf("sent exec request for command \"%s\"", strings.Join(command, " "))
+		}
+
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Could send shell request: %+v", err)
+			return err
+		}
 	}
 
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Could send shell request: %+v", err)
-		return err
-	}
+	
 
 	sendLock := &sync.Mutex{}
 

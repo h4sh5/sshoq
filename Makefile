@@ -36,6 +36,7 @@ build: client server
 
 client:
 	$(GO_OPTS) go build -tags "$(GO_TAGS)" $(BUILD_FLAGS) -o bin/client ./cmd/sshoq/
+	cp bin/client bin/sshoq-sftp
 
 server:
 	$(GO_OPTS) go build -tags "$(GO_TAGS)" $(BUILD_FLAGS) -o bin/server ./cmd/sshoq-server/
