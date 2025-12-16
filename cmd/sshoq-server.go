@@ -346,11 +346,9 @@ func execCmdInBackground(channel ssh3.Channel, openPty *openPty, user *unix_util
 	} else {
 		log.Debug().Msgf("Running cmd in background: %v (authAgentSocketPath: %v)", runningCommand, authAgentSocketPath)
 		err := runningCommand.Start()
-		log.Debug().Msgf("Boop")
 		if err != nil {
 			return err
 		}
-		log.Debug().Msgf("No err")
 	}
 
 	go func() {
@@ -642,7 +640,7 @@ func newSubsystemReq(user *unix_util.User, channel ssh3.Channel, request ssh3Mes
 			sftp_server_command = os.Getenv("SFTP_SERVER_CMD")
 		}
 
-		return newSftpServer(user, channel, sftp_server_command, sftp_server_command)
+		return newSftpServer(user, channel, sftp_server_command)
 	} else {
 		return fmt.Errorf("%T Subsystem not implemented: %v", request, request)
 	}
