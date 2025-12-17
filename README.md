@@ -300,13 +300,13 @@ open a session with tcp local port forwarding (1234 to 1234)
 sshoq -forward-tcp 1234/127.0.0.1@1234/127.0.0.1  -privkey ~/.ssh/id_rsa -insecure user@192.168.1.2/ssh3-term
 ```
 
-Then open a sftp-server listener over a network socket **inside sshoq session** (openssh must be installed for the sftp-server binary to be available, and for the network server use ncat or socat):
+Then open a sftp-server listener over a localhost port **inside sshoq session** (openssh must be installed for the sftp-server binary to be available, and for the network server use ncat or socat):
 
 ```
-#ncat
-ncat -nlkvp 1234 -e /usr/lib/openssh/sftp-server
-#socat
-socat TCP-LISTEN:1234,reuseaddr,fork EXEC:/usr/lib/openssh/sftp-server
+# ncat
+ncat -nkvl 127.0.0.1 1234 -e /usr/lib/openssh/sftp-server
+# or socat
+socat TCP-LISTEN:1234,reuseaddr,fork,bind=127.0.0.1 EXEC:/usr/lib/openssh/sftp-server
 ```
 
 (the sftp-server binary may be in different locations depending on your distro, try `find /usr | grep sftp-server` since its usually not on the $PATH)
@@ -317,7 +317,7 @@ Finally, use sshfs (>= 3.7.5) to open mount a directory using the directport opt
 sshfs -o directport=1234 127.0.0.1:/home/ /tmp/mnt
 ```
 
-The performance gains on a local network is negligible (if not negative); testing on local network shows using sshfs with regular ssh can be faster than sshoq. However over the internet may be a different story.
+The performance gains on a local network isn't great; testing on local network shows using sshfs with regular ssh can be faster than sshoq. However over the internet may be a different story.
 
 Even if there're no performance gains, this does enable a method of bulk file transfer over sshoq since there's no builtin sshoq sftp command.
 
