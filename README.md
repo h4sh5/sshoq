@@ -1,9 +1,3 @@
-
-<div align=center>
-<!-- <img src="resources/figures/ssh3.png" style="display: block; width: 60%"> -->
-</div>
-
-
 # SSHOQ: faster and rich secure shell using QUIC and HTTP/3
 
 This repo is a fork of https://github.com/francoismichel/ssh3 as the original repo seems quite abandoned. A number of community PRs has been merged into this fork and light maintenance of this repo will resume going forward. Please still raise your issues in the original repo, but feel free to PR here.
@@ -124,7 +118,7 @@ the following line at the end of your `.bashrc` or equivalent:
 export PATH=$PATH:/path/to/the/sshoq/directory
 ```
 
-### Deploying an SSHOQ server
+## Deploying an SSHOQ server
 Before connecting to your host, you need to deploy an SSHOQ server on it. There is currently
 no SSHOQ daemon, so right now, you will have to run the `sshoq-server` executable in background
 using `screen` or a similar utility.
@@ -173,12 +167,12 @@ If you have existing certificates and keys, you can run the server as follows to
 > [!NOTE]
 > Similarly to OpenSSH, the server must be run with root priviledges to log in as other users.
 
-#### Authorized keys and authorized identities
+### Authorized keys and authorized identities
 By default, the SSHOQ server will look for identities in the `~/.ssh/authorized_keys` and `~/.ssh3/authorized_identities` files for each user.
 `~/.ssh3/authorized_identities` allows new identities such as OpenID Connect (`oidc`) discussed [below](#openid-connect-authentication-still-experimental).
 Popular key types such as `rsa`, `ed25519` and keys in the OpenSSH format can be used.
 
-### Using the SSHOQ client
+## Using the SSHOQ client
 Once you have an SSHOQ server running, you can connect to it using the SSHOQ client similarly to what
 you did with your classical SSHv2 tool.
 
@@ -213,12 +207,12 @@ Usage of ssh3:
   -v    if set, enable verbose mode
 ```
 
-#### Private-key authentication
+### Private-key authentication
 You can connect to your SSHOQ server at my-server.example.org listening on `/my-secret-path` using the private key located in `~/.ssh/id_rsa` with the following command:
 
       sshoq -privkey ~/.ssh/id_rsa username@my-server.example.org/my-secret-path
 
-#### Agent-based private key authentication
+### Agent-based private key authentication
 The SSHOQ client works with the OpenSSH agent and uses the classical `SSH_AUTH_SOCK` environment variable to
 communicate with this agent. Similarly to OpenSSH, SSHOQ will list the keys provided by the SSH agent
 and connect using the first key listen by the agent by default.
@@ -227,13 +221,13 @@ directly with the `-privkey` argument like above, or specify the corresponding p
 `-pubkey-for-agent` argument. This allows you to authenticate in situations where only the agent has
 a direct access to the private key but you only have access to the public key.
 
-#### Password-based authentication
+### Password-based authentication
 While discouraged, you can connect to your server using passwords (if explicitly enabled on the `sshoq-server`)
 with the following command:
 
       sshoq -use-password username@my-server.example.org/my-secret-path
 
-#### Config-based session establishment
+### Config-based session establishment
 `sshoq` parses your OpenSSH config. Currently, it only handles the `Hostname`; `User`, `Port` and `IdentityFile` OpenSSH options.
 It also adds new option only used by SSHOQ, such as `URLPath` or `UDPProxyJump`. `URLPath` allows you to omit the secret URL path in your
 SSHOQ command. `UDPProxyJump` allows you to perform SSHOQ (#proxy-jump)[Proxy Jump] and has the same meaning as the `-proxy-jump` command-line argument.
@@ -253,7 +247,7 @@ Similarly to what OpenSSH does, the following `sshoq` command will connect you t
 
 If you do not want a config-based utilization of SSHOQ, you can read the sections below to see how to use the CLI parameters of `sshoq`.
 
-#### OpenID Connect authentication (still experimental)
+### OpenID Connect authentication (still experimental)
 This feature allows you to connect using an external identity provider such as the one
 of your company or any other provider that implements the OpenID Connect standard, such as Google Identity,
 Github or Microsoft Entra. The authentication flow is illustrated in the GIF below.
@@ -284,13 +278,51 @@ oidc <client_id> https://accounts.google.com <email>
 ```
 We currently consider removing the need of setting the client_id in the `authorized_identities` file in the future.
 
-#### Proxy jump
+### Proxy jump
 It is often the case that some SSH hosts can only be accessed through a gateway. SSHOQ allows you to perform a Proxy Jump similarly to what is proposed by OpenSSH.
 You can connect from A to C using B as a gateway/proxy. B and C must both be running a valid SSHOQ server. This works by establishing UDP port forwarding on B to forward QUIC packets from A to C.
 The connection from A to C is therefore fully end-to-end and B cannot decrypt or alter the SSHOQ traffic between A and C.
 
 
-#### Local port forwarding
+### File Sharing
+
+For the time being there's no plan for sftp or scp client or server implementations for this project. 
+
+However, file sharing can be done by forwarding the existing sftp-server (part of OpenSSH) on an existing system over TCP port forwarding.
+
+For example, this is how you can use it with [SSHFS](https://github.com/libfuse/sshfs):
+
+#### File Sharing with SSHFS
+
+open a session with tcp local port forwarding (1234 to 1234)
+
+```
+sshoq -forward-tcp 1234/127.0.0.1@1234/127.0.0.1  -privkey ~/.ssh/id_rsa -insecure user@192.168.1.2/ssh3-term
+```
+
+Then open a sftp-server listener over a network socket **inside sshoq session** (openssh must be installed for the sftp-server binary to be available, and for the network server use ncat or socat):
+
+```
+#ncat
+ncat -nlkvp 1234 -e /usr/lib/openssh/sftp-server
+#socat
+socat TCP-LISTEN:1234,reuseaddr,fork EXEC:/usr/lib/openssh/sftp-server
+```
+
+(the sftp-server binary may be in different locations depending on your distro, try `find /usr | grep sftp-server` since its usually not on the $PATH)
+
+Finally, use sshfs (>= 3.7.5) to open mount a directory using the directport option
+
+```
+sshfs -o directport=1234 127.0.0.1:/home/ /tmp/mnt
+```
+
+The performance gains on a local network is negligible (if not negative); testing on local network shows using sshfs with regular ssh can be faster than sshoq. However over the internet may be a different story.
+
+Even if there're no performance gains, this does enable a method of bulk file transfer over sshoq since there's no builtin sshoq sftp command.
+
+
+### Local port forwarding
 
 Suppose you have a HTTP server on localhost port 3000 on the remote host, and wants to forward that locally to port 8080 so that you can access it via your browser. Do this with:
 
@@ -301,7 +333,7 @@ Similarly, to forward a UDP port (5353) from the remote host to local port 8053:
 `sshoq -forward-udp 8053/127.0.0.1@5353/127.0.0.1 user@example.com/secret-path`
 
 
-#### Reverse port forwarding
+### Reverse port forwarding
 
 You can also now perform reverse port forwading to forward a port from localhost to the remote host.
 
