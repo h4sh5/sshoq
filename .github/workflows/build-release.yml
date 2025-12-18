@@ -4,6 +4,11 @@
 name: Build release
 
 on:
+  workflow_dispatch:
+    inputs:
+      git-ref:
+        description: Git Ref (Optional)    
+        required: false
   release:
     types: 
       - created
@@ -24,18 +29,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Get musl source
-        run:  sudo apt-get -y install wget && pushd /tmp && sudo wget -O musl-1.2.4.tar.gz https://git.musl-libc.org/cgit/musl/snapshot/musl-1.2.4.tar.gz && tar xzvf musl-1.2.4.tar.gz && popd
-      - name: Compile and install musl
-        run:  pushd /tmp/musl-1.2.4 && ./configure --prefix=/usr/local/musl/ && make && sudo make install && popd
-      - name: Get musl cross-compiler for arm64
-        run:  wget -O /tmp/aarch64-linux-musl-cross.tgz https://musl.cc/aarch64-linux-musl-cross.tgz
-      - name: Untar musl cross-compiler for arm64
-        run:  tar -C /tmp/ -x -z -f /tmp/aarch64-linux-musl-cross.tgz
-      - name: Ensure musl gcc can run
-        run:  /tmp/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc --version
-      - name: Set a different ld for each arch # ugly but there are no working flags to explicitly set the ld to use...
-        run: sudo cp /usr/bin/x86_64-linux-gnu-ld /usr/bin/amd64-ld && sudo cp /tmp/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc /usr/bin/arm64-ld
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
