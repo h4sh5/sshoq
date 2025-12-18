@@ -12,57 +12,22 @@ In a nutshell, SSHOQ uses [QUIC](https://datatracker.ietf.org/doc/html/rfc9000)+
 secure channel establishment and the [HTTP Authorization](https://www.rfc-editor.org/rfc/rfc9110.html#name-authorization) mechanisms for user authentication.
 Among others, SSHOQ allows the following improvements:
 - Significantly faster session establishment
+- The server endpoint can be hidden (by a long URL path)
 - New HTTP authentication methods such as [OAuth 2.0](https://datatracker.ietf.org/doc/html/rfc6749) and [OpenID Connect](https://openid.net/specs/openid-connect-core-1_0.html) in addition to classical SSH authentication
 - Robustness to port scanning attacks: your SSHOQ server can be made **invisible** to other Internet users
 - UDP port forwarding in addition to classical TCP port forwarding
 - All the features allowed by the modern QUIC protocol: including connection migration (soon) and multipath connections
 
-> [!TIP]
-> Quickly want to get started ? Checkout how to [install SSHOQ](#installing-ssh3). You will learn to [setup an SSHOQ server](#deploying-an-sshoq-server) and [use the SSHOQ client](#using-the-ssh3-client).
+SSHOQ implements the common password-based and public-key (RSA and EdDSA/ed25519) authentication methods. It also supports new authentication methods such as OAuth 2.0 and allows logging in to your servers using your Google/Microsoft/Github accounts.
 
-## ⚡ SSHOQ is faster
-Faster for session establishment, not throughput ! SSHOQ offers a significantly faster session establishment than SSHv2. Establishing a new session with SSHv2 can take 5 to 7 network round-trip times, which can easily be noticed by the user. SSHOQ only needs 3 round-trip times. The keystroke latency in a running session is unchanged.
-
-<p align="center">
-<img src="resources/figures/ssh3_100ms_rtt.gif"/>
-<i>SSHOQ (top) VS SSHv2 (bottom) session establishement with a 100ms ping towards the server.</i>
-</p>
-
-## 🔒 SSHOQ security
-While SSHv2 defines its own protocols for user authentication and secure channel establishment, SSHOQ relies on the robust and time-tested mechanisms of TLS 1.3, QUIC and HTTP. These protocols are already extensively used to secure security-critical applications on the Internet such as e-commerce and Internet banking.
-
-SSHOQ already implements the common password-based and public-key (RSA and EdDSA/ed25519) authentication methods. It also supports new authentication methods such as OAuth 2.0 and allows logging in to your servers using your Google/Microsoft/Github accounts.
-
-### 🧪 SSHOQ is still experimental
+### SSHOQ is still experimental
 While SSHOQ shows promise for faster session establishment, it is still at an early proof-of-concept stage. As with any new complex protocol, **expert cryptographic review over an extended timeframe is required before reasonable security conclusions can be made**.
 
 We are developing SSHOQ as an open source project to facilitate community feedback and analysis. However, we **cannot yet endorse its appropriateness for production systems** without further peer review. Please collaborate with us if you have relevant expertise!
 
-### 🥷 Do not deploy the SSHOQ server on your production servers for now
-Given the current prototype state, we advise *testing SSHOQ in sandboxed environments or private networks*. Be aware that making experimental servers directly Internet-accessible could introduce risk before thorough security vetting.
 
-While [hiding](#-your-ssh3-public-server-can-be-hidden) servers behind secret paths has potential benefits, it does not negate the need for rigorous vulnerability analysis before entering production. We are excited by SSHOQ's future possibilities but encourage additional scrutiny first.
+### OpenSSH features implemented
 
-## 🥷 Your SSHOQ public server can be hidden
-Using SSHOQ, you can avoid the usual stress of scanning and dictionary attacks against your SSH server. Similarly to your secret Google Drive documents, your SSHOQ server can be hidden behind a secret link and only answer to authentication attempts that made an HTTP request to this specific link, like the following:
-
-    sshoq-server -bind 192.0.2.0:443 -url-path <my-long-secret>
-
-By replacing `<my-long-secret>` by, let's say, the random value `M3MzkxYWMxMjYxMjc5YzJkODZiMTAyMjU`, your SSHOQ server will only answer to SSHOQ connection attempts made to the URL `https://192.0.2.0:443/M3MzkxYWMxMjYxMjc5YzJkODZiMTAyMjU` and it will respond a `404 Not Found` to other requests. Attackers and crawlers on the Internet can therefore not detect the presence of your SSHOQ server. They will only see a simple web server answering 404 status codes to every request.
-
-**NOTE WELL**: placing your SSHOQ server behind a secret URL may reduce the impact of scanning attacks but will and must *never* replace classical authentication mechanisms. The secret link should only be used to avoid your host to be discovered. Knowing the secret URL should not grant someone access to your server. Use the classical authentication mechanisms described above to protect your server. 
-
-## 💐 SSHOQ is already feature-rich
-SSHOQ provides new feature that could not be provided by the SSHv2 protocol.
-
-### Brand new features
-- **UDP port forwarding**: you can now access your QUIC, DNS, RTP or any UDP-based server that are only reachable from your SSHOQ host.
-UDP packets are forwarded using QUIC datagrams.
-- **X.509 certificates**: you can now use your classical HTTPS certificates to authenticate your SSHOQ server. This mechanism is more secure than the classical SSHv2 host key mechanism. Certificates can be obtained easily using LetsEncrypt for instance.
-- **Hiding** your server behind a secret link.
-- **Keyless** secure user authentication using **OpenID Connect**. You can connect to your SSHOQ server using the SSO of your company or your Google/Github account, and you don't need to copy the public keys of your users anymore.
-
-### Famous OpenSSH features implemented
 This SSHOQ implementation already provides many of the popular features of OpenSSH, so if you are used to OpenSSH, the process of adopting SSHOQ will be smooth. Here is a list of some OpenSSH features that SSHOQ also implements:
 - Parses `~/.ssh/authorized_keys` on the server
 - Certificate-based server authentication
@@ -73,24 +38,37 @@ This SSHOQ implementation already provides many of the popular features of OpenS
 - Proxy jump (see the `-proxy-jump` parameter). If A is an SSHOQ client and B and C are both SSHOQ servers, you can connect from A to C using B as a gateway/proxy. The proxy uses UDP forwarding to forward the QUIC packets from A to C, so B cannot decrypt the traffic A<->C SSHOQ traffic.
 - Parses `~/.ssh/config` on the client and handles the `Hostname`, `User`, `Port` and `IdentityFile` config options (the other options are currently ignored). Also parses a new `UDPProxyJump` that behaves similarly to OpenSSH's `ProxyJump`.
 
-## 🙏 Community support
+## Community support
 Help us progress SSHOQ responsibly! We welcome capable security researchers to review our codebase and provide feedback. Please also connect us with relevant standards bodies to potentially advance SSHOQ through the formal IETF/IRTF processes over time.
 
 With collaborative assistance, we hope to iteratively improve SSHOQ towards safe production readiness. But we cannot credibly make definitive security claims without evidence of extensive expert cryptographic review and adoption by respected security authorities. Let's work together to realize SSHOQ's possibilities!
 
 ## Installing SSHOQ
+
 You can either download the last [release binaries](https://github.com/h4sh5/sshoq/releases),
 [install it using `go install`](#installing-ssh3-and-sshoq-server-using-go-install) or generate these binaries yourself by compiling the code from source.
 
-> [!TIP]
-> SSHOQ is still experimental and is the fruit of a research work. If you are afraid of deploying publicly a new SSHOQ server, you can use the
-> [secret path](#-your-ssh3-public-server-can-be-hidden) feature of SSHOQ to hide it behing a secret URL.
 
 ### Installing ssh3 and sshoq-server using Go install
 ```bash
 go install github.com/h4sh5/sshoq/cmd/...@latest
 ```
 
+### Running with Docker
+
+The docker image is published to the Github Container Registry (GHCR) with github actions workflows. You can simply run the client and server like this:
+
+client
+
+```bash
+docker run --rm -it ghcr.io/h4sh5/sshoq:main sshoq <args>
+```
+
+server
+
+```bash
+docker run --rm -it ghcr.io/h4sh5/sshoq:main sshoq-server <args>
+```
 
 
 ### Compiling SSHOQ from source
@@ -98,25 +76,13 @@ You need a recent [Golang](https://go.dev/dl/) version to do this.
 Downloading the source code and compiling the binaries can be done with the following steps:
 
 ```bash
-git clone https://github.com/h4sh5/sshoq    # clone the repo
+git clone https://github.com/h4sh5/sshoq
 cd sshoq
-go build -o sshoq cmd/sshoq/main.go                        # build the client
-CGO_ENABLED=1 go build -o sshoq-server cmd/sshoq-server/main.go   # build the server, requires having gcc installed
+make
 ```
 
-If you have root/sudo privileges and you want to make ssh3 accessible to all you users,
-you can then directly copy the binaries to `/usr/bin`:
+You will find the built client and server binaries in `bin/`
 
-```bash
-cp sshoq /usr/bin/ && cp sshoq-server /usr/bin
-```
-
-Otherwise, you can simply add the executables to your `PATH` environment variable by adding
-the following line at the end of your `.bashrc` or equivalent:
-
-```bash
-export PATH=$PATH:/path/to/the/sshoq/directory
-```
 
 ## Deploying an SSHOQ server
 Before connecting to your host, you need to deploy an SSHOQ server on it. There is currently
@@ -125,7 +91,7 @@ using `screen` or a similar utility.
 
 
 > [!NOTE]
-> As SSHOQ runs on top of HTTP/3, a server needs an X.509 certificate and its corresponding private key. Public certificates can be generated automatically for your public domain name through Let's Encrypt using the `-generate-public-cert` command-line argument on the server. If you do not want to generate a certificate signed by a real certificate authority or if you don't have any public domain name, you can generate a self-signed one using the `-generate-selfsigned-cert` command-line argument. Self-signed certificates provide you with similar security guarantees to SSHv2's host keys mechanism, with the same security issue: you may be vulnerable to machine-in-the-middle attacks during your first connection to your server. Using real certificates signed by public certificate authorities such as Let's Encrypt avoids this issue.
+> As SSHOQ runs on top of HTTP/3, a server needs an X.509 certificate and its corresponding private key. Public certificates can be generated automatically for your public domain name through Let's Encrypt using the `-generate-public-cert` command-line argument on the server. Alternatively you can generate a self-signed one using the `-generate-selfsigned-cert` command-line argument. Self-signed certificates provide you with similar security guarantees to SSHv2's host keys mechanism, with the same security issue: you may be vulnerable to machine-in-the-middle attacks during your first connection to your server. Using real certificates signed by public certificate authorities such as Let's Encrypt avoids this issue.
 
 
 Here is the usage of the `sshoq-server` executable:
