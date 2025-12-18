@@ -5,6 +5,11 @@ GO_OPTS?=CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS)
 GO_TAGS?=
 TEST_OPTS?=GOOS=$(GOOS) GOARCH=$(GOARCH)
 
+default: build
+
+clean:
+	rm bin/*
+
 lint:
 	go fmt ./...
 	# FIXME: fix vet errors before turning this on
@@ -34,8 +39,8 @@ install:
 
 build: client server
 
-client:
+client: ./cmd/sshoq ./client/  message resources util internal auth cmd/plugin_endpoint
 	$(GO_OPTS) go build -tags "$(GO_TAGS)" $(BUILD_FLAGS) -o bin/client ./cmd/sshoq/
 
-server:
+server: ./cmd/sshoq-server  message server_auth resources util internal auth cmd/plugin_endpoint 
 	$(GO_OPTS) go build -tags "$(GO_TAGS)" $(BUILD_FLAGS) -o bin/server ./cmd/sshoq-server/
