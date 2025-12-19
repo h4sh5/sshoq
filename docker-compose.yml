@@ -1,0 +1,11 @@
+services:
+  sshoq-server:
+    image: ghcr.io/h4sh5/sshoq:main
+    ports:
+      - 443:443/udp
+    entrypoint: sshoq-server -generate-selfsigned-cert -url-path /my-server
+    volumes:
+      # must create a ssh directory with an authorized_keys file inside for authorized public keys
+      - ./ssh:/root/.ssh
+      # mount any additional volumes you'd like the server to have access to here
+      # - /home:/home
