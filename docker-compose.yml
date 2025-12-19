@@ -1,6 +1,6 @@
 services:
   sshoq-server:
-    image: ghcr.io/h4sh5/sshoq:main
+    image: ghcr.io/h4sh5/sshoq:latest
     ports:
       - 443:443/udp
     entrypoint: sshoq-server -generate-selfsigned-cert -url-path /my-server
