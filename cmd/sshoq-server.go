@@ -1106,33 +1106,33 @@ func ServerMain() int {
 		return -1
 	} else if *generateSelfSignedCert {
 		if certPathExists {
-			fmt.Fprintf(os.Stderr, "asked for generating a certificate but the \"%s\" file already exists\n", *certPath)
+			log.Warn().Msgf("Warning: asked for generating a certificate but the \"%s\" file already exists; new cert will only be generated if both path and key do not exist\n", *certPath)
 		}
 		if keyPathExists {
-			fmt.Fprintf(os.Stderr, "asked for generating a private key but the \"%s\" file already exists\n", *keyPath)
+			log.Warn().Msgf("Warning: asked for generating a private key but the \"%s\" file already exists; new key will only be generated if both path and key do not exist\n", *keyPath)
 		}
-		if certPathExists || keyPathExists {
-			return -1
-		}
-		pubkey, privkey, err := util.GenerateKey()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "could not generate private key: %s\n", err)
-			return -1
-		}
-		cert, err := util.GenerateCert(privkey)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "could not generate certificate: %s\n", err)
-			return -1
-		}
+		if !(certPathExists && keyPathExists) {
+			pubkey, privkey, err := util.GenerateKey()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "could not generate private key: %s\n", err)
+				return -1
+			}
+			cert, err := util.GenerateCert(privkey)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "could not generate certificate: %s\n", err)
+				return -1
+			}
 
-		err = util.DumpCertAndKeyToFiles(cert, pubkey, privkey, *certPath, *keyPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "could not save certificate and key to files: %s\n", err)
-			return -1
-		}
+			err = util.DumpCertAndKeyToFiles(cert, pubkey, privkey, *certPath, *keyPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "could not save certificate and key to files: %s\n", err)
+				return -1
+			}
 
-		certPathExists = true
-		keyPathExists = true
+			certPathExists = true
+			keyPathExists = true
+		}
+		
 	}
 
 	if *verbose {
