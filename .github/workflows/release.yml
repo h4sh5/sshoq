@@ -1,7 +1,7 @@
 # This workflow will build a golang project
 # For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-go
 
-name: Build release
+name: Create release binaries
 
 on:
   workflow_dispatch:
@@ -21,8 +21,9 @@ permissions:
 jobs:
   gorelease:
     strategy:
-        matrix:
-          variant: [ { imgname: ubuntu-latest, releaserfile: linux-amd64 }, { imgname: ubuntu-latest, releaserfile: linux-arm64 }, { imgname: ubuntu-latest, releaserfile: unix }, { imgname: ubuntu-latest, releaserfile: client-only-windows } ]
+      fail-fast: false
+      matrix:
+        variant: [ { imgname: ubuntu-latest, releaserfile: linux-amd64 }, { imgname: ubuntu-latest, releaserfile: linux-arm64 }, { imgname: ubuntu-latest, releaserfile: unix }, { imgname: ubuntu-latest, releaserfile: client-only-windows } ]
     runs-on: ${{ matrix.variant.imgname }}
     steps:
       - name: Checkout
