@@ -17,9 +17,9 @@ before:
 
 builds:
   - 
-    id: "ssh3"
-    main: ./cmd/ssh3/main.go
-    binary: ssh3
+    id: "sshoq"
+    main: ./cmd/sshoq/main.go
+    binary: sshoq
     goos:
       - darwin
       - freebsd
@@ -39,9 +39,9 @@ builds:
       - netgo
       - static_build
   -
-    id: "ssh3-server"
-    main: ./cmd/ssh3-server/main.go
-    binary: ssh3-server
+    id: "sshoq-server"
+    main: ./cmd/sshoq-server/main.go
+    binary: sshoq-server
     goos:
       - darwin
       - freebsd

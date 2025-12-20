@@ -17,9 +17,9 @@ before:
 
 builds:
   - 
-    id: "ssh3"
-    main: ./cmd/ssh3/main.go
-    binary: ssh3
+    id: "sshoq"
+    main: ./cmd/sshoq/main.go
+    binary: sshoq
     goos:
       - windows
     goarch:
