@@ -384,6 +384,7 @@ func ClientMain() int {
 	verbose := flag.Bool("v", false, "if set, enable verbose mode")
 	displayVersion := flag.Bool("version", false, "if set, displays the software version on standard output and exit")
 	noPKCE := flag.Bool("no-pkce", false, "if set perform PKCE challenge-response with oidc")
+	forcePTYAlloc := flag.Bool("force-pty", false, "if set, forces PTY allocation before command execution. Useful for interactive programs.")
 	forwardSSHAgent := flag.Bool("forward-agent", false, "if set, forwards ssh agent to be used with sshv2 connections on the remote host")
 	forwardUDP := flag.String("forward-udp", "", "if set, take a localport/remoteip@remoteport forwarding localhost@localport towards remoteip@remoteport")
 	forwardTCP := flag.String("forward-tcp", "", "if set, take a localport/remoteip@remoteport forwarding localhost@localport towards remoteip@remoteport")
@@ -878,7 +879,7 @@ func ClientMain() int {
 
 	}
 
-	err = c.RunSession(tty, *forwardSSHAgent, command...)
+	err = c.RunSession(tty, *forwardSSHAgent, *forcePTYAlloc, command...)
 	switch sessionError := err.(type) {
 	case client.ExitStatus:
 		log.Info().Msgf("the process exited with status %d", sessionError.StatusCode)

@@ -972,7 +972,7 @@ func readFirstMsg(ctx context.Context, ch ssh3.Channel) (byte, []byte, error) {
 	return 0, nil, fmt.Errorf("channel doesn't expose a message-read method")
 }
 
-func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, command ...string) error {
+func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, forcePTYAlloc bool, command ...string) error {
 
 	ctx := c.Context()
 
@@ -1051,16 +1051,16 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, command ...strin
 		}()
 	}
 
-	if len(command) == 0 {
-		// avoid requesting a pty on the other side if stdin is not a pty
-		// similar behaviour to OpenSSH
-		isATTY := term.IsTerminal(int(tty.Fd()))
+	isATTY := term.IsTerminal(int(tty.Fd()))
+	windowSize, err := winsize.GetWinsize(tty)
+	if err != nil {
+		log.Warn().Msgf("could not get window size: %+v", err)
+	}
+	hasWinSize := err == nil
 
-		windowSize, err := winsize.GetWinsize(tty)
-		if err != nil {
-			log.Warn().Msgf("could not get window size: %+v", err)
-		}
-		hasWinSize := err == nil
+	if len(command) == 0 || forcePTYAlloc {
+		// avoid requesting a pty on the other side if stdin is not a pty (unless -force-pty specified)
+		// similar behaviour to OpenSSH
 		if isATTY && hasWinSize {
 			err = channel.SendRequest(
 				&ssh3Messages.ChannelRequestMessage{
@@ -1081,6 +1081,9 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, command ...strin
 			}
 			log.Debug().Msgf("sent pty request for session")
 		}
+	}
+
+	if len(command) == 0 {
 
 		err = channel.SendRequest(
 			&ssh3Messages.ChannelRequestMessage{
@@ -1105,6 +1108,8 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, command ...strin
 			}
 		}
 	} else {
+
+
 		channel.SendRequest(
 			&ssh3Messages.ChannelRequestMessage{
 				WantReply: true,
