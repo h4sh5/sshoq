@@ -65,7 +65,7 @@ func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog 
 	if runtime.GOOS == "darwin" {
 		// on MacOS, the don't fragment (DF) bit is not set on dual-stack socket ("udp")
 		// This causes quic-go to not perform MTU discovery which can prevent the proxy jump from working at all.
-		// cf: - https://github.com/h4sh5/sshoq/issues/129
+		// cf: - https://github.com/francoismichel/ssh3/issues/129
 		//     - https://github.com/quic-go/quic-go/issues/3793
 		//
 		// The fix here is to not use a dual-stack socket on MacOS and detect the IP version from the resolved peer address.
