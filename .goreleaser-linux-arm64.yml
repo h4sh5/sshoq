@@ -34,20 +34,15 @@ builds:
     main: ./cmd/sshoq-server/main.go
     binary: sshoq-server
     env:
-      - CC=/tmp/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc
       - CGO_ENABLED=1
       - CGO_CFLAGS=
     ldflags:
-      - -extld=/tmp/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc
       - -extldflags=-static
       - -linkmode=external
     goos:
       - linux
     goarch:
       - arm64
-    hooks:
-      pre:
-        - sudo cp /usr/bin/{{ .Arch }}-ld /usr/bin/ld
     tags:
       - osusergo
       - netgo

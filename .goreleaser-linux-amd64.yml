@@ -35,24 +35,17 @@ builds:
     binary: sshoq-server
     env:
       - CGO_ENABLED=1
-      - CC=/usr/local/musl/bin/musl-gcc
-      - CGO_CFLAGS=-I/usr/local/musl/include/
     goos:
       - linux
     goarch:
       - amd64
-    hooks:
-      pre:
-        - sudo cp /usr/bin/{{ .Arch }}-ld /usr/bin/ld
     overrides:
       - goos: linux
-        goarch: arm64
+        goarch: amd64
         env:
-          - CC=/tmp/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc
           - CGO_ENABLED=1
           - CGO_CFLAGS=
         ldflags:
-          - -extld=/tmp/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc
           - -extldflags=-static
           - -linkmode=external
     tags:
