@@ -36,6 +36,7 @@ integration-tests:
 install:
 	$(GO_OPTS) go install $(BUILDFLAGS) ./cmd/sshoq
 	$(GO_OPTS) go install $(BUILDFLAGS) ./cmd/sshoq-server
+	echo You might want to copy sshoq-server into /usr/sbin/ if you are running it via systemd
 
 build: client server
 

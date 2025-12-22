@@ -133,6 +133,24 @@ If you have existing certificates and keys, you can run the server as follows to
 > [!NOTE]
 > Similarly to OpenSSH, the server must be run with root priviledges to log in as other users.
 
+
+### Deploying with systemd
+
+An example systemd file has been provided at [sshoq.service](systemd/sshoq.service) - the command line arguments should be changed to fit your configuration, but overall it just works.
+
+
+The sshoq-server binary should be copied to /usr/sbin/ for the example systemd configuration to work.
+
+Copy the sshoq.service file to `/etc/systemd/system/sshoq.service` then run:
+
+```sh
+sudo systemctl enable sshoq
+sudo systemctl start sshoq
+sudo systemctl status sshoq
+```
+
+That should install the service and start it and show the status.
+
 ### Authorized keys and authorized identities
 By default, the SSHOQ server will look for identities in the `~/.ssh/authorized_keys` and `~/.ssh3/authorized_identities` files for each user.
 `~/.ssh3/authorized_identities` allows new identities such as OpenID Connect (`oidc`) discussed [below](#openid-connect-authentication-still-experimental).
