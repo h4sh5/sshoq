@@ -134,6 +134,10 @@ If you have existing certificates and keys, you can run the server as follows to
 > Similarly to OpenSSH, the server must be run with root priviledges to log in as other users.
 
 
+### Deploying with docker compose
+
+It's probably safer to deploy with docker compose for now. Use the docker-compose.yml provided.
+
 ### Deploying with systemd
 
 An example systemd file has been provided at [sshoq.service](systemd/sshoq.service) - the command line arguments should be changed to fit your configuration, but overall it just works.
