@@ -35,19 +35,27 @@ builds:
     binary: sshoq-server
     env:
       - CGO_ENABLED=1
-      - CGO_CFLAGS=
-    ldflags:
-      - -extldflags=-static
-      - -linkmode=external
     goos:
       - linux
     goarch:
       - arm64
+    overrides:
+      - goos: linux
+        goarch: arm64
+        env:
+          - CGO_ENABLED=1
+          - CGO_CFLAGS=
+        ldflags:
+          - -extldflags=-static
+          - -linkmode=external
     tags:
       - osusergo
       - netgo
       - static_build
       - feature
+    ldflags:
+      - -extldflags=-static
+      - -linkmode=external
 
 archives:
   - format: tar.gz
