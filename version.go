@@ -26,6 +26,7 @@ const SOFTWARE_IMPLEMENTATION_NAME string = "h4sh5/sshoq"
 const SOFTWARE_MAJOR int = 0
 const SOFTWARE_MINOR int = 1
 const SOFTWARE_PATCH int = 10
+const DEFAULT_URL_PATH string = "/ssh3-term"
 
 const SOFTWARE_RC int = 0
 

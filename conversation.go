@@ -120,6 +120,10 @@ func (c *Conversation) EstablishClientConversation(req *http.Request, roundTripp
 			return rsp, Version{}, err
 		}
 
+		if rsp.StatusCode == http.StatusNotFound {
+			return rsp, Version{}, util.OtherHTTPError{StatusCode: 404}
+		}
+
 		log.Debug().Msgf("got response with %s status code", rsp.Status)
 
 		serverVersionStr := rsp.Header.Get("Server")

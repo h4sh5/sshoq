@@ -286,8 +286,11 @@ func getConfigOptions(hostUrl *url.URL, sshConfig *ssh_config.Config, optionPars
 	}
 
 	urlPath := hostUrl.Path
-	if urlPath == "" {
+	if urlPath == "" || urlPath == "/" {
 		urlPath = configUrlPath
+	}
+	if urlPath == "" || urlPath == "/" {
+		urlPath = ssh3.DEFAULT_URL_PATH
 	}
 	return client_config.NewConfig(username, hostname, port, urlPath, configAuthMethods, pluginOptions)
 }
