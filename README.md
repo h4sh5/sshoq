@@ -4,19 +4,16 @@ This repo is a fork of https://github.com/francoismichel/ssh3 as the original re
 
 The renaming to "SSHOQ" (SSH Over QUIC) which is a better, easily pronounceable name that specifies that this is different software to SSH, not a next version of SSH.
 
-The renaming of some source code has already begun, but for stability reasons "ssh3" has not been completely ripped out of the code yet.
-
-**SSHOQ is a fork** of SSH3, is a complete revisit of the SSH protocol, mapping its semantics on top of the HTTP mechanisms. It comes from our research work and we (researchers) recently proposed it as an [Internet-Draft](https://www.ietf.org/how/ids/) ([draft-michel-remote-terminal-http3-00](https://datatracker.ietf.org/doc/draft-michel-remote-terminal-http3/)).
-
 In a nutshell, SSHOQ uses [QUIC](https://datatracker.ietf.org/doc/html/rfc9000)+[TLS1.3](https://datatracker.ietf.org/doc/html/rfc8446) for
 secure channel establishment and the [HTTP Authorization](https://www.rfc-editor.org/rfc/rfc9110.html#name-authorization) mechanisms for user authentication.
-Among others, SSHOQ allows the following improvements:
-- Significantly faster session establishment
-- The server endpoint can be hidden (by a long URL path)
+
+Notable features:
+
+- Significantly faster session establishment than SSH
+- The server endpoint can be hidden (by a long URL path), meaning less bruteforce attacks
 - New HTTP authentication methods such as [OAuth 2.0](https://datatracker.ietf.org/doc/html/rfc6749) and [OpenID Connect](https://openid.net/specs/openid-connect-core-1_0.html) in addition to classical SSH authentication
-- Robustness to port scanning attacks: your SSHOQ server can be made **invisible** to other Internet users
+- Invisible to port scanning attacks due to UDP
 - UDP port forwarding in addition to classical TCP port forwarding
-- All the features allowed by the modern QUIC protocol: including connection migration (soon) and multipath connections
 
 SSHOQ implements the common password-based and public-key (RSA and EdDSA/ed25519) authentication methods. It also supports new authentication methods such as OAuth 2.0 and allows logging in to your servers using your Google/Microsoft/Github accounts.
 
@@ -24,24 +21,6 @@ SSHOQ implements the common password-based and public-key (RSA and EdDSA/ed25519
 While SSHOQ shows promise for faster session establishment, it is still at an early proof-of-concept stage. As with any new complex protocol, **expert cryptographic review over an extended timeframe is required before reasonable security conclusions can be made**.
 
 We are developing SSHOQ as an open source project to facilitate community feedback and analysis. However, we **cannot yet endorse its appropriateness for production systems** without further peer review. Please collaborate with us if you have relevant expertise!
-
-
-### OpenSSH features implemented
-
-This SSHOQ implementation already provides many of the popular features of OpenSSH, so if you are used to OpenSSH, the process of adopting SSHOQ will be smooth. Here is a list of some OpenSSH features that SSHOQ also implements:
-- Parses `~/.ssh/authorized_keys` on the server
-- Certificate-based server authentication
-- `known_hosts` mechanism when X.509 certificates are not used.
-- Automatically using the `ssh-agent` for public key authentication
-- SSH agent forwarding to use your local keys on your remote server
-- Direct TCP port forwarding (reverse port forwarding will be implemented in the future)
-- Proxy jump (see the `-proxy-jump` parameter). If A is an SSHOQ client and B and C are both SSHOQ servers, you can connect from A to C using B as a gateway/proxy. The proxy uses UDP forwarding to forward the QUIC packets from A to C, so B cannot decrypt the traffic A<->C SSHOQ traffic.
-- Parses `~/.ssh/config` on the client and handles the `Hostname`, `User`, `Port` and `IdentityFile` config options (the other options are currently ignored). Also parses a new `UDPProxyJump` that behaves similarly to OpenSSH's `ProxyJump`.
-
-## Community support
-Help us progress SSHOQ responsibly! We welcome capable security researchers to review our codebase and provide feedback. Please also connect us with relevant standards bodies to potentially advance SSHOQ through the formal IETF/IRTF processes over time.
-
-With collaborative assistance, we hope to iteratively improve SSHOQ towards safe production readiness. But we cannot credibly make definitive security claims without evidence of extensive expert cryptographic review and adoption by respected security authorities. Let's work together to realize SSHOQ's possibilities!
 
 ## Installing SSHOQ
 
@@ -143,7 +122,7 @@ Popular key types such as `rsa`, `ed25519` and keys in the OpenSSH format can be
 Once you have an SSHOQ server running, you can connect to it using the SSHOQ client similarly to what
 you did with your classical SSHv2 tool.
 
-Biggest difference is that the URL path has to match between the client and the server. This prevents bruteforcing attacks when attackers don't know what the url path is.
+Biggest difference is that the **URL path has to match between the client and the server**. This prevents bruteforcing attacks when attackers don't know what the url path is.
 
 ### Private-key authentication
 You can connect to your SSHOQ server at my-server.example.org listening on `/my-secret-path` using the private key located in `~/.ssh/id_rsa` with the following command:
