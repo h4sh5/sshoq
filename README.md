@@ -85,42 +85,23 @@ You will find the built client and server binaries in `bin/`
 
 
 ## Deploying an SSHOQ server
+
+> [!NOTE]
+> Similarly to OpenSSH, the server must be run with **root priviledges** to log in as other users.
+
+
 Before connecting to your host, you need to deploy an SSHOQ server on it. There is currently
 no SSHOQ daemon, so right now, you will have to run the `sshoq-server` executable in background
 using `screen` or a similar utility.
 
 
 > [!NOTE]
-> As SSHOQ runs on top of HTTP/3, a server needs an X.509 certificate and its corresponding private key. Public certificates can be generated automatically for your public domain name through Let's Encrypt using the `-generate-public-cert` command-line argument on the server. Alternatively you can generate a self-signed one using the `-generate-selfsigned-cert` command-line argument. Self-signed certificates provide you with similar security guarantees to SSHv2's host keys mechanism, with the same security issue: you may be vulnerable to machine-in-the-middle attacks during your first connection to your server. Using real certificates signed by public certificate authorities such as Let's Encrypt avoids this issue.
-
-
-Here is the usage of the `sshoq-server` executable:
-
-```
-Usage of ./sshoq-server:
-  -bind string
-        the address:port pair to listen to, e.g. 0.0.0.0:443 (default "[::]:443")
-  -cert string
-        the filename of the server certificate (or fullchain) (default "./cert.pem")
-  -key string
-        the filename of the certificate private key (default "./priv.key")
-  -enable-password-login
-        if set, enable password authentication (disabled by default)
-  -generate-public-cert value
-        Automatically produce and use a valid public certificate usingLet's Encrypt for the provided domain name. The flag can be used several times to generate several certificates.If certificates have already been generated previously using this flag, they will simply be reused without being regenerated. The public certificates are automatically renewed as long as the server is running. Automatically-generated IP public certificates are not available yet.
-  -generate-selfsigned-cert
-        if set, generates a self-self-signed cerificate and key that will be stored at the paths indicated by the -cert and -key args (they must not already exist)
-  -url-path string
-        the secret URL path on which the ssh3 server listens (default "/ssh3-term")
-  -v    verbose mode, if set
-  -version
-        if set, displays the software version on standard output and exit
-```
+> As SSHOQ runs on top of HTTP/3, a server needs an X.509 certificate and its corresponding private key. Public certificates can be generated automatically for your public domain name through Let's Encrypt using the `-generate-public-cert` command-line argument on the server. Alternatively you can generate a self-signed one using the `-generate-selfsigned-cert` command-line argument. Self-signed certificates provide you with similar security guarantees to SSHv2's host keys mechanism, with the same security issue of potential MITM attacks during your first connection.
 
 The following command starts a public SSHOQ server on port 443 with a valid Let's Encrypt public certificate
 for domain `my-domain.example.org` and answers to new sessions requests querying the `/ssh3` URL path:
 
-    sshoq-server -generate-public-cert my-domain.example.org -url-path /ssh3
+    sudo sshoq-server -generate-public-cert my-domain.example.org -url-path /ssh3
 
 If you don't have a public domain name (i.e. only an IP address), you can either use an existing certificate
 for your IP address using the `-cert` and `-key` arguments or generate a self-signed certificate using the
@@ -128,10 +109,8 @@ for your IP address using the `-cert` and `-key` arguments or generate a self-si
 
 If you have existing certificates and keys, you can run the server as follows to use them=
 
-    sshoq-server -cert /path/to/cert/or/fullchain -key /path/to/cert/private/key -url-path /ssh3
+    sudo sshoq-server -cert /path/to/cert/or/fullchain -key /path/to/cert/private/key -url-path /ssh3
 
-> [!NOTE]
-> Similarly to OpenSSH, the server must be run with root priviledges to log in as other users.
 
 
 ### Deploying with docker compose
@@ -164,36 +143,7 @@ Popular key types such as `rsa`, `ed25519` and keys in the OpenSSH format can be
 Once you have an SSHOQ server running, you can connect to it using the SSHOQ client similarly to what
 you did with your classical SSHv2 tool.
 
-Here is the usage of the `ssh3` executable:
-
-```
-Usage of ssh3:
-  -pubkey-for-agent string
-        if set, use an agent key whose public key matches the one in the specified path
-  -privkey string
-        private key file
-  -use-password
-        if set, do classical password authentication
-  -forward-agent
-        if set, forwards ssh agent to be used with sshv2 connections on the remote host
-  -forward-tcp string
-        if set, take a localport/remoteip@remoteport forwarding localhost@localport towards remoteip@remoteport
-  -forward-udp string
-        if set, take a localport/remoteip@remoteport forwarding localhost@localport towards remoteip@remoteport
-  -proxy-jump string
-    	if set, performs a proxy jump using the specified remote host as proxy
-  -insecure
-        if set, skip server certificate verification
-  -keylog string
-        Write QUIC TLS keys and master secret in the specified keylog file: only for debugging purpose
-  -use-oidc string
-        if set, force the use of OpenID Connect with the specified issuer url as parameter
-  -oidc-config string
-        OpenID Connect json config file containing the "client_id" and "client_secret" fields needed for most identity providers
-  -do-pkce
-        if set, perform PKCE challenge-response with oidc
-  -v    if set, enable verbose mode
-```
+Biggest difference is that the URL path has to match between the client and the server. This prevents bruteforcing attacks when attackers don't know what the url path is.
 
 ### Private-key authentication
 You can connect to your SSHOQ server at my-server.example.org listening on `/my-secret-path` using the private key located in `~/.ssh/id_rsa` with the following command:
