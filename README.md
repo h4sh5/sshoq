@@ -17,11 +17,6 @@ Notable features:
 
 SSHOQ implements the common password-based and public-key (RSA and EdDSA/ed25519) authentication methods. It also supports new authentication methods such as OAuth 2.0 and allows logging in to your servers using your Google/Microsoft/Github accounts.
 
-### SSHOQ is still experimental
-While SSHOQ shows promise for faster session establishment, it is still at an early proof-of-concept stage. As with any new complex protocol, **expert cryptographic review over an extended timeframe is required before reasonable security conclusions can be made**.
-
-We are developing SSHOQ as an open source project to facilitate community feedback and analysis. However, we **cannot yet endorse its appropriateness for production systems** without further peer review. Please collaborate with us if you have relevant expertise!
-
 ## Installing SSHOQ
 
 You can either download the last [release binaries](https://github.com/h4sh5/sshoq/releases),
@@ -263,5 +258,14 @@ Similarly for UDP:
 `sshoq -reverse-udp 8080/127.0.0.1@3000/127.0.0.1 user@example.com/secret-path`
 
 Warning: Reverse UDP port forwarding is not well tested and may not be working fully.
+
+
+
+## SSHOQ is still experimental
+While SSHOQ shows promise for faster session establishment, it is still at an early proof-of-concept stage. As with any new complex protocol, **expert cryptographic review over an extended timeframe is required before reasonable security conclusions can be made**.
+
+We are developing SSHOQ as an open source project to facilitate community feedback and analysis. However, we **cannot yet endorse its appropriateness for production systems** without further peer review. Please collaborate with us if you have relevant expertise!
+
+
 
 
