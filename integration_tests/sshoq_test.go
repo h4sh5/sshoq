@@ -164,7 +164,7 @@ var _ = Describe("Testing the sshoq cli", func() {
 				args := []string{
 					"-v",
 					"-insecure",
-					"-privkey", privKeyPath,
+					"-i", privKeyPath,
 				}
 				args = append(args, additionalArgs...)
 				args = append(args, fmt.Sprintf("%s@%s%s", username, bind, DEFAULT_URL_PATH))
