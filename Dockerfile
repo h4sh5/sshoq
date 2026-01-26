@@ -1,7 +1,8 @@
 FROM golang:1.25-trixie AS build
 COPY / /src
 WORKDIR /src
-RUN make
+RUN make clean
+RUN make -B
 
 FROM debian:trixie-slim
 COPY --from=build /src/bin/sshoq /bin/sshoq
