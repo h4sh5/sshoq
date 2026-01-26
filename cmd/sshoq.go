@@ -287,7 +287,13 @@ func getConfigOptions(hostUrl *url.URL, sshConfig *ssh_config.Config, optionPars
 
 	urlPath := hostUrl.Path
 	if urlPath == "" {
-		urlPath = configUrlPath
+		if configUrlPath != "" {
+			urlPath = configUrlPath
+		} else {
+			// default path 
+			urlPath = "sshoq-server"
+		}
+		
 	}
 	return client_config.NewConfig(username, hostname, port, urlPath, configAuthMethods, pluginOptions)
 }
