@@ -61,21 +61,16 @@ You will find the built client and server binaries in `bin/`
 ## Deploying an SSHOQ server
 
 > [!NOTE]
-> Similarly to OpenSSH, the server must be run with **root priviledges** to log in as other users.
-
-
-Before connecting to your host, you need to deploy an SSHOQ server on it. There is currently
-no SSHOQ daemon, so right now, you will have to run the `sshoq-server` executable in background
-using `screen` or a similar utility.
+> SSHOQ can be run without root in single-user mode, but the server must be run with **root priviledges** to login as other users
 
 
 > [!NOTE]
 > As SSHOQ runs on top of HTTP/3, a server needs an X.509 certificate and its corresponding private key. Public certificates can be generated automatically for your public domain name through Let's Encrypt using the `-generate-public-cert` command-line argument on the server. Alternatively you can generate a self-signed one using the `-generate-selfsigned-cert` command-line argument. Self-signed certificates provide you with similar security guarantees to SSHv2's host keys mechanism, with the same security issue of potential MITM attacks during your first connection.
 
 The following command starts a public SSHOQ server on port 443 with a valid Let's Encrypt public certificate
-for domain `my-domain.example.org` and answers to new sessions requests querying the `/ssh3` URL path:
+for domain `my-domain.example.org` and answers to new sessions requests querying the `/secret-sshoq-server` URL path:
 
-    sudo sshoq-server -generate-public-cert my-domain.example.org -url-path /ssh3
+    sudo sshoq-server -generate-public-cert my-domain.example.org -url-path /secret-sshoq-server
 
 If you don't have a public domain name (i.e. only an IP address), you can either use an existing certificate
 for your IP address using the `-cert` and `-key` arguments or generate a self-signed certificate using the
@@ -83,9 +78,13 @@ for your IP address using the `-cert` and `-key` arguments or generate a self-si
 
 If you have existing certificates and keys, you can run the server as follows to use them=
 
-    sudo sshoq-server -cert /path/to/cert/or/fullchain -key /path/to/cert/private/key -url-path /ssh3
+    sudo sshoq-server -cert /path/to/cert/or/fullchain -key /path/to/cert/private/key -url-path /secret-sshoq-server
 
+Deploy on a different address and port:
 
+`sshoq-server -bind 0.0.0.0:8443 -url-path /secret-sshoq-server`
+
+`sshoq-server -bind 127.0.0.1:8443 -url-path /secret-sshoq-server`
 
 ### Deploying with docker compose
 
@@ -123,6 +122,12 @@ Biggest difference is that the **URL path has to match between the client and th
 You can connect to your SSHOQ server at my-server.example.org listening on `/my-secret-path` using the private key located in `~/.ssh/id_rsa` with the following command:
 
       sshoq -i ~/.ssh/id_rsa username@my-server.example.org/my-secret-path
+
+### Alternate port
+
+Put the alternative port in the URL like so:
+
+`sshoq -i ~/.ssh/id_rsa username@my-server.example.org:8443/my-secret-path`
 
 ### Agent-based private key authentication
 The SSHOQ client works with the OpenSSH agent and uses the classical `SSH_AUTH_SOCK` environment variable to
