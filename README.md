@@ -122,14 +122,14 @@ Biggest difference is that the **URL path has to match between the client and th
 ### Private-key authentication
 You can connect to your SSHOQ server at my-server.example.org listening on `/my-secret-path` using the private key located in `~/.ssh/id_rsa` with the following command:
 
-      sshoq -privkey ~/.ssh/id_rsa username@my-server.example.org/my-secret-path
+      sshoq -i ~/.ssh/id_rsa username@my-server.example.org/my-secret-path
 
 ### Agent-based private key authentication
 The SSHOQ client works with the OpenSSH agent and uses the classical `SSH_AUTH_SOCK` environment variable to
 communicate with this agent. Similarly to OpenSSH, SSHOQ will list the keys provided by the SSH agent
 and connect using the first key listen by the agent by default.
 If you want to specify a specific key to use with the agent, you can either specify the private key
-directly with the `-privkey` argument like above, or specify the corresponding public key using the
+directly with the `-i` argument like above, or specify the corresponding public key using the
 `-pubkey-for-agent` argument. This allows you to authenticate in situations where only the agent has
 a direct access to the private key but you only have access to the public key.
 
@@ -209,7 +209,7 @@ For example, this is how you can use it with [SSHFS](https://github.com/libfuse/
 open a session with tcp local port forwarding (1234 to 1234)
 
 ```
-sshoq -forward-tcp 1234/127.0.0.1@1234/127.0.0.1  -privkey ~/.ssh/id_rsa -insecure user@192.168.1.2/ssh3-term
+sshoq -forward-tcp 1234/127.0.0.1@1234/127.0.0.1  -i ~/.ssh/id_rsa -insecure user@192.168.1.2/ssh3-term
 ```
 
 Then open a sftp-server listener over a localhost port **inside sshoq session** (openssh must be installed for the sftp-server binary to be available, and for the network server use ncat or socat):
