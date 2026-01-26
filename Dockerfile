@@ -4,5 +4,5 @@ WORKDIR /src
 RUN make
 
 FROM debian:trixie-slim
-COPY --from=build /src/bin/client /bin/sshoq
-COPY --from=build /src/bin/server /bin/sshoq-server
+COPY --from=build /src/bin/sshoq /bin/sshoq
+COPY --from=build /src/bin/sshoq-server /bin/sshoq-server

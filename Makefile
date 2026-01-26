@@ -41,7 +41,7 @@ install:
 build: client server
 
 client: ./cmd/sshoq ./client/  message resources util internal auth cmd/plugin_endpoint
-	$(GO_OPTS) go build -tags "$(GO_TAGS)" $(BUILD_FLAGS) -o bin/client ./cmd/sshoq/
+	$(GO_OPTS) go build -tags "$(GO_TAGS)" $(BUILD_FLAGS) -o bin/sshoq ./cmd/sshoq/
 
 server: ./cmd/sshoq-server  message server_auth resources util internal auth cmd/plugin_endpoint 
-	$(GO_OPTS) go build -tags "$(GO_TAGS)" $(BUILD_FLAGS) -o bin/server ./cmd/sshoq-server/
+	$(GO_OPTS) go build -tags "$(GO_TAGS)" $(BUILD_FLAGS) -o bin/sshoq-server ./cmd/sshoq-server/
