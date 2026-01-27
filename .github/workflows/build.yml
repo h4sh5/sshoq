@@ -93,7 +93,7 @@ jobs:
         run: go get ./...
       - name: Build Binaries
         run:
-          make -e client && make -e server
+          make
         env:
           GOOS: ${{matrix.goos}}
           GOARCH: ${{matrix.goarch}}
@@ -128,7 +128,7 @@ jobs:
       #     git diff --exit-code
       - name: Build Binaries
         run:
-          make -e client && make -e server
+          make -e
         env:
           GOOS: ${{matrix.goos}}
           GOARCH: ${{matrix.goarch}}
