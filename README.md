@@ -23,7 +23,7 @@ You can either download the last [release binaries](https://github.com/h4sh5/ssh
 [install it using `go install`](#installing-ssh3-and-sshoq-server-using-go-install) or generate these binaries yourself by compiling the code from source.
 
 
-### Installing ssh3 and sshoq-server using Go install
+### Installing sshoq and sshoq-server using Go install
 ```bash
 go install github.com/h4sh5/sshoq/cmd/...@latest
 ```
