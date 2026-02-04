@@ -1,7 +1,6 @@
 FROM golang:1.25-trixie AS build
 COPY / /src
 WORKDIR /src
-RUN make clean
 RUN make -B
 
 FROM debian:trixie-slim
