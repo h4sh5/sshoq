@@ -209,27 +209,44 @@ func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog 
 
 func parseAddrPort(addrPort string) (localIP net.IP, localPort int, remoteIP net.IP, remotePort int, err error) {
 	array := strings.Split(addrPort, "@")
-	subarray := strings.Split(array[0], "/")
-	localIP = net.ParseIP(subarray[1])
+
+	if len(array) < 3 {
+		return nil, 0, nil, 0, fmt.Errorf("Syntax incorrect for port forwarding. Use [bindip]:port:ip:port (bindip is optional), same as openssh")
+	}
+	localIPStr := "127.0.0.1" // always default to localhost if not specified
+	remoteIPStr := "127.0.0.1"
+	localPortStr := "0"
+	remotePortStr := "0"
+	if len(array) == 4 {
+		localIPStr = array[0]
+		localPortStr = array[1]
+		remoteIPStr = array[2]
+		remotePortStr = array[3]
+	} else if len(array) == 3 {
+		localPortStr = array[0]
+		remoteIPStr = array[1]
+		remotePortStr = array[2]
+	}
+
+	localIP = net.ParseIP(localIPStr)
 	if localIP == nil {
-		return nil, 0, nil, 0, fmt.Errorf("could not parse IP %s", subarray[1])
+		return nil, 0, nil, 0, fmt.Errorf("could not parse IP %s", localIPStr)
 	}
-	localPort, err = strconv.Atoi(subarray[0])
+	localPort, err = strconv.Atoi(localPortStr)
 	if err != nil {
-		return nil, 0, nil, 0, fmt.Errorf("could not convert %s to int: %s", subarray[0], err)
+		return nil, 0, nil, 0, fmt.Errorf("could not convert %s to int: %s", localPortStr, err)
 	} else if localPort > 0xFFFF {
-		return nil, 0, nil, 0, fmt.Errorf("UDP port too large %d", localPort)
+		return nil, 0, nil, 0, fmt.Errorf("port too large %d", localPort)
 	}
-	subarray = strings.Split(array[1], "/")
-	remoteIP = net.ParseIP(subarray[1])
+	remoteIP = net.ParseIP(remoteIPStr)
 	if remoteIP == nil {
-		return nil, 0, nil, 0, fmt.Errorf("could not parse IP %s", subarray[1])
+		return nil, 0, nil, 0, fmt.Errorf("could not parse IP %s", remoteIPStr)
 	}
-	remotePort, err = strconv.Atoi(subarray[0])
+	remotePort, err = strconv.Atoi(remotePortStr)
 	if err != nil {
 		return nil, 0, nil, 0, fmt.Errorf("could not convert %s to int: %s", array[0], err)
 	} else if remotePort > 0xFFFF {
-		return nil, 0, nil, 0, fmt.Errorf("UDP port too large %d", remotePort)
+		return nil, 0, nil, 0, fmt.Errorf("port too large %d", remotePort)
 	}
 	return localIP, localPort, remoteIP, remotePort, err
 }
@@ -392,10 +409,12 @@ func ClientMain() int {
 	noPKCE := flag.Bool("no-pkce", false, "if set perform PKCE challenge-response with oidc")
 	forcePTYAlloc := flag.Bool("force-pty", false, "if set, forces PTY allocation before command execution. Useful for interactive programs.")
 	forwardSSHAgent := flag.Bool("forward-agent", false, "if set, forwards ssh agent to be used with sshv2 connections on the remote host")
-	forwardUDP := flag.String("forward-udp", "", "if set, take a localport/remoteip@remoteport forwarding localhost@localport towards remoteip@remoteport")
-	forwardTCP := flag.String("forward-tcp", "", "if set, take a localport/remoteip@remoteport forwarding localhost@localport towards remoteip@remoteport")
-	reverseTCP := flag.String("reverse-tcp", "", "if set, take a remoteip@remoteport reverse forwarding it towards a localport/remoteip@remoteport")
-	reverseUDP := flag.String("reverse-udp", "", "if set, take a remoteip@remoteport reverse forwarding it towards a localport/remoteip@remoteport")
+	forwardTCP := flag.String("forward-tcp", "", "forward a remote TCP port to a local port. Syntax same as SSH2 but with @ instead of : (e.g. 8080@::1@80 or 8080@192.168.1.1@80)")
+	forwardUDP := flag.String("forward-udp", "", "forward a remote UDP port to a local port. Syntax same as SSH2 but with @ instead of : (e.g. 5353@::1@53)")
+	reverseTCP := flag.String("reverse-tcp", "", "reverse forward a local TCP port to a remote port. Syntax same as SSH2 but with @ instead of : (e.g. 80@127.0.0.1@8080)")
+	reverseUDP := flag.String("reverse-udp", "", "reverse forward a local UDP port to a remote port. Syntax same as SSH2 but with @ instead of : (e.g. 53@127.0.0.1@5353)")
+	flag.StringVar(forwardTCP, "L", *forwardTCP, "alias for -forward-tcp")
+	flag.StringVar(reverseTCP, "R", *reverseTCP, "alias for -reverse-tcp")
 	proxyJump := flag.String("proxy-jump", "", "if set, performs a proxy jump using the specified remote host as proxy (requires server with version >= 0.1.5)")
 
 	var flagValues []*FlagValue

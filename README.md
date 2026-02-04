@@ -200,6 +200,11 @@ It is often the case that some SSH hosts can only be accessed through a gateway.
 You can connect from A to C using B as a gateway/proxy. B and C must both be running a valid SSHOQ server. This works by establishing UDP port forwarding on B to forward QUIC packets from A to C.
 The connection from A to C is therefore fully end-to-end and B cannot decrypt or alter the SSHOQ traffic between A and C.
 
+Example syntax where gateway is the jump host and 10.0.0.2 is the final destination:
+
+`sshoq  -i ~/.ssh/id_rsa -proxy-jump user@gateway:443/sshoq-server root@10.0.0.2:4433/secret`
+
+
 
 ### File Sharing
 
@@ -214,7 +219,7 @@ For example, this is how you can use it with [SSHFS](https://github.com/libfuse/
 open a session with tcp local port forwarding (1234 to 1234)
 
 ```
-sshoq -forward-tcp 1234/127.0.0.1@1234/127.0.0.1  -i ~/.ssh/id_rsa -insecure user@192.168.1.2/ssh3-term
+sshoq -forward-tcp 1234@127.0.0.1@1234  -i ~/.ssh/id_rsa -insecure user@192.168.1.2/ssh3-term
 ```
 
 Then open a sftp-server listener over a localhost port **inside sshoq session** (openssh must be installed for the sftp-server binary to be available, and for the network server use ncat or socat):
@@ -241,30 +246,35 @@ Even if there're no performance gains, this does enable a method of bulk file tr
 
 ### Local port forwarding
 
+As a SSH compatibility shortcut, `-L` is the same as `-forward-tcp`
+
 Suppose you have a HTTP server on localhost port 3000 on the remote host, and wants to forward that locally to port 8080 so that you can access it via your browser. Do this with:
 
-`sshoq -forward-tcp 8080/127.0.0.1@3000/127.0.0.1 user@example.com/secret-path`
+`sshoq -forward-tcp 8080@127.0.0.1@3000 user@example.com/secret-path`
 
-Similarly, to forward a UDP port (5353) from the remote host to local port 8053:
+Similarly, to forward a UDP port (5353) from the remote host to local port 8053, but via IPv6 (::1, no `[]` brackets needed)
 
-`sshoq -forward-udp 8053/127.0.0.1@5353/127.0.0.1 user@example.com/secret-path`
+`sshoq -forward-udp 8053@::1@5353 user@example.com/secret-path`
 
+If you want to forward a local network port from the internal network of the target host (like a router interface), try this:
+
+`sshoq -forward-tcp 8080@192.168.1.1@80 user@example.com/secret-path`
 
 ### Reverse port forwarding
+
+As a SSH compatibility shortcut, `-R` is the same as `-reverse-tcp`
 
 You can also now perform reverse port forwading to forward a port from localhost to the remote host.
 
 For example, if you want to forward localhost port 3000 to the remote host on port 8080, do this:
 
-`sshoq -reverse-tcp 8080/127.0.0.1@3000/127.0.0.1 user@example.com/secret-path`
+`sshoq -reverse-tcp 8080@127.0.0.1@3000 user@example.com/secret-path`
 
 Similarly for UDP:
 
-`sshoq -reverse-udp 8080/127.0.0.1@3000/127.0.0.1 user@example.com/secret-path`
+`sshoq -reverse-udp 8080@127.0.0.1@3000 user@example.com/secret-path`
 
 Warning: Reverse UDP port forwarding is not well tested and may not be working fully.
-
-
 
 ## SSHOQ is still experimental
 While SSHOQ shows promise for faster session establishment, it is still at an early proof-of-concept stage. As with any new complex protocol, **expert cryptographic review over an extended timeframe is required before reasonable security conclusions can be made**.
