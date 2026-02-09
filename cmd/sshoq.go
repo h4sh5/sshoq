@@ -48,6 +48,7 @@ func homedir() string {
 // Prepares the QUIC connection that will be used by SSH3
 // If non-nil, use udpConn as transport (can be used for proxy jump)
 // Otherwise, create a UDPConn from udp://host:port
+// returns nil, -1 on error, or nil, 0 if reconnection is required
 func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog io.Writer, ssh3Dir string, certPool *x509.CertPool, knownHostsPath string, knownHosts ssh3.KnownHosts,
 	oidcConfig []*oidc.OIDCConfig, options *client_config.Config, proxyRemoteAddr *net.UDPAddr, tty *os.File) (quic.EarlyConnection, int) {
 
@@ -144,7 +145,7 @@ func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog 
 				// bad certificates, let's mimic the OpenSSH's behaviour similar to host keys
 				tlsConf.InsecureSkipVerify = true
 				var peerCertificate *x509.Certificate
-				certError := fmt.Errorf("we don't want to start a totally insecure connection")
+				certError := fmt.Errorf("We don't want to start a totally insecure connection")
 				tlsConf.VerifyConnection = func(ctx tls.ConnectionState) error {
 					peerCertificate = ctx.PeerCertificates[0]
 					return certError
@@ -196,7 +197,7 @@ func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog 
 					log.Error().Msgf("could not append known host to %s: %s", knownHostsPath, err)
 					return nil, -1
 				}
-				tty.WriteString(fmt.Sprintf("Successfully added the certificate to %s, please rerun the command\n\r", knownHostsPath))
+				tty.WriteString(fmt.Sprintf("Successfully added the certificate to %s, reconnecting..\n\r", knownHostsPath))
 				return nil, 0
 			}
 		}
@@ -710,10 +711,22 @@ func ClientMain() int {
 		}
 		qconn, status := setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, proxyOptions, nil, tty)
 
-		if qconn == nil {
-			if status != 0 {
-				log.Error().Msgf("could not setup transport for proxy client.")
+		if qconn == nil && status != 0{
+			log.Error().Msgf("could not setup transport for proxy client.")
+			return status
+		} else if (qconn == nil && status == 0) {
+			// reconnect due to likely first time self signed cert error
+			log.Info().Msgf("re-parsing known hosts and reconnecting via jump host now..")
+			knownHosts, _, parsingErr := ssh3.ParseKnownHosts(knownHostsPath)
+			if parsingErr != nil {
+				log.Error().Msgf("Error parsing known hosts file (%s): %s", knownHostsPath, parsingErr)
+				return -1
 			}
+			qconn, status = setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, proxyOptions, nil, tty)
+		}
+		// reconnect status
+		if qconn == nil{
+			log.Error().Msgf("Still could not connect through proxy client.")
 			return status
 		}
 
@@ -748,12 +761,26 @@ func ClientMain() int {
 
 	qconn, status := setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, options, proxyAddress, tty)
 
+	if qconn == nil && status != 0 {
+			log.Error().Msgf("could not setup transport for client.")
+			return status
+	} else if (qconn == nil && status == 0) {
+		// reconnect
+		log.Info().Msgf("re-parsing known hosts and reconnecting now..")
+		knownHosts, _, parsingErr := ssh3.ParseKnownHosts(knownHostsPath)
+			if parsingErr != nil {
+				log.Error().Msgf("Error parsing known hosts file (%s): %s", knownHostsPath, parsingErr)
+				return -1
+			}
+		qconn, status = setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, options, proxyAddress, tty)
+	}
 	if qconn == nil {
 		if status != 0 {
-			log.Error().Msgf("could not setup transport for client: %s", err)
+			log.Error().Msgf("Still could not setup transport for client: %s", err)
 		}
 		return status
 	}
+
 
 	roundTripper := &http3.RoundTripper{
 		EnableDatagrams: true,
