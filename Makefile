@@ -41,9 +41,9 @@ install:
 	$(GO_OPTS) go install $(BUILDFLAGS) ./cmd/sshoq-server
 	echo You might want to copy sshoq-server into /usr/sbin/ if you are running it via systemd
 
-sshoq: ./cmd/sshoq ./client/  message resources util internal auth cmd/plugin_endpoint
+sshoq: ./cmd/sshoq ./cmd/sshoq.go ./client/  message resources util internal auth cmd/plugin_endpoint
 	$(GO_OPTS) go build -tags "$(GO_TAGS)" $(BUILD_FLAGS) -o bin/sshoq ./cmd/sshoq/
 
-sshoq-server: ./cmd/sshoq-server  message server_auth resources util internal auth cmd/plugin_endpoint 
+sshoq-server: ./cmd/sshoq-server ./cmd/sshoq-server.go message server_auth resources util internal auth cmd/plugin_endpoint 
 	$(GO_OPTS) go build -tags "$(GO_TAGS)" $(BUILD_FLAGS) -o bin/sshoq-server ./cmd/sshoq-server/
 
