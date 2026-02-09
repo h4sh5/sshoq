@@ -1099,12 +1099,11 @@ func ServerMain() int {
 		if !keyPathExists {
 			fmt.Fprintf(os.Stderr, "the \"%s\" certificate private key file does not exist\n", *keyPath)
 		}
-		fmt.Fprintln(os.Stderr, "No certificate available for the QUIC connection.")
-		fmt.Fprintln(os.Stderr, "If you have no certificate and want a security comparable to traditional SSH host keys, "+
-			"you can generate a self-signed certificate using the -generate-selfsigned-cert arg or using the following script:")
-		fmt.Fprintln(os.Stderr, "https://github.com/h4sh5/sshoq/blob/main/generate_openssl_selfsigned_certificate.sh")
-		return -1
-	} else if *generateSelfSignedCert {
+		fmt.Fprintln(os.Stderr, "No certificate available for the QUIC connection, generating self signed cert.. (please use -generate-public-cert my-domain.example.org to generate trusted cert with Let's Encrypt if possible)")
+
+		*generateSelfSignedCert = true
+	}
+	if *generateSelfSignedCert {
 		if certPathExists {
 			log.Warn().Msgf("Warning: asked for generating a certificate but the \"%s\" file already exists; new cert will only be generated if both path and key do not exist\n", *certPath)
 		}
