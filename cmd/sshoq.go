@@ -419,6 +419,13 @@ func ClientMain() int {
 	proxyJump := flag.String("proxy-jump", "", "if set, performs a proxy jump using the specified remote host as proxy (requires server with version >= 0.1.5)")
 
 	var flagValues []*FlagValue
+	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+	if *verbose && os.Getenv("SSH3_LOG_LEVEL") != "trace" {
+		util.ConfigureLogger("debug")
+	} else {
+		util.ConfigureLogger(os.Getenv("SSH3_LOG_LEVEL"))
+	}
+	
 	cliParsers, err := internal.GetPluginsCLIArgs()
 	if err != nil {
 		log.Error().Msgf("error when retrieving plugins-defined CLI args: %s", err)
@@ -449,13 +456,6 @@ func ClientMain() int {
 
 	ssh3Dir := path.Join(homedir(), ".ssh3")
 	os.MkdirAll(ssh3Dir, 0700)
-
-	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
-	if *verbose && os.Getenv("SSH3_LOG_LEVEL") != "trace" {
-		util.ConfigureLogger("debug")
-	} else {
-		util.ConfigureLogger(os.Getenv("SSH3_LOG_LEVEL"))
-	}
 
 	if len(args) == 0 {
 		log.Error().Msgf("no remote host specified, exit")
