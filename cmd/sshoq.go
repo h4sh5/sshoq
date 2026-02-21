@@ -48,6 +48,7 @@ func homedir() string {
 // Prepares the QUIC connection that will be used by SSH3
 // If non-nil, use udpConn as transport (can be used for proxy jump)
 // Otherwise, create a UDPConn from udp://host:port
+// returns nil, -1 on error, or nil, 0 if reconnection is required
 func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog io.Writer, ssh3Dir string, certPool *x509.CertPool, knownHostsPath string, knownHosts ssh3.KnownHosts,
 	oidcConfig []*oidc.OIDCConfig, options *client_config.Config, proxyRemoteAddr *net.UDPAddr, tty *os.File) (quic.EarlyConnection, int) {
 
@@ -65,7 +66,7 @@ func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog 
 	if runtime.GOOS == "darwin" {
 		// on MacOS, the don't fragment (DF) bit is not set on dual-stack socket ("udp")
 		// This causes quic-go to not perform MTU discovery which can prevent the proxy jump from working at all.
-		// cf: - https://github.com/h4sh5/sshoq/issues/129
+		// cf: - https://github.com/francoismichel/ssh3/issues/129
 		//     - https://github.com/quic-go/quic-go/issues/3793
 		//
 		// The fix here is to not use a dual-stack socket on MacOS and detect the IP version from the resolved peer address.
@@ -144,7 +145,7 @@ func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog 
 				// bad certificates, let's mimic the OpenSSH's behaviour similar to host keys
 				tlsConf.InsecureSkipVerify = true
 				var peerCertificate *x509.Certificate
-				certError := fmt.Errorf("we don't want to start a totally insecure connection")
+				certError := fmt.Errorf("We don't want to start a totally insecure connection")
 				tlsConf.VerifyConnection = func(ctx tls.ConnectionState) error {
 					peerCertificate = ctx.PeerCertificates[0]
 					return certError
@@ -196,7 +197,7 @@ func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog 
 					log.Error().Msgf("could not append known host to %s: %s", knownHostsPath, err)
 					return nil, -1
 				}
-				tty.WriteString(fmt.Sprintf("Successfully added the certificate to %s, please rerun the command\n\r", knownHostsPath))
+				tty.WriteString(fmt.Sprintf("Successfully added the certificate to %s, reconnecting..\n\r", knownHostsPath))
 				return nil, 0
 			}
 		}
@@ -209,27 +210,44 @@ func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog 
 
 func parseAddrPort(addrPort string) (localIP net.IP, localPort int, remoteIP net.IP, remotePort int, err error) {
 	array := strings.Split(addrPort, "@")
-	subarray := strings.Split(array[0], "/")
-	localIP = net.ParseIP(subarray[1])
+
+	if len(array) < 3 {
+		return nil, 0, nil, 0, fmt.Errorf("Syntax incorrect for port forwarding. Use [bindip]:port:ip:port (bindip is optional), same as openssh")
+	}
+	localIPStr := "127.0.0.1" // always default to localhost if not specified
+	remoteIPStr := "127.0.0.1"
+	localPortStr := "0"
+	remotePortStr := "0"
+	if len(array) == 4 {
+		localIPStr = array[0]
+		localPortStr = array[1]
+		remoteIPStr = array[2]
+		remotePortStr = array[3]
+	} else if len(array) == 3 {
+		localPortStr = array[0]
+		remoteIPStr = array[1]
+		remotePortStr = array[2]
+	}
+
+	localIP = net.ParseIP(localIPStr)
 	if localIP == nil {
-		return nil, 0, nil, 0, fmt.Errorf("could not parse IP %s", subarray[1])
+		return nil, 0, nil, 0, fmt.Errorf("could not parse IP %s", localIPStr)
 	}
-	localPort, err = strconv.Atoi(subarray[0])
+	localPort, err = strconv.Atoi(localPortStr)
 	if err != nil {
-		return nil, 0, nil, 0, fmt.Errorf("could not convert %s to int: %s", subarray[0], err)
+		return nil, 0, nil, 0, fmt.Errorf("could not convert %s to int: %s", localPortStr, err)
 	} else if localPort > 0xFFFF {
-		return nil, 0, nil, 0, fmt.Errorf("UDP port too large %d", localPort)
+		return nil, 0, nil, 0, fmt.Errorf("port too large %d", localPort)
 	}
-	subarray = strings.Split(array[1], "/")
-	remoteIP = net.ParseIP(subarray[1])
+	remoteIP = net.ParseIP(remoteIPStr)
 	if remoteIP == nil {
-		return nil, 0, nil, 0, fmt.Errorf("could not parse IP %s", subarray[1])
+		return nil, 0, nil, 0, fmt.Errorf("could not parse IP %s", remoteIPStr)
 	}
-	remotePort, err = strconv.Atoi(subarray[0])
+	remotePort, err = strconv.Atoi(remotePortStr)
 	if err != nil {
 		return nil, 0, nil, 0, fmt.Errorf("could not convert %s to int: %s", array[0], err)
 	} else if remotePort > 0xFFFF {
-		return nil, 0, nil, 0, fmt.Errorf("UDP port too large %d", remotePort)
+		return nil, 0, nil, 0, fmt.Errorf("port too large %d", remotePort)
 	}
 	return localIP, localPort, remoteIP, remotePort, err
 }
@@ -287,7 +305,13 @@ func getConfigOptions(hostUrl *url.URL, sshConfig *ssh_config.Config, optionPars
 
 	urlPath := hostUrl.Path
 	if urlPath == "" {
-		urlPath = configUrlPath
+		if configUrlPath != "" {
+			urlPath = configUrlPath
+		} else {
+			// default path 
+			urlPath = "sshoq-server"
+		}
+		
 	}
 	return client_config.NewConfig(username, hostname, port, urlPath, configAuthMethods, pluginOptions)
 }
@@ -384,16 +408,24 @@ func ClientMain() int {
 	verbose := flag.Bool("v", false, "if set, enable verbose mode")
 	displayVersion := flag.Bool("version", false, "if set, displays the software version on standard output and exit")
 	noPKCE := flag.Bool("no-pkce", false, "if set perform PKCE challenge-response with oidc")
+	forcePTYAlloc := flag.Bool("force-pty", false, "if set, forces PTY allocation before command execution. Useful for interactive programs.")
 	forwardSSHAgent := flag.Bool("forward-agent", false, "if set, forwards ssh agent to be used with sshv2 connections on the remote host")
-	forwardUDP := flag.String("forward-udp", "", "if set, take a localport/remoteip@remoteport forwarding localhost@localport towards remoteip@remoteport")
-	forwardTCP := flag.String("forward-tcp", "", "if set, take a localport/remoteip@remoteport forwarding localhost@localport towards remoteip@remoteport")
-	reverseTCP := flag.String("reverse-tcp", "", "if set, take a remoteip@remoteport reverse forwarding it towards a localport/remoteip@remoteport")
-	reverseUDP := flag.String("reverse-udp", "", "if set, take a remoteip@remoteport reverse forwarding it towards a localport/remoteip@remoteport")
+	forwardTCP := flag.String("forward-tcp", "", "forward a remote TCP port to a local port. Syntax same as SSH2 but with @ instead of : (e.g. 8080@::1@80 or 8080@192.168.1.1@80)")
+	forwardUDP := flag.String("forward-udp", "", "forward a remote UDP port to a local port. Syntax same as SSH2 but with @ instead of : (e.g. 5353@::1@53)")
+	reverseTCP := flag.String("reverse-tcp", "", "reverse forward a local TCP port to a remote port. Syntax same as SSH2 but with @ instead of : (e.g. 80@127.0.0.1@8080)")
+	reverseUDP := flag.String("reverse-udp", "", "reverse forward a local UDP port to a remote port. Syntax same as SSH2 but with @ instead of : (e.g. 53@127.0.0.1@5353)")
+	flag.StringVar(forwardTCP, "L", *forwardTCP, "alias for -forward-tcp")
+	flag.StringVar(reverseTCP, "R", *reverseTCP, "alias for -reverse-tcp")
 	proxyJump := flag.String("proxy-jump", "", "if set, performs a proxy jump using the specified remote host as proxy (requires server with version >= 0.1.5)")
 
-	sftpSession := path.Base(os.Args[0]) == "sshoq-sftp"
-
 	var flagValues []*FlagValue
+	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+	if *verbose && os.Getenv("SSH3_LOG_LEVEL") != "trace" {
+		util.ConfigureLogger("debug")
+	} else {
+		util.ConfigureLogger(os.Getenv("SSH3_LOG_LEVEL"))
+	}
+	
 	cliParsers, err := internal.GetPluginsCLIArgs()
 	if err != nil {
 		log.Error().Msgf("error when retrieving plugins-defined CLI args: %s", err)
@@ -424,13 +456,6 @@ func ClientMain() int {
 
 	ssh3Dir := path.Join(homedir(), ".ssh3")
 	os.MkdirAll(ssh3Dir, 0700)
-
-	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
-	if *verbose && os.Getenv("SSH3_LOG_LEVEL") != "trace" {
-		util.ConfigureLogger("debug")
-	} else {
-		util.ConfigureLogger(os.Getenv("SSH3_LOG_LEVEL"))
-	}
 
 	if len(args) == 0 {
 		log.Error().Msgf("no remote host specified, exit")
@@ -686,10 +711,22 @@ func ClientMain() int {
 		}
 		qconn, status := setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, proxyOptions, nil, tty)
 
-		if qconn == nil {
-			if status != 0 {
-				log.Error().Msgf("could not setup transport for proxy client.")
+		if qconn == nil && status != 0{
+			log.Error().Msgf("could not setup transport for proxy client.")
+			return status
+		} else if (qconn == nil && status == 0) {
+			// reconnect due to likely first time self signed cert error
+			log.Info().Msgf("re-parsing known hosts and reconnecting via jump host now..")
+			knownHosts, _, parsingErr := ssh3.ParseKnownHosts(knownHostsPath)
+			if parsingErr != nil {
+				log.Error().Msgf("Error parsing known hosts file (%s): %s", knownHostsPath, parsingErr)
+				return -1
 			}
+			qconn, status = setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, proxyOptions, nil, tty)
+		}
+		// reconnect status
+		if qconn == nil{
+			log.Error().Msgf("Still could not connect through proxy client.")
 			return status
 		}
 
@@ -724,12 +761,26 @@ func ClientMain() int {
 
 	qconn, status := setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, options, proxyAddress, tty)
 
+	if qconn == nil && status != 0 {
+			log.Error().Msgf("could not setup transport for client.")
+			return status
+	} else if (qconn == nil && status == 0) {
+		// reconnect
+		log.Info().Msgf("re-parsing known hosts and reconnecting now..")
+		knownHosts, _, parsingErr := ssh3.ParseKnownHosts(knownHostsPath)
+			if parsingErr != nil {
+				log.Error().Msgf("Error parsing known hosts file (%s): %s", knownHostsPath, parsingErr)
+				return -1
+			}
+		qconn, status = setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, options, proxyAddress, tty)
+	}
 	if qconn == nil {
 		if status != 0 {
-			log.Error().Msgf("could not setup transport for client: %s", err)
+			log.Error().Msgf("Still could not setup transport for client: %s", err)
 		}
 		return status
 	}
+
 
 	roundTripper := &http3.RoundTripper{
 		EnableDatagrams: true,
@@ -880,7 +931,7 @@ func ClientMain() int {
 
 	}
 
-	err = c.RunSession(tty, sftpSession, *forwardSSHAgent, command...)
+	err = c.RunSession(tty, *forwardSSHAgent, *forcePTYAlloc, command...)
 	switch sessionError := err.(type) {
 	case client.ExitStatus:
 		log.Info().Msgf("the process exited with status %d", sessionError.StatusCode)

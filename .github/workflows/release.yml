@@ -1,0 +1,45 @@
+# This workflow will build a golang project
+# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-go
+
+name: Create release binaries
+
+on:
+  workflow_dispatch:
+    inputs:
+      git-ref:
+        description: Git Ref (Optional)    
+        required: false
+  release:
+    types: 
+      - created
+      - edited
+
+permissions:
+    contents: write
+    packages: write
+
+jobs:
+  gorelease:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [ { imgname: ubuntu-latest, releaserfile: linux-amd64 }, { imgname: ubuntu-latest, releaserfile: linux-arm64 }, { imgname: ubuntu-latest, releaserfile: unix }, { imgname: ubuntu-latest, releaserfile: client-only-windows } ]
+    runs-on: ${{ matrix.variant.imgname }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21.x'
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v5
+        with:
+          # either 'goreleaser' (default) or 'goreleaser-pro'
+          distribution: goreleaser
+          version: latest
+          args: release --verbose --clean --config .goreleaser-${{ matrix.variant.releaserfile }}.yml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1125,7 +1125,7 @@ func ServerMain() int {
 	bindAddr := flag.String("bind", "[::]:443", "the address:port pair to listen to, e.g. 0.0.0.0:443")
 	verbose := flag.Bool("v", false, "verbose mode, if set")
 	displayVersion := flag.Bool("version", false, "if set, displays the software version on standard output and exit")
-	urlPath := flag.String("url-path", "/ssh3-term", "the secret URL path on which the ssh3 server listens")
+	urlPath := flag.String("url-path", "/sshoq-server", "the secret URL path on which the ssh3 server listens")
 	generateSelfSignedCert := flag.Bool("generate-selfsigned-cert", false, "if set, generates a self-self-signed cerificate and key "+
 		"that will be stored at the paths indicated by the -cert and -key args (they must not already exist)")
 	certPath := flag.String("cert", "./cert.pem", "the filename of the server certificate (or fullchain)")
@@ -1169,40 +1169,39 @@ func ServerMain() int {
 		if !keyPathExists {
 			fmt.Fprintf(os.Stderr, "the \"%s\" certificate private key file does not exist\n", *keyPath)
 		}
-		fmt.Fprintln(os.Stderr, "No certificate available for the QUIC connection.")
-		fmt.Fprintln(os.Stderr, "If you have no certificate and want a security comparable to traditional SSH host keys, "+
-			"you can generate a self-signed certificate using the -generate-selfsigned-cert arg or using the following script:")
-		fmt.Fprintln(os.Stderr, "https://github.com/h4sh5/sshoq/blob/main/generate_openssl_selfsigned_certificate.sh")
-		return -1
-	} else if *generateSelfSignedCert {
+		fmt.Fprintln(os.Stderr, "No certificate available for the QUIC connection, generating self signed cert.. (please use -generate-public-cert my-domain.example.org to generate trusted cert with Let's Encrypt if possible)")
+
+		*generateSelfSignedCert = true
+	}
+	if *generateSelfSignedCert {
 		if certPathExists {
-			fmt.Fprintf(os.Stderr, "asked for generating a certificate but the \"%s\" file already exists\n", *certPath)
+			log.Warn().Msgf("Warning: asked for generating a certificate but the \"%s\" file already exists; new cert will only be generated if both path and key do not exist\n", *certPath)
 		}
 		if keyPathExists {
-			fmt.Fprintf(os.Stderr, "asked for generating a private key but the \"%s\" file already exists\n", *keyPath)
+			log.Warn().Msgf("Warning: asked for generating a private key but the \"%s\" file already exists; new key will only be generated if both path and key do not exist\n", *keyPath)
 		}
-		if certPathExists || keyPathExists {
-			return -1
-		}
-		pubkey, privkey, err := util.GenerateKey()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "could not generate private key: %s\n", err)
-			return -1
-		}
-		cert, err := util.GenerateCert(privkey)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "could not generate certificate: %s\n", err)
-			return -1
-		}
+		if !(certPathExists && keyPathExists) {
+			pubkey, privkey, err := util.GenerateKey()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "could not generate private key: %s\n", err)
+				return -1
+			}
+			cert, err := util.GenerateCert(privkey)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "could not generate certificate: %s\n", err)
+				return -1
+			}
 
-		err = util.DumpCertAndKeyToFiles(cert, pubkey, privkey, *certPath, *keyPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "could not save certificate and key to files: %s\n", err)
-			return -1
-		}
+			err = util.DumpCertAndKeyToFiles(cert, pubkey, privkey, *certPath, *keyPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "could not save certificate and key to files: %s\n", err)
+				return -1
+			}
 
-		certPathExists = true
-		keyPathExists = true
+			certPathExists = true
+			keyPathExists = true
+		}
+		
 	}
 
 	if *verbose {
@@ -1213,7 +1212,7 @@ func ServerMain() int {
 
 		logFileName := os.Getenv("SSH3_LOG_FILE")
 		if logFileName == "" {
-			logFileName = "/var/log/ssh3.log"
+			logFileName = "sshoq.log"
 		}
 		logFile, err := os.OpenFile(logFileName, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 		if err != nil {

@@ -164,7 +164,7 @@ var _ = Describe("Testing the sshoq cli", func() {
 				args := []string{
 					"-v",
 					"-insecure",
-					"-privkey", privKeyPath,
+					"-i", privKeyPath,
 				}
 				args = append(args, additionalArgs...)
 				args = append(args, fmt.Sprintf("%s@%s%s", username, bind, DEFAULT_URL_PATH))
@@ -324,7 +324,7 @@ var _ = Describe("Testing the sshoq cli", func() {
 						if proxyJump {
 							additionalArgs = append(additionalArgs, "-proxy-jump", fmt.Sprintf("%s@%s%s", username, proxyServerBind, DEFAULT_PROXY_URL_PATH))
 						}
-						additionalArgs = append(additionalArgs, forwardingType, fmt.Sprintf("%d/%s@%d", localPort, remoteAddr.IP, remoteAddr.Port))
+						additionalArgs = append(additionalArgs, forwardingType, fmt.Sprintf("%d@%s@%d", localPort, remoteAddr.IP, remoteAddr.Port))
 						clientArgs := getClientArgs(rsaPrivKeyPath, additionalArgs...)
 						command := exec.Command(ssh3Path, clientArgs...)
 						session, err := Start(command, GinkgoWriter, GinkgoWriter)
@@ -448,7 +448,7 @@ var _ = Describe("Testing the sshoq cli", func() {
 					if proxyJump {
 						additionalArgs = append(additionalArgs, "-proxy-jump", fmt.Sprintf("%s@%s%s", username, proxyServerBind, DEFAULT_PROXY_URL_PATH))
 					}
-					additionalArgs = append(additionalArgs, forwardingType, fmt.Sprintf("%d/%s@%d", localPort, remoteAddr.IP, remoteAddr.Port))
+					additionalArgs = append(additionalArgs, forwardingType, fmt.Sprintf("%d@%s@%d", localPort, remoteAddr.IP, remoteAddr.Port))
 					clientArgs := getClientArgs(rsaPrivKeyPath, additionalArgs...)
 					command := exec.Command(ssh3Path, clientArgs...)
 					session, err := Start(command, GinkgoWriter, GinkgoWriter)

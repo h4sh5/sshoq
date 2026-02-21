@@ -1,9 +1,17 @@
-GOOS?=linux
+GOOS ?= $(go env GOOS)
+GOARCH ?= $(go env GOARCH)
 BUILDFLAGS ?=-ldflags "-X main.version=$(shell git describe --tags --always --dirty) -X main.buildDate=$(shell date +%Y-%m-%d)"
 
 GO_OPTS?=CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS)
 GO_TAGS?=
 TEST_OPTS?=GOOS=$(GOOS) GOARCH=$(GOARCH)
+
+default: build
+
+clean:
+	rm bin/*
+
+build: sshoq sshoq-server
 
 lint:
 	go fmt ./...
@@ -31,12 +39,11 @@ integration-tests:
 install:
 	$(GO_OPTS) go install $(BUILDFLAGS) ./cmd/sshoq
 	$(GO_OPTS) go install $(BUILDFLAGS) ./cmd/sshoq-server
+	echo You might want to copy sshoq-server into /usr/sbin/ if you are running it via systemd
 
-build: client server
+sshoq: ./cmd/sshoq ./cmd/sshoq.go ./client/  message resources util internal auth cmd/plugin_endpoint
+	$(GO_OPTS) go build -tags "$(GO_TAGS)" $(BUILD_FLAGS) -o bin/sshoq ./cmd/sshoq/
 
-client:
-	$(GO_OPTS) go build -tags "$(GO_TAGS)" $(BUILD_FLAGS) -o bin/client ./cmd/sshoq/
-	cp bin/client bin/sshoq-sftp
+sshoq-server: ./cmd/sshoq-server ./cmd/sshoq-server.go message server_auth resources util internal auth cmd/plugin_endpoint 
+	$(GO_OPTS) go build -tags "$(GO_TAGS)" $(BUILD_FLAGS) -o bin/sshoq-server ./cmd/sshoq-server/
 
-server:
-	$(GO_OPTS) go build -tags "$(GO_TAGS)" $(BUILD_FLAGS) -o bin/server ./cmd/sshoq-server/

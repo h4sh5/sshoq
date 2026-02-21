@@ -1,3 +1,5 @@
 bin/
 sshoq
 sshoq-server
+*.pem
+*.key

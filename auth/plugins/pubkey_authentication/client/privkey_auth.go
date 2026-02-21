@@ -45,7 +45,7 @@ type PrivkeyOptionParser struct{}
 
 // FlagName implements config.CLIOptionParser.
 func (*PrivkeyOptionParser) FlagName() string {
-	return "privkey"
+	return "i"
 }
 
 // IsBoolFlag implements config.CLIOptionParser.

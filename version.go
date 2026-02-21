@@ -22,10 +22,10 @@ const PROTOCOL_MAJOR int = 3
 const PROTOCOL_MINOR int = 0
 const PROTOCOL_EXPERIMENTAL_SPEC_VERSION string = "alpha-00"
 
-const SOFTWARE_IMPLEMENTATION_NAME string = "francoismichel/ssh3"
+const SOFTWARE_IMPLEMENTATION_NAME string = "h4sh5/sshoq"
 const SOFTWARE_MAJOR int = 0
-const SOFTWARE_MINOR int = 1
-const SOFTWARE_PATCH int = 7
+const SOFTWARE_MINOR int = 2
+const SOFTWARE_PATCH int = 1
 
 const SOFTWARE_RC int = 0
 
@@ -66,7 +66,7 @@ func IsVersionSupported(other Version) bool {
 
 	// special case: to our knowledge, experimental spec version older than alpha-00 are only implemented by us (i.e. francoismichel/ssh3)
 	// this should be removed in the near future, once we remove support for these legacy servers
-	if other.protocolVersion.ExperimentalSpecVersion == "" && other.softwareVersion.ImplementationName == "francoismichel/ssh3" &&
+	if other.protocolVersion.ExperimentalSpecVersion == "" && other.softwareVersion.ImplementationName == "h4sh5/sshoq" &&
 		other.softwareVersion.Major == 0 && other.softwareVersion.Minor == 1 && other.softwareVersion.Patch <= 5 {
 		// then, only support software version >= 0.1.3
 		return other.softwareVersion.Patch >= 3

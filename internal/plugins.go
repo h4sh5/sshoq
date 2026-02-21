@@ -29,7 +29,7 @@ func (r *pluginsRegistry[T]) registerPlugin(name string, plugin T) error {
 		panic("registerPlugin called twice for same auth plugin name " + name)
 	}
 	r.plugins[name] = plugin
-	log.Info().Msgf("plugin %s successfully registered", name)
+	// log.Info().Msgf("plugin %s successfully registered", name)
 	return nil
 }
 
