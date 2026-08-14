@@ -217,6 +217,23 @@ func ParseSSHString(buf Reader) (string, error) {
 	return string(out[:n]), err
 }
 
+func ParseSSHBytes(buf Reader) ([]byte, error) {
+	length, err := ReadVarInt(buf)
+	if err != nil {
+		return []byte{}, InvalidSSHString{err}
+	}
+	out := make([]byte, length)
+	n, err := io.ReadFull(buf, out)
+	if n != int(length) {
+		return []byte{}, InvalidSSHString{fmt.Errorf("expected length %d, read length %d", length, n)}
+	}
+	if err != nil && err != io.EOF {
+		return []byte{}, err
+	}
+	return out, err
+}
+
+
 func WriteSSHString(out []byte, s string) (int, error) {
 	if uint64(len(out)) < uint64(SSHStringLen(s)) {
 		return 0, fmt.Errorf("buffer too small to write varint: %d < %d", len(out), SSHStringLen(s))
@@ -228,7 +245,22 @@ func WriteSSHString(out []byte, s string) (int, error) {
 	return copied, nil
 }
 
+func WriteSSHBytes(out []byte, in []byte) (int, error) {
+	if uint64(len(out)) < uint64(SSHBytesLen(in)) {
+		return 0, fmt.Errorf("buffer too small to write varint: %d < %d", len(out), SSHBytesLen(in))
+	}
+	buf := AppendVarInt(nil, uint64(len(in)))
+
+	copied := copy(out, buf)
+	copied += copy(out[copied:], in)
+	return copied, nil
+}
+
 func SSHStringLen(s string) int {
+	return int(VarIntLen(uint64(len(s)))) + len(s)
+}
+
+func SSHBytesLen(s []byte) int {
 	return int(VarIntLen(uint64(len(s)))) + len(s)
 }
 

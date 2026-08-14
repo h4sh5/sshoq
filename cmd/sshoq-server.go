@@ -39,6 +39,7 @@ import (
 	ssh3 "github.com/h4sh5/sshoq"
 	"github.com/h4sh5/sshoq/internal"
 	ssh3Messages "github.com/h4sh5/sshoq/message"
+	ssh3sftp "github.com/h4sh5/sshoq/sftp"
 	"github.com/h4sh5/sshoq/server_auth"
 	util "github.com/h4sh5/sshoq/util"
 	"github.com/h4sh5/sshoq/util/unix_util"
@@ -1235,6 +1236,10 @@ func ServerMain() int {
 			case *ssh3.UDPReverseForwardingChannelImpl:
 				handleUDPReverseForwardingChannel(conv.Context(), authenticatedUser, conv, c)
 			default:
+				if channel.ChannelType() == "sftp" {
+					go ssh3sftp.ServeChannel(conv.Context(), authenticatedUser, channel)
+					continue
+				}
 				runningSessions.Insert(channel, &runningSession{
 					channelState: LARVAL,
 					pty:          nil,
