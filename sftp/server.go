@@ -15,7 +15,6 @@ import (
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sys/unix"
 
-	ssh3 "github.com/h4sh5/sshoq"
 	ssh3Messages "github.com/h4sh5/sshoq/message"
 	"github.com/h4sh5/sshoq/util/unix_util"
 )
@@ -27,7 +26,7 @@ const (
 )
 
 type ServerSession struct {
-	channel    ssh3.Channel
+	channel    sftpChannel
 	currentDir string
 	user       *unix_util.User
 	groups     map[uint32]bool
@@ -36,7 +35,14 @@ type ServerSession struct {
 	baseIno    uint64
 }
 
-func ServeChannel(ctx context.Context, user *unix_util.User, channel ssh3.Channel) {
+// sftpChannel is the minimal channel surface used by the SFTP request loop.
+type sftpChannel interface {
+	NextMessage() (ssh3Messages.Message, error)
+	WriteData(dataBuf []byte, dataType ssh3Messages.SSHDataType) (int, error)
+	Close()
+}
+
+func serveChannelInProcess(ctx context.Context, user *unix_util.User, channel sftpChannel) {
 	session := &ServerSession{
 		channel:    channel,
 		currentDir: user.Dir,
@@ -618,4 +624,31 @@ func (s *ServerSession) checkAncestorExecute(path string) error {
 	}
 
 	return nil
+}
+
+func buildGroupIDs(user *unix_util.User) ([]int, error) {
+	lookupUser, err := osuser.Lookup(user.Username)
+	if err != nil {
+		return []int{int(user.Gid)}, nil
+	}
+
+	gidStrs, err := lookupUser.GroupIds()
+	if err != nil {
+		return []int{int(user.Gid)}, nil
+	}
+
+	seen := map[int]bool{int(user.Gid): true}
+	groupIDs := []int{int(user.Gid)}
+	for _, gidStr := range gidStrs {
+		gid, err := strconv.Atoi(gidStr)
+		if err != nil {
+			continue
+		}
+		if !seen[gid] {
+			seen[gid] = true
+			groupIDs = append(groupIDs, gid)
+		}
+	}
+
+	return groupIDs, nil
 }

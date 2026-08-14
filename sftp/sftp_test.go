@@ -1,11 +1,17 @@
 package sftp
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	osuser "os/user"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	ssh3 "github.com/h4sh5/sshoq"
 	ssh3Messages "github.com/h4sh5/sshoq/message"
@@ -664,5 +670,320 @@ func TestServeChannel_TwoRequests(t *testing.T) {
 	}
 	if !ch.Closed {
 		t.Fatal("expected channel closed")
+	}
+}
+
+// queuedMockChannel is a mock channel that returns the next queued message on
+// each NextMessage call. It is used to drive concurrent SFTP sessions from
+// a goroutine without pre-populating the full message list. The embedded
+// MockChannel is accessed through mutex-protected wrappers so the test is safe
+// under the race detector.
+type queuedMockChannel struct {
+	*ssh3.MockChannel
+	mu       sync.Mutex
+	messages []ssh3Messages.Message
+	closed   bool
+	cond     *sync.Cond
+}
+
+func newQueuedMockChannel() *queuedMockChannel {
+	q := &queuedMockChannel{MockChannel: ssh3.NewMockChannel()}
+	q.cond = sync.NewCond(&q.mu)
+	return q
+}
+
+func (q *queuedMockChannel) enqueue(msgs ...ssh3Messages.Message) {
+	q.mu.Lock()
+	q.messages = append(q.messages, msgs...)
+	q.cond.Broadcast()
+	q.mu.Unlock()
+}
+
+func (q *queuedMockChannel) Close() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.closed = true
+	q.cond.Broadcast()
+	q.MockChannel.Close()
+}
+
+func (q *queuedMockChannel) NextMessage() (ssh3Messages.Message, error) {
+	q.mu.Lock()
+	for len(q.messages) == 0 && !q.closed {
+		q.cond.Wait()
+	}
+	if q.closed {
+		q.mu.Unlock()
+		return nil, io.EOF
+	}
+	msg := q.messages[0]
+	q.messages = q.messages[1:]
+	q.mu.Unlock()
+	return msg, nil
+}
+
+func (q *queuedMockChannel) WriteData(dataBuf []byte, dataType ssh3Messages.SSHDataType) (int, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.MockChannel.WriteData(dataBuf, dataType)
+}
+
+func (q *queuedMockChannel) Writes() [][]byte {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.MockChannel.Writes
+}
+
+func (q *queuedMockChannel) IsClosed() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.MockChannel.Closed
+}
+
+// waitResponses blocks until at least n responses have been written to the
+// channel. It is used to avoid closing the channel before the server has
+// processed all queued requests.
+func (q *queuedMockChannel) waitResponses(n int) {
+	for {
+		q.mu.Lock()
+		if len(q.MockChannel.Writes) >= n {
+			q.mu.Unlock()
+			return
+		}
+		q.mu.Unlock()
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func writeRequest(req Request) *ssh3Messages.DataOrExtendedDataMessage {
+	b, _ := json.Marshal(req)
+	return makeDataMsg(b)
+}
+
+func readResponses(t *testing.T, writes [][]byte, n int) []Response {
+	t.Helper()
+	if len(writes) != n {
+		t.Fatalf("expected %d responses, got %d", n, len(writes))
+	}
+	resps := make([]Response, n)
+	for i, w := range writes {
+		if err := json.Unmarshal(w, &resps[i]); err != nil {
+			t.Fatalf("unmarshal response %d: %v", i, err)
+		}
+	}
+	return resps
+}
+
+// TestConcurrentServeChannels_MultipleUsers validates that two independent SFTP
+// sessions can be served concurrently without interfering with each other's
+// state or filesystem view.
+func TestConcurrentServeChannels_MultipleUsers(t *testing.T) {
+	tmpA := t.TempDir()
+	tmpB := t.TempDir()
+	os.WriteFile(filepath.Join(tmpA, "a.txt"), []byte("alpha"), 0644)
+	os.WriteFile(filepath.Join(tmpB, "b.txt"), []byte("bravo"), 0644)
+
+	chA := newQueuedMockChannel()
+	chB := newQueuedMockChannel()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		ServeChannel(nil, currentTestUser(tmpA), chA)
+	}()
+	go func() {
+		defer wg.Done()
+		ServeChannel(nil, currentTestUser(tmpB), chB)
+	}()
+
+	// Send interleaved requests to both channels.
+	chA.enqueue(writeRequest(Request{ID: 1, Cmd: "pwd"}))
+	chB.enqueue(writeRequest(Request{ID: 1, Cmd: "pwd"}))
+	chA.enqueue(writeRequest(Request{ID: 2, Cmd: "ls", Path: "."}))
+	chB.enqueue(writeRequest(Request{ID: 2, Cmd: "ls", Path: "."}))
+	chA.enqueue(writeRequest(Request{ID: 3, Cmd: "stat", Path: "a.txt"}))
+	chB.enqueue(writeRequest(Request{ID: 3, Cmd: "stat", Path: "b.txt"}))
+	chA.waitResponses(3)
+	chB.waitResponses(3)
+	chA.Close()
+	chB.Close()
+
+	wg.Wait()
+
+	respsA := readResponses(t, chA.Writes(), 3)
+	respsB := readResponses(t, chB.Writes(), 3)
+
+	if !respsA[0].OK || respsA[0].Path != tmpA {
+		t.Fatalf("user A pwd response: %+v", respsA[0])
+	}
+	if !respsB[0].OK || respsB[0].Path != tmpB {
+		t.Fatalf("user B pwd response: %+v", respsB[0])
+	}
+
+	if !respsA[1].OK || len(respsA[1].Entries) != 1 || respsA[1].Entries[0].Name != "a.txt" {
+		t.Fatalf("user A ls response: %+v", respsA[1])
+	}
+	if !respsB[1].OK || len(respsB[1].Entries) != 1 || respsB[1].Entries[0].Name != "b.txt" {
+		t.Fatalf("user B ls response: %+v", respsB[1])
+	}
+
+	if !respsA[2].OK || respsA[2].Info == nil || respsA[2].Info.Name != "a.txt" || respsA[2].Info.Size != 5 {
+		t.Fatalf("user A stat response: %+v", respsA[2])
+	}
+	if !respsB[2].OK || respsB[2].Info == nil || respsB[2].Info.Name != "b.txt" || respsB[2].Info.Size != 5 {
+		t.Fatalf("user B stat response: %+v", respsB[2])
+	}
+
+	if !chA.IsClosed() || !chB.IsClosed() {
+		t.Fatalf("expected both channels to close")
+	}
+}
+
+// TestConcurrentServeChannels_SharedDirectory validates that two SFTP sessions
+// in the same directory see consistent, isolated request results even when their
+// requests are interleaved.
+func TestConcurrentServeChannels_SharedDirectory(t *testing.T) {
+	tmp := t.TempDir()
+	os.WriteFile(filepath.Join(tmp, "shared.txt"), []byte("shared"), 0644)
+
+	chA := newQueuedMockChannel()
+	chB := newQueuedMockChannel()
+
+	user := currentTestUser(tmp)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		ServeChannel(nil, user, chA)
+	}()
+	go func() {
+		defer wg.Done()
+		ServeChannel(nil, user, chB)
+	}()
+
+	// Queue writes from both sessions to a shared directory, then wait for both
+	// puts to complete before listing so the directory contents are deterministic.
+	chA.enqueue(writeRequest(Request{ID: 1, Cmd: "put", Path: "A.txt", Data: []byte("A1")}))
+	chB.enqueue(writeRequest(Request{ID: 1, Cmd: "put", Path: "B.txt", Data: []byte("B1")}))
+	chA.waitResponses(1)
+	chB.waitResponses(1)
+	chA.enqueue(writeRequest(Request{ID: 2, Cmd: "ls", Path: "."}))
+	chB.enqueue(writeRequest(Request{ID: 2, Cmd: "ls", Path: "."}))
+	chA.enqueue(writeRequest(Request{ID: 3, Cmd: "stat", Path: "shared.txt"}))
+	chB.enqueue(writeRequest(Request{ID: 3, Cmd: "stat", Path: "shared.txt"}))
+	chA.waitResponses(3)
+	chB.waitResponses(3)
+	chA.Close()
+	chB.Close()
+
+	wg.Wait()
+
+	respsA := readResponses(t, chA.Writes(), 3)
+	respsB := readResponses(t, chB.Writes(), 3)
+
+	for i, resp := range respsA {
+		if !resp.OK {
+			t.Fatalf("user A response %d failed: %+v", i, resp)
+		}
+	}
+	for i, resp := range respsB {
+		if !resp.OK {
+			t.Fatalf("user B response %d failed: %+v", i, resp)
+		}
+	}
+
+	if len(respsA[1].Entries) != 3 {
+		t.Fatalf("expected 3 directory entries for user A, got %d: %+v", len(respsA[1].Entries), respsA[1].Entries)
+	}
+	if len(respsB[1].Entries) != 3 {
+		t.Fatalf("expected 3 directory entries for user B, got %d: %+v", len(respsB[1].Entries), respsB[1].Entries)
+	}
+
+	if respsA[2].Info.Size != 6 || respsB[2].Info.Size != 6 {
+		t.Fatalf("shared file size inconsistent: A=%d B=%d", respsA[2].Info.Size, respsB[2].Info.Size)
+	}
+}
+
+// TestConcurrentStress_ReadWrite validates that many concurrent SFTP sessions
+// can read and write independent files without data corruption.
+func TestConcurrentStress_ReadWrite(t *testing.T) {
+	const numSessions = 10
+	const numFiles = 5
+
+	var wg sync.WaitGroup
+	errors := make(chan string, numSessions*numFiles*2)
+
+	for i := 0; i < numSessions; i++ {
+		tmp := t.TempDir()
+		user := currentTestUser(tmp)
+		ch := newMockChannel()
+
+		// Pre-populate messages: one put per file, then one get per file.
+		var msgs []ssh3Messages.Message
+		for f := 0; f < numFiles; f++ {
+			content := []byte(strings.Repeat(string(byte('a'+f)), 1024))
+			msgs = append(msgs, writeRequest(Request{ID: uint64(f) + 1, Cmd: "put", Path: fmt.Sprintf("file%d.txt", f), Data: content}))
+		}
+		for f := 0; f < numFiles; f++ {
+			msgs = append(msgs, writeRequest(Request{ID: uint64(numFiles + f + 1), Cmd: "get", Path: fmt.Sprintf("file%d.txt", f)}))
+		}
+
+		ch = ssh3.NewMockChannel(msgs...)
+
+		wg.Add(1)
+		go func(idx int, ch *ssh3.MockChannel, tmp string) {
+			defer wg.Done()
+			ServeChannel(nil, user, ch)
+
+			resps := readResponses(t, ch.Writes, numFiles*2)
+			for f := 0; f < numFiles; f++ {
+				put := resps[f]
+				get := resps[numFiles+f]
+				if !put.OK {
+					errors <- fmt.Sprintf("session %d put %d failed: %s", idx, f, put.Error)
+				}
+				if !get.OK {
+					errors <- fmt.Sprintf("session %d get %d failed: %s", idx, f, get.Error)
+					continue
+				}
+				want := []byte(strings.Repeat(string(byte('a'+f)), 1024))
+				if !bytes.Equal(get.Data, want) {
+					errors <- fmt.Sprintf("session %d file %d data mismatch", idx, f)
+				}
+			}
+		}(i, ch, tmp)
+	}
+
+	wg.Wait()
+	close(errors)
+
+	var errList []string
+	for e := range errors {
+		errList = append(errList, e)
+	}
+	if len(errList) > 0 {
+		t.Fatalf("concurrent stress errors:\n%s", strings.Join(errList, "\n"))
+	}
+}
+
+func TestBuildGroupIDs(t *testing.T) {
+	u := currentTestUser(t.TempDir())
+	gids, err := buildGroupIDs(u)
+	if err != nil {
+		t.Fatalf("buildGroupIDs error: %v", err)
+	}
+	if len(gids) == 0 {
+		t.Fatal("expected at least one group")
+	}
+	foundPrimary := false
+	for _, gid := range gids {
+		if gid == int(u.Gid) {
+			foundPrimary = true
+			break
+		}
+	}
+	if !foundPrimary {
+		t.Fatalf("expected primary gid %d in %v", u.Gid, gids)
 	}
 }

@@ -28,13 +28,13 @@ type FileInfo struct {
 }
 
 type Response struct {
-	ID      uint64    `json:"id"`
-	OK      bool      `json:"ok"`
-	Error   string    `json:"error,omitempty"`
-	Path    string    `json:"path,omitempty"`
+	ID      uint64     `json:"id"`
+	OK      bool       `json:"ok"`
+	Error   string     `json:"error,omitempty"`
+	Path    string     `json:"path,omitempty"`
 	Entries []FileInfo `json:"entries,omitempty"`
-	Data    []byte    `json:"data,omitempty"`
-	Info    *FileInfo `json:"info,omitempty"`
+	Data    []byte     `json:"data,omitempty"`
+	Info    *FileInfo  `json:"info,omitempty"`
 }
 
 func SendRequest(ch ssh3.Channel, req *Request) error {
