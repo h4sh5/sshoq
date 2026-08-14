@@ -515,7 +515,7 @@ func (s *ServerSession) checkFDPermission(fd int, required int) error {
 	if err := unix.Fstat(fd, &st); err != nil {
 		return err
 	}
-	return s.checkStatPermission(st.Uid, st.Gid, st.Mode, required)
+	return s.checkStatPermission(st.Uid, st.Gid, uint32(st.Mode), required)
 }
 
 func (s *ServerSession) checkStatPermission(uid, gid, mode uint32, required int) error {
@@ -562,7 +562,7 @@ func (s *ServerSession) checkAncestorExecute(path string) error {
 		if err := syscall.Stat(string(filepath.Separator), &rootSt); err != nil {
 			return err
 		}
-		if err := s.checkStatPermission(rootSt.Uid, rootSt.Gid, rootSt.Mode, accessX); err != nil {
+		if err := s.checkStatPermission(rootSt.Uid, rootSt.Gid, uint32(rootSt.Mode), accessX); err != nil {
 			return fmt.Errorf("permission denied: %w", err)
 		}
 	}
@@ -597,7 +597,7 @@ func (s *ServerSession) checkAncestorExecute(path string) error {
 		if (st.Mode & syscall.S_IFMT) != syscall.S_IFDIR {
 			return syscall.ENOTDIR
 		}
-		if err := s.checkStatPermission(st.Uid, st.Gid, st.Mode, accessX); err != nil {
+		if err := s.checkStatPermission(st.Uid, st.Gid, uint32(st.Mode), accessX); err != nil {
 			return fmt.Errorf("permission denied: %w", err)
 		}
 	}
