@@ -657,10 +657,21 @@ func dropPrivileges(user *unix_util.User) error {
 	}
 
 	// Drop all user IDs (real, effective, saved) to the target user.
-	if err := syscall.Setresuid(int(user.Uid), int(user.Uid), int(user.Uid)); err != nil {
-		return fmt.Errorf("setresuid failed: %w", err)
+	if err := setAllUIDs(int(user.Uid)); err != nil {
+		return fmt.Errorf("setuid failed: %w", err)
 	}
 
+	return nil
+}
+
+// setAllUIDs sets the real, effective, and saved user IDs to uid. On Linux it
+// uses Setresuid when available; on other Unix platforms it falls back to
+// Setreuid, which updates the real and effective IDs and, on BSD-derived
+// systems, also sets the saved ID to the effective ID.
+func setAllUIDs(uid int) error {
+	if err := syscall.Setreuid(uid, uid); err != nil {
+		return err
+	}
 	return nil
 }
 
