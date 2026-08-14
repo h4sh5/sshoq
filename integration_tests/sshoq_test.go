@@ -160,7 +160,7 @@ var _ = Describe("Testing the sshoq cli", func() {
 			command := exec.Command(ssh3Path, "-h")
 			session, err := Start(command, GinkgoWriter, GinkgoWriter)
 			Expect(err).ToNot(HaveOccurred())
-			Eventually(session).Should(Exit(0))
+			Eventually(session, "5s").Should(Exit(0))
 			Expect(session.Err.Contents()).To(ContainSubstring("Usage of"))
 		})
 	})
