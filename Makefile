@@ -34,7 +34,7 @@ integration-tests:
 		CGO_ENABLED=1 \
 		GOOS=$(GOOS) \
 		SSH3_INTEGRATION_TESTS_WITH_SERVER_ENABLED=1 \
-		go run github.com/onsi/ginkgo/v2/ginkgo ./integration_tests
+		go run -v github.com/onsi/ginkgo/v2/ginkgo ./integration_tests
 
 install:
 	$(GO_OPTS) go install $(BUILDFLAGS) ./cmd/sshoq
