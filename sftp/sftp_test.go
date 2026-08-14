@@ -400,6 +400,65 @@ func TestUploadFile(t *testing.T) {
 	}
 }
 
+func TestDownloadRecursive(t *testing.T) {
+	tmp := t.TempDir()
+	localRoot := filepath.Join(tmp, "downloaded")
+
+	ch := newMockChannel(
+		makeJSONDataMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "remote-dir", IsDir: true}}),
+		makeJSONDataMsg(&Response{ID: 2, OK: true, Entries: []FileInfo{{Name: "subdir", IsDir: true}, {Name: "file.txt", Size: 5, Mode: 0644}}}),
+		makeJSONDataMsg(&Response{ID: 3, OK: true, Info: &FileInfo{Name: "subdir", IsDir: true}}),
+		makeJSONDataMsg(&Response{ID: 4, OK: true, Entries: []FileInfo{{Name: "nested.txt", Size: 11, Mode: 0644}}}),
+		makeJSONDataMsg(&Response{ID: 5, OK: true, Data: []byte("hello world")}),
+		makeJSONDataMsg(&Response{ID: 6, OK: true, Data: []byte{}}),
+		makeJSONDataMsg(&Response{ID: 7, OK: true, Data: []byte("hello")}),
+		makeJSONDataMsg(&Response{ID: 8, OK: true, Data: []byte{}}),
+	)
+
+	if err := downloadRecursive(ch, "remote-dir", localRoot); err != nil {
+		t.Fatalf("downloadRecursive error: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(localRoot, "file.txt"))
+	if err != nil {
+		t.Fatalf("read root file: %v", err)
+	}
+	if string(got) != "hello" {
+		t.Fatalf("unexpected root file content: %q", got)
+	}
+
+	nested, err := os.ReadFile(filepath.Join(localRoot, "subdir", "nested.txt"))
+	if err != nil {
+		t.Fatalf("read nested file: %v", err)
+	}
+	if string(nested) != "hello world" {
+		t.Fatalf("unexpected nested file content: %q", nested)
+	}
+}
+
+func TestUploadRecursive(t *testing.T) {
+	tmp := t.TempDir()
+	localRoot := filepath.Join(tmp, "local-dir")
+	os.MkdirAll(filepath.Join(localRoot, "subdir"), 0o755)
+	os.WriteFile(filepath.Join(localRoot, "file.txt"), []byte("hello"), 0644)
+	os.WriteFile(filepath.Join(localRoot, "subdir", "nested.txt"), []byte("world"), 0644)
+
+	ch := newMockChannel(
+		makeJSONDataMsg(&Response{ID: 1, OK: false, Error: "no such file"}),
+		makeJSONDataMsg(&Response{ID: 2, OK: true}),
+		makeJSONDataMsg(&Response{ID: 3, OK: true}),
+		makeJSONDataMsg(&Response{ID: 4, OK: true, Info: &FileInfo{Name: "subdir", IsDir: true}}),
+		makeJSONDataMsg(&Response{ID: 5, OK: true}),
+	)
+
+	if err := uploadRecursive(ch, localRoot, "remote-dir"); err != nil {
+		t.Fatalf("uploadRecursive error: %v", err)
+	}
+	if len(ch.Writes) != 5 {
+		t.Fatalf("expected 5 requests, got %d", len(ch.Writes))
+	}
+}
+
 func TestUploadFile_DirectoryError(t *testing.T) {
 	tmp := t.TempDir()
 	dirPath := filepath.Join(tmp, "adir")
