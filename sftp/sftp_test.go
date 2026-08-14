@@ -3,6 +3,7 @@ package sftp
 import (
 	"encoding/json"
 	"os"
+	osuser "os/user"
 	"path/filepath"
 	"testing"
 
@@ -10,6 +11,19 @@ import (
 	ssh3Messages "github.com/h4sh5/sshoq/message"
 	"github.com/h4sh5/sshoq/util/unix_util"
 )
+
+func currentTestUser(dir string) *unix_util.User {
+	username := ""
+	if u, err := osuser.Current(); err == nil {
+		username = u.Username
+	}
+	return &unix_util.User{
+		Username: username,
+		Uid:      uint64(os.Getuid()),
+		Gid:      uint64(os.Getgid()),
+		Dir:      dir,
+	}
+}
 
 func makeDataMsg(data []byte) *ssh3Messages.DataOrExtendedDataMessage {
 	return &ssh3Messages.DataOrExtendedDataMessage{
@@ -196,16 +210,16 @@ func TestServerHandleRequest_put(t *testing.T) {
 	}
 }
 
-func TestServerHandleRequest_putCreatesDir(t *testing.T) {
+func TestServerHandleRequest_putDoesNotCreateParentDir(t *testing.T) {
 	tmp := t.TempDir()
 	sess := &ServerSession{currentDir: tmp}
 	resp := sess.handleRequest(Request{Cmd: "put", Path: filepath.Join("nested", "file.txt"), Data: []byte("x")})
-	if !resp.OK {
-		t.Fatalf("put failed: %s", resp.Error)
+	if resp.OK || resp.Error == "" {
+		t.Fatalf("expected put failure without parent directory, got %+v", resp)
 	}
 	_, err := os.Stat(filepath.Join(tmp, "nested", "file.txt"))
-	if err != nil {
-		t.Fatalf("file not created: %v", err)
+	if !os.IsNotExist(err) {
+		t.Fatalf("file should not exist, got err=%v", err)
 	}
 }
 
@@ -241,7 +255,6 @@ func TestServerHandleRequest_rmdir(t *testing.T) {
 	tmp := t.TempDir()
 	d := filepath.Join(tmp, "deldir")
 	os.Mkdir(d, 0755)
-	os.WriteFile(filepath.Join(d, "inner.txt"), []byte("x"), 0644)
 
 	sess := &ServerSession{currentDir: tmp}
 	resp := sess.handleRequest(Request{Cmd: "rmdir", Path: "deldir"})
@@ -250,6 +263,19 @@ func TestServerHandleRequest_rmdir(t *testing.T) {
 	}
 	if _, err := os.Stat(d); !os.IsNotExist(err) {
 		t.Fatal("directory should not exist after rmdir")
+	}
+}
+
+func TestServerHandleRequest_rmdirNonEmptyFails(t *testing.T) {
+	tmp := t.TempDir()
+	d := filepath.Join(tmp, "deldir")
+	os.Mkdir(d, 0755)
+	os.WriteFile(filepath.Join(d, "inner.txt"), []byte("x"), 0644)
+
+	sess := &ServerSession{currentDir: tmp}
+	resp := sess.handleRequest(Request{Cmd: "rmdir", Path: "deldir"})
+	if resp.OK || resp.Error == "" {
+		t.Fatalf("expected rmdir failure for non-empty directory, got %+v", resp)
 	}
 }
 
@@ -299,7 +325,7 @@ func TestServerRespond(t *testing.T) {
 
 func TestServeChannel_EOF(t *testing.T) {
 	ch := newMockChannel() // no messages => EOF immediately
-	user := &unix_util.User{Username: "test", Dir: t.TempDir()}
+	user := currentTestUser(t.TempDir())
 	ServeChannel(nil, user, ch)
 	if !ch.Closed {
 		t.Fatal("expected channel to be closed on EOF")
@@ -495,6 +521,37 @@ func TestServerHandleRequest_getMissing(t *testing.T) {
 	}
 }
 
+func TestServerHandleRequest_getDeniedByPermissions(t *testing.T) {
+	tmp := t.TempDir()
+	f := filepath.Join(tmp, "secret.txt")
+	os.WriteFile(f, []byte("secret"), 0600)
+	if err := os.Chmod(f, 0000); err != nil {
+		t.Fatalf("chmod failed: %v", err)
+	}
+	defer os.Chmod(f, 0600)
+
+	sess := &ServerSession{currentDir: tmp}
+	resp := sess.handleRequest(Request{Cmd: "get", Path: "secret.txt"})
+	if resp.OK || resp.Error == "" {
+		t.Fatalf("expected permission error, got %+v", resp)
+	}
+}
+
+func TestServerHandleRequest_putDeniedWhenParentNotWritable(t *testing.T) {
+	tmp := t.TempDir()
+	noWriteDir := filepath.Join(tmp, "readonly")
+	if err := os.Mkdir(noWriteDir, 0555); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	defer os.Chmod(noWriteDir, 0755)
+
+	sess := &ServerSession{currentDir: tmp}
+	resp := sess.handleRequest(Request{Cmd: "put", Path: filepath.Join("readonly", "file.txt"), Data: []byte("x")})
+	if resp.OK || resp.Error == "" {
+		t.Fatalf("expected permission error, got %+v", resp)
+	}
+}
+
 func TestServerHandleRequest_rmMissing(t *testing.T) {
 	tmp := t.TempDir()
 	sess := &ServerSession{currentDir: tmp}
@@ -529,7 +586,7 @@ func TestServeChannel_TwoRequests(t *testing.T) {
 		makeDataMsg(b2),
 	)
 
-	user := &unix_util.User{Username: "test", Dir: tmp}
+	user := currentTestUser(tmp)
 	ServeChannel(nil, user, ch)
 
 	if len(ch.Writes) != 2 {
