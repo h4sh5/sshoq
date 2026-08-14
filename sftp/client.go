@@ -21,6 +21,9 @@ func RunInteractiveClient(c *client.Client) error {
 		return fmt.Errorf("could not open sftp channel: %w", err)
 	}
 	defer channel.Close()
+	if err := channel.WaitOpen(); err != nil {
+		return fmt.Errorf("could not open sftp channel: %w", err)
+	}
 
 	localDir, _ := os.Getwd()
 	remoteDir := "."
@@ -282,7 +285,7 @@ type sftpFileInfo struct {
 
 func (f *sftpFileInfo) Name() string       { return f.name }
 func (f *sftpFileInfo) Size() int64        { return f.size }
-func (f *sftpFileInfo) Mode() os.FileMode { return f.mode }
+func (f *sftpFileInfo) Mode() os.FileMode  { return f.mode }
 func (f *sftpFileInfo) ModTime() time.Time { return f.modTime }
 func (f *sftpFileInfo) IsDir() bool        { return f.mode.IsDir() }
 func (f *sftpFileInfo) Sys() interface{}   { return nil }

@@ -113,6 +113,19 @@ func NewServer(maxPacketSize uint64, defaultDatagramQueueSize uint64, h3Server *
 
 			newChannel = &UDPReverseForwardingChannelImpl{Channel: newChannel, RemoteAddr: tcpAddrRemote, LocalAddr: tcpAddrLocal}
 		}
+		if conversation.channelOpenHandler != nil {
+			err := conversation.channelOpenHandler(newChannel)
+			if err != nil {
+				var openFailure ChannelOpenFailure
+				if errors.As(err, &openFailure) {
+					if rejectErr := newChannel.RejectOpen(openFailure.ReasonCode, openFailure.ErrorMsg); rejectErr != nil {
+						return false, rejectErr
+					}
+					return true, nil
+				}
+				return false, err
+			}
+		}
 		conversation.channelsAcceptQueue.Add(newChannel)
 		return true, nil
 	}

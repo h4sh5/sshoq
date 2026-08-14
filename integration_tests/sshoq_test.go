@@ -34,6 +34,7 @@ var username string
 var ecdsaUsername string
 
 const serverBind = "127.0.0.1:4433"
+const serverBindSFTPDisabled = "127.0.0.1:4434"
 const proxyServerBind = "127.0.0.1:4444"
 
 var oldServerBinds map[string]string = map[string]string{
@@ -81,6 +82,20 @@ var _ = BeforeSuite(func() {
 		Expect(err).ToNot(HaveOccurred())
 
 		serverSessions[serverBind] = session
+
+		disabledSFTPServerCommand := exec.Command(ssh3ServerPath,
+			"-bind", serverBindSFTPDisabled,
+			"-v",
+			"-enable-password-login",
+			"-disable-sftp",
+			"-url-path", DEFAULT_URL_PATH,
+			"-cert", os.Getenv("CERT_PEM"),
+			"-key", os.Getenv("CERT_PRIV_KEY"))
+		disabledSFTPServerCommand.Env = append(disabledSFTPServerCommand.Env, "SSH3_LOG_LEVEL=debug")
+		session, err = Start(disabledSFTPServerCommand, GinkgoWriter, GinkgoWriter)
+		Expect(err).ToNot(HaveOccurred())
+
+		serverSessions[serverBindSFTPDisabled] = session
 
 		for tag, bind := range oldServerBinds {
 			gobin, err := os.MkdirTemp("", fmt.Sprintf("sshoq-backwards-compatible-versions-%s", tag))
@@ -229,6 +244,15 @@ var _ = Describe("Testing the sshoq cli", func() {
 					Expect(err).ToNot(HaveOccurred())
 					Eventually(session).Should(Exit(0))
 					Eventually(session).Should(Say("Hello, World!\n"))
+				})
+
+				It("Should return a useful error when SFTP is disabled on the server", func() {
+					clientArgs = getClientArgsWithBind(rsaPrivKeyPath, serverBindSFTPDisabled, "-sftp")
+					command := exec.Command(ssh3Path, clientArgs...)
+					session, err := Start(command, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session).Should(Exit(255))
+					Eventually(session.Err).Should(Say("could not open sftp channel: .*SFTP is disabled on the server"))
 				})
 
 				It("Should return the correct exit status", func() {
