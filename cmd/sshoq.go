@@ -26,6 +26,7 @@ import (
 	"github.com/h4sh5/sshoq/client"
 	client_config "github.com/h4sh5/sshoq/client/config"
 	"github.com/h4sh5/sshoq/internal"
+	sshoqsftp "github.com/h4sh5/sshoq/sftp"
 	"github.com/h4sh5/sshoq/util"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
@@ -417,6 +418,7 @@ func ClientMain() int {
 	flag.StringVar(forwardTCP, "L", *forwardTCP, "alias for -forward-tcp")
 	flag.StringVar(reverseTCP, "R", *reverseTCP, "alias for -reverse-tcp")
 	proxyJump := flag.String("proxy-jump", "", "if set, performs a proxy jump using the specified remote host as proxy (requires server with version >= 0.1.5)")
+	sftpMode := flag.Bool("sftp", false, "if set, start an interactive SFTP session")
 
 	var flagValues []*FlagValue
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
@@ -931,7 +933,11 @@ func ClientMain() int {
 
 	}
 
-	err = c.RunSession(tty, *forwardSSHAgent, *forcePTYAlloc, command...)
+	if *sftpMode {
+		err = sshoqsftp.RunInteractiveClient(c)
+	} else {
+		err = c.RunSession(tty, *forwardSSHAgent, *forcePTYAlloc, command...)
+	}
 	switch sessionError := err.(type) {
 	case client.ExitStatus:
 		log.Info().Msgf("the process exited with status %d", sessionError.StatusCode)
@@ -940,7 +946,10 @@ func ClientMain() int {
 		log.Error().Msgf("the process exited with signal %s: %s", sessionError.Signal, sessionError.ErrorMessageUTF8)
 		return -1
 	default:
-		log.Error().Msgf("an error was encountered when running the session: %s", sessionError)
-		return -1
+		if err != nil {
+			log.Error().Msgf("an error was encountered when running the session: %s", sessionError)
+			return -1
+		}
+		return 0
 	}
 }

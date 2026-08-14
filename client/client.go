@@ -1216,6 +1216,7 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, forcePTYAlloc bo
 
 				log.Trace().Msgf("received stderr data %s", message.Data)
 			}
+			// TODO for sftp: a SSH_EXTENDED_DATA_FILE type to receive file data mapped to a request ID (maybe in a separate client), handle it by saving it to a file
 		}
 	}
 }
