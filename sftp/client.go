@@ -135,42 +135,52 @@ func RunInteractiveClient(c *client.Client) error {
 			}
 
 		case "get":
-			if len(parts) < 2 {
-				fmt.Println("usage: get <remote-file> [local-file]")
+			recursive, remoteSource, localTarget, err := parseTransferArgs(parts, "get")
+			if err != nil {
+				fmt.Println(err.Error())
 				continue
 			}
-			remoteFile := parts[1]
+			remoteFile := remoteSource
 			if !path.IsAbs(remoteFile) {
 				remoteFile = path.Join(remoteDir, remoteFile)
 			}
-			localFile := filepath.Base(remoteFile)
-			if len(parts) > 2 {
-				localFile = parts[2]
+			localFile := localTarget
+			if localFile == "" {
+				localFile = filepath.Base(filepath.Clean(remoteFile))
 			}
 			localFile = filepath.Join(localDir, localFile)
 
-			if err := downloadFile(channel, remoteFile, localFile); err != nil {
+			if recursive {
+				if err := downloadRecursive(channel, remoteFile, localFile); err != nil {
+					fmt.Fprintf(os.Stderr, "get: %s\n", err)
+				}
+			} else if err := downloadFile(channel, remoteFile, localFile); err != nil {
 				fmt.Fprintf(os.Stderr, "get: %s\n", err)
 			}
 
 		case "put":
-			if len(parts) < 2 {
-				fmt.Println("usage: put <local-file> [remote-file]")
+			recursive, localSource, remoteTarget, err := parseTransferArgs(parts, "put")
+			if err != nil {
+				fmt.Println(err.Error())
 				continue
 			}
-			localFile := parts[1]
+			localFile := localSource
 			if !filepath.IsAbs(localFile) {
 				localFile = filepath.Join(localDir, localFile)
 			}
-			remoteFile := filepath.Base(localFile)
-			if len(parts) > 2 {
-				remoteFile = parts[2]
+			remoteFile := remoteTarget
+			if remoteFile == "" {
+				remoteFile = filepath.Base(localFile)
 			}
 			if !path.IsAbs(remoteFile) {
 				remoteFile = path.Join(remoteDir, remoteFile)
 			}
 
-			if err := uploadFile(channel, localFile, remoteFile); err != nil {
+			if recursive {
+				if err := uploadRecursive(channel, localFile, remoteFile); err != nil {
+					fmt.Fprintf(os.Stderr, "put: %s\n", err)
+				}
+			} else if err := uploadFile(channel, localFile, remoteFile); err != nil {
 				fmt.Fprintf(os.Stderr, "put: %s\n", err)
 			}
 
@@ -240,13 +250,176 @@ func RunInteractiveClient(c *client.Client) error {
 	return scanner.Err()
 }
 
+func parseTransferArgs(parts []string, cmd string) (recursive bool, source string, target string, err error) {
+	if len(parts) < 2 {
+		return false, "", "", fmt.Errorf("usage: %s <source> [target]", cmd)
+	}
+
+	idx := 1
+	for idx < len(parts) && strings.HasPrefix(parts[idx], "-") {
+		if parts[idx] == "-r" || parts[idx] == "--recursive" {
+			recursive = true
+			idx++
+			continue
+		}
+		return false, "", "", fmt.Errorf("usage: %s [-r] <source> [target]", cmd)
+	}
+
+	if idx >= len(parts) {
+		return false, "", "", fmt.Errorf("usage: %s [-r] <source> [target]", cmd)
+	}
+
+	source = parts[idx]
+	idx++
+	if idx < len(parts) {
+		target = parts[idx]
+	}
+	return recursive, source, target, nil
+}
+
+func downloadRecursive(channel ssh3.Channel, remotePath, localPath string) error {
+	statResp, err := doRequest(channel, &Request{Cmd: "stat", Path: remotePath})
+	if err != nil {
+		return err
+	}
+	if !statResp.OK {
+		return fmt.Errorf("%s", statResp.Error)
+	}
+	if statResp.Info != nil && statResp.Info.IsDir {
+		if err := os.MkdirAll(localPath, 0o755); err != nil {
+			return err
+		}
+		resp, err := doRequest(channel, &Request{Cmd: "ls", Path: remotePath})
+		if err != nil {
+			return err
+		}
+		if !resp.OK {
+			return fmt.Errorf("%s", resp.Error)
+		}
+		for _, entry := range resp.Entries {
+			childRemote := path.Join(remotePath, entry.Name)
+			childLocal := filepath.Join(localPath, entry.Name)
+			if entry.IsDir {
+				if err := downloadRecursive(channel, childRemote, childLocal); err != nil {
+					return err
+				}
+			} else if err := downloadFileContents(channel, childRemote, childLocal, nil); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	return downloadFileContents(channel, remotePath, localPath, statResp.Info)
+}
+
+func downloadFileContents(channel ssh3.Channel, remotePath, localPath string, info *FileInfo) error {
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		return err
+	}
+
+	f, err := os.Create(localPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	var offset int64
+	for {
+		resp, err := doRequest(channel, &Request{Cmd: "get", Path: remotePath, Offset: offset, Limit: ChunkSize})
+		if err != nil {
+			return err
+		}
+		if !resp.OK {
+			return fmt.Errorf("%s", resp.Error)
+		}
+		if len(resp.Data) == 0 {
+			break
+		}
+		n, err := f.Write(resp.Data)
+		if err != nil {
+			return err
+		}
+		offset += int64(n)
+	}
+	fmt.Printf("Downloaded %s to %s (%d bytes)\n", remotePath, localPath, offset)
+	return nil
+}
+
+func uploadRecursive(channel ssh3.Channel, localPath, remotePath string) error {
+	info, err := os.Stat(localPath)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return uploadFile(channel, localPath, remotePath)
+	}
+	if err := ensureRemoteDir(channel, remotePath); err != nil {
+		return err
+	}
+
+	entries, err := os.ReadDir(localPath)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		childLocal := filepath.Join(localPath, entry.Name())
+		childRemote := path.Join(remotePath, entry.Name())
+		childInfo, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if childInfo.IsDir() {
+			if err := uploadRecursive(channel, childLocal, childRemote); err != nil {
+				return err
+			}
+		} else if err := uploadFile(channel, childLocal, childRemote); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureRemoteDir(channel ssh3.Channel, remotePath string) error {
+	if remotePath == "" || remotePath == "." || remotePath == "/" || remotePath == string(filepath.Separator) {
+		return nil
+	}
+
+	resp, err := doRequest(channel, &Request{Cmd: "stat", Path: remotePath})
+	if err != nil {
+		return err
+	}
+	if resp.OK {
+		if resp.Info != nil && resp.Info.IsDir {
+			return nil
+		}
+		return fmt.Errorf("%s is not a directory", remotePath)
+	}
+
+	parent := path.Dir(remotePath)
+	if parent != "." && parent != "/" && parent != remotePath {
+		if err := ensureRemoteDir(channel, parent); err != nil {
+			return err
+		}
+	}
+
+	mkdirResp, err := doRequest(channel, &Request{Cmd: "mkdir", Path: remotePath})
+	if err != nil {
+		return err
+	}
+	if !mkdirResp.OK {
+		return fmt.Errorf("%s", mkdirResp.Error)
+	}
+	return nil
+}
+
 func printHelp() {
 	fmt.Println(`Commands:
   cd <path>       change remote directory
   ls [path]       list remote directory
   pwd             print remote working directory
-  get <r> [l]     download remote file
-  put <l> [r]     upload local file
+  get [-r] <src> [dst]   download remote file or directory
+  put [-r] <src> [dst]   upload local file or directory
   mkdir <path>    create remote directory
   rm <file>       remove remote file
   rmdir <dir>     remove remote directory
@@ -309,32 +482,7 @@ func downloadFile(channel ssh3.Channel, remotePath, localPath string) error {
 		return fmt.Errorf("cannot download a directory")
 	}
 
-	f, err := os.Create(localPath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	var offset int64
-	for {
-		resp, err := doRequest(channel, &Request{Cmd: "get", Path: remotePath, Offset: offset, Limit: ChunkSize})
-		if err != nil {
-			return err
-		}
-		if !resp.OK {
-			return fmt.Errorf("%s", resp.Error)
-		}
-		if len(resp.Data) == 0 {
-			break
-		}
-		n, err := f.Write(resp.Data)
-		if err != nil {
-			return err
-		}
-		offset += int64(n)
-	}
-	fmt.Printf("Downloaded %s to %s (%d bytes)\n", remotePath, localPath, offset)
-	return nil
+	return downloadFileContents(channel, remotePath, localPath, statResp.Info)
 }
 
 func uploadFile(channel ssh3.Channel, localPath, remotePath string) error {
