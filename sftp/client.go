@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	osuser "os/user"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -430,30 +431,73 @@ func printHelp() {
 }
 
 func printEntry(name string, info os.FileInfo) {
+	fmt.Println(formatEntry(name, info))
+}
+
+// formatEntry renders one line of an ls listing, including the owning user
+// and group (resolved to names when possible, numeric IDs otherwise).
+func formatEntry(name string, info os.FileInfo) string {
 	if info == nil {
-		fmt.Println(name)
-		return
+		return name
 	}
 	mode := info.Mode().String()
 	size := strconv.FormatInt(info.Size(), 10)
 	mtime := info.ModTime().Format("Jan 02 15:04")
-	fmt.Printf("%s %10s %s %s\n", mode, size, mtime, name)
+	user, group := entryOwnership(info)
+	return fmt.Sprintf("%s %-10s %-10s %10s %s %s", mode, user, group, size, mtime, name)
+}
+
+// entryOwnership returns the display names of the owning user and group for a
+// file. Remote entries carry the names sent by the server (with numeric-ID
+// fallback); local entries resolve IDs through the local user database and
+// fall back to numeric IDs.
+func entryOwnership(info os.FileInfo) (user, group string) {
+	if f, ok := info.(*sftpFileInfo); ok {
+		user = f.userName
+		group = f.groupName
+		if user == "" {
+			user = strconv.FormatUint(uint64(f.uid), 10)
+		}
+		if group == "" {
+			group = strconv.FormatUint(uint64(f.gid), 10)
+		}
+		return user, group
+	}
+
+	uid, gid := ownershipFromInfo(info)
+	user = strconv.FormatUint(uint64(uid), 10)
+	group = strconv.FormatUint(uint64(gid), 10)
+	if u, err := osuser.LookupId(user); err == nil && u.Username != "" {
+		user = u.Username
+	}
+	if g, err := osuser.LookupGroupId(group); err == nil && g.Name != "" {
+		group = g.Name
+	}
+	return user, group
 }
 
 func sftpFileInfoFromEntry(e FileInfo) os.FileInfo {
 	return &sftpFileInfo{
-		name:    e.Name,
-		size:    e.Size,
-		mode:    os.FileMode(e.Mode),
-		modTime: time.Unix(e.ModTime, 0),
+		name:      e.Name,
+		size:      e.Size,
+		mode:      os.FileMode(e.Mode),
+		modTime:   time.Unix(e.ModTime, 0),
+		uid:       e.UID,
+		gid:       e.GID,
+		userName:  e.UserName,
+		groupName: e.GroupName,
 	}
 }
 
 type sftpFileInfo struct {
-	name    string
-	size    int64
-	mode    os.FileMode
-	modTime time.Time
+	name      string
+	size      int64
+	mode      os.FileMode
+	modTime   time.Time
+	uid       uint32
+	gid       uint32
+	userName  string
+	groupName string
 }
 
 func (f *sftpFileInfo) Name() string       { return f.name }

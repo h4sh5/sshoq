@@ -8,6 +8,7 @@ import (
 	"os"
 	osuser "os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -138,6 +139,68 @@ func TestServerHandleRequest_ls(t *testing.T) {
 	if len(resp.Entries) != 2 {
 		t.Fatalf("expected 2 entries, got %d", len(resp.Entries))
 	}
+
+	// Ownership details must be populated for every entry.
+	uid, gid := uint32(os.Getuid()), uint32(os.Getgid())
+	for _, e := range resp.Entries {
+		if e.UID != uid || e.GID != gid {
+			t.Fatalf("expected entry %s owned by %d:%d, got %d:%d", e.Name, uid, gid, e.UID, e.GID)
+		}
+		if e.UserName == "" || e.GroupName == "" {
+			t.Fatalf("expected user/group names on entry %s, got %+v", e.Name, e)
+		}
+	}
+}
+
+func TestServerHandleRequest_lsOwnershipNames(t *testing.T) {
+	tmp := t.TempDir()
+	os.WriteFile(filepath.Join(tmp, "f.txt"), []byte("x"), 0644)
+
+	sess := &ServerSession{currentDir: tmp}
+	resp := sess.handleRequest(Request{Cmd: "ls", Path: "."})
+	if !resp.OK || len(resp.Entries) != 1 {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+
+	e := resp.Entries[0]
+	uidName := strconv.FormatUint(uint64(e.UID), 10)
+	gidName := strconv.FormatUint(uint64(e.GID), 10)
+	if u, err := osuser.LookupId(uidName); err == nil {
+		uidName = u.Username
+	}
+	if g, err := osuser.LookupGroupId(gidName); err == nil {
+		gidName = g.Name
+	}
+	if e.UserName != uidName {
+		t.Fatalf("expected user name %q, got %q", uidName, e.UserName)
+	}
+	if e.GroupName != gidName {
+		t.Fatalf("expected group name %q, got %q", gidName, e.GroupName)
+	}
+}
+
+func TestServerSession_userNameFallback(t *testing.T) {
+	sess := &ServerSession{}
+	// 2^32-1 is not a valid user on any reasonable system.
+	got := sess.userName(4294967295)
+	if got != "4294967295" {
+		t.Fatalf("expected numeric fallback, got %q", got)
+	}
+	// Cached result is returned on the second call.
+	if sess.userNames[4294967295] != got {
+		t.Fatalf("expected cached user name, got %q", sess.userNames[4294967295])
+	}
+}
+
+func TestServerSession_groupNameFallback(t *testing.T) {
+	sess := &ServerSession{}
+	got := sess.groupName(4294967295)
+	if got != "4294967295" {
+		t.Fatalf("expected numeric fallback, got %q", got)
+	}
+	if sess.groupNames[4294967295] != got {
+		t.Fatalf("expected cached group name, got %q", sess.groupNames[4294967295])
+	}
 }
 
 func TestServerHandleRequest_stat(t *testing.T) {
@@ -152,6 +215,12 @@ func TestServerHandleRequest_stat(t *testing.T) {
 	}
 	if resp.Info == nil || resp.Info.Name != "test.txt" || resp.Info.Size != 5 {
 		t.Fatalf("unexpected info: %+v", resp.Info)
+	}
+	if resp.Info.UID != uint32(os.Getuid()) || resp.Info.GID != uint32(os.Getgid()) {
+		t.Fatalf("unexpected ownership: %+v", resp.Info)
+	}
+	if resp.Info.UserName == "" || resp.Info.GroupName == "" {
+		t.Fatalf("expected user/group names: %+v", resp.Info)
 	}
 }
 
@@ -341,10 +410,69 @@ func TestServeChannel_EOF(t *testing.T) {
 // --- Client tests ---
 
 func TestSftpFileInfoFromEntry(t *testing.T) {
-	e := FileInfo{Name: "foo", Size: 42, Mode: 0644, IsDir: false, ModTime: 1234567890}
+	e := FileInfo{Name: "foo", Size: 42, Mode: 0644, IsDir: false, ModTime: 1234567890, UID: 1000, GID: 1001, UserName: "alice", GroupName: "staff"}
 	info := sftpFileInfoFromEntry(e)
 	if info.Name() != "foo" || info.Size() != 42 || info.IsDir() || info.Mode() != 0644 {
 		t.Fatalf("unexpected FileInfo: %+v", info)
+	}
+	f, ok := info.(*sftpFileInfo)
+	if !ok {
+		t.Fatalf("unexpected type: %T", info)
+	}
+	if f.uid != 1000 || f.gid != 1001 || f.userName != "alice" || f.groupName != "staff" {
+		t.Fatalf("unexpected ownership: %+v", f)
+	}
+}
+
+func TestFormatEntryRemote(t *testing.T) {
+	info := sftpFileInfoFromEntry(FileInfo{
+		Name:      "notes.txt",
+		Size:      42,
+		Mode:      0644,
+		ModTime:   1700000000,
+		UID:       1000,
+		GID:       1001,
+		UserName:  "alice",
+		GroupName: "staff",
+	})
+	mtime := time.Unix(1700000000, 0).Format("Jan 02 15:04")
+	want := "-rw-r--r-- alice" + strings.Repeat(" ", 6) + "staff" + strings.Repeat(" ", 14) + "42 " + mtime + " notes.txt"
+	if got := formatEntry("notes.txt", info); got != want {
+		t.Fatalf("unexpected format:\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestFormatEntryRemoteFallsBackToNumeric(t *testing.T) {
+	info := sftpFileInfoFromEntry(FileInfo{Name: "x", Size: 1, Mode: 0600, ModTime: 0, UID: 1000, GID: 1001})
+	got := formatEntry("x", info)
+	if !strings.Contains(got, "1000") || !strings.Contains(got, "1001") {
+		t.Fatalf("expected numeric fallback in %q", got)
+	}
+}
+
+func TestFormatEntryLocal(t *testing.T) {
+	tmp := t.TempDir()
+	f := filepath.Join(tmp, "local.txt")
+	os.WriteFile(f, []byte("x"), 0644)
+	info, err := os.Stat(f)
+	if err != nil {
+		t.Fatalf("stat error: %v", err)
+	}
+	got := formatEntry("local.txt", info)
+	if !strings.Contains(got, "local.txt") {
+		t.Fatalf("missing name in %q", got)
+	}
+	uid := strconv.FormatUint(uint64(os.Getuid()), 10)
+	if u, err := osuser.LookupId(uid); err == nil {
+		if !strings.Contains(got, u.Username) {
+			t.Fatalf("missing user %q in %q", u.Username, got)
+		}
+	}
+}
+
+func TestFormatEntryNil(t *testing.T) {
+	if got := formatEntry("orphan", nil); got != "orphan" {
+		t.Fatalf("unexpected format: %q", got)
 	}
 }
 
