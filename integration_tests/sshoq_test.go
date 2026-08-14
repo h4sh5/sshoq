@@ -37,8 +37,8 @@ const serverBind = "127.0.0.1:4433"
 const proxyServerBind = "127.0.0.1:4444"
 
 var oldServerBinds map[string]string = map[string]string{
-	"v0.1.5-rc1": "127.0.0.1:5000",
-	"v0.1.5-rc5": "127.0.0.1:5001",
+	"v0.1.8":  "127.0.0.1:5000",
+	"v0.1.10": "127.0.0.1:5001",
 } // tag version to bind string
 
 func IPv6LoopbackAvailable(addrs []net.Addr) bool {
