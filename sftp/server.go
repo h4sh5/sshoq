@@ -171,22 +171,12 @@ func (s *ServerSession) handleRequest(req Request) *Response {
 		resp.Path = s.currentDir
 
 	case "cd":
-		if err := s.checkAncestorExecute(target); err != nil {
-			resp.Error = err.Error()
-			break
-		}
-		dirfd, pathArg := s.dirFDAndPath(req.Path, target)
-		fd, err := unix.Openat(dirfd, pathArg, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		fd, err := s.openPath(req.Path, target, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, accessR|accessX)
 		if err != nil {
 			resp.Error = err.Error()
 			break
 		}
 		defer unix.Close(fd)
-
-		if err := s.checkFDPermission(fd, accessR|accessX); err != nil {
-			resp.Error = fmt.Sprintf("permission denied: %s", err)
-			break
-		}
 
 		s.currentDir = target
 		resp.OK = true
@@ -195,16 +185,13 @@ func (s *ServerSession) handleRequest(req Request) *Response {
 		if target == "" {
 			target = "."
 		}
-		if err := s.checkAncestorExecute(target); err != nil {
-			resp.Error = err.Error()
-			break
-		}
-		dirfd, pathArg := s.dirFDAndPath(req.Path, target)
-		fd, err := unix.Openat(dirfd, pathArg, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		fd, err := s.openPath(req.Path, target, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, accessR|accessX)
 		if err != nil {
 			resp.Error = err.Error()
 			break
 		}
+		defer unix.Close(fd)
+
 		file := os.NewFile(uintptr(fd), target)
 		if file == nil {
 			unix.Close(fd)
@@ -212,11 +199,6 @@ func (s *ServerSession) handleRequest(req Request) *Response {
 			break
 		}
 		defer file.Close()
-
-		if err := s.checkFDPermission(fd, accessR|accessX); err != nil {
-			resp.Error = fmt.Sprintf("permission denied: %s", err)
-			break
-		}
 
 		entries, err := file.ReadDir(-1)
 		if err != nil {
@@ -240,31 +222,36 @@ func (s *ServerSession) handleRequest(req Request) *Response {
 		}
 
 	case "stat":
-		info, err := os.Stat(target)
+		fd, err := s.openPath(req.Path, target, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 		if err != nil {
 			resp.Error = err.Error()
-		} else {
-			resp.OK = true
-			resp.Info = &FileInfo{
-				Name:    info.Name(),
-				Size:    info.Size(),
-				Mode:    uint32(info.Mode()),
-				IsDir:   info.IsDir(),
-				ModTime: info.ModTime().Unix(),
-			}
+			break
+		}
+		defer unix.Close(fd)
+
+		var st unix.Stat_t
+		if err := unix.Fstat(fd, &st); err != nil {
+			resp.Error = err.Error()
+			break
+		}
+
+		resp.OK = true
+		resp.Info = &FileInfo{
+			Name:    filepath.Base(target),
+			Size:    st.Size,
+			Mode:    uint32(st.Mode),
+			IsDir:   (st.Mode & unix.S_IFMT) == unix.S_IFDIR,
+			ModTime: st.Mtim.Sec,
 		}
 
 	case "get":
-		if err := s.checkAncestorExecute(target); err != nil {
-			resp.Error = err.Error()
-			break
-		}
-		dirfd, pathArg := s.dirFDAndPath(req.Path, target)
-		fd, err := unix.Openat(dirfd, pathArg, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		fd, err := s.openPath(req.Path, target, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, accessR)
 		if err != nil {
 			resp.Error = err.Error()
 			break
 		}
+		defer unix.Close(fd)
+
 		file := os.NewFile(uintptr(fd), target)
 		if file == nil {
 			unix.Close(fd)
@@ -272,11 +259,6 @@ func (s *ServerSession) handleRequest(req Request) *Response {
 			break
 		}
 		defer file.Close()
-
-		if err := s.checkFDPermission(fd, accessR); err != nil {
-			resp.Error = fmt.Sprintf("permission denied: %s", err)
-			break
-		}
 
 		if req.Offset > 0 {
 			_, err = file.Seek(req.Offset, io.SeekStart)
@@ -456,6 +438,27 @@ func (s *ServerSession) handleRequest(req Request) *Response {
 		resp.Error = fmt.Sprintf("unknown command: %s", req.Cmd)
 	}
 	return resp
+}
+
+func (s *ServerSession) openPath(rawPath, resolvedPath string, flags int, required int) (int, error) {
+	if err := s.checkAncestorExecute(resolvedPath); err != nil {
+		return -1, err
+	}
+
+	dirfd, pathArg := s.dirFDAndPath(rawPath, resolvedPath)
+	fd, err := unix.Openat(dirfd, pathArg, flags, 0)
+	if err != nil {
+		return -1, err
+	}
+
+	if required != 0 {
+		if err := s.checkFDPermission(fd, required); err != nil {
+			unix.Close(fd)
+			return -1, fmt.Errorf("permission denied: %w", err)
+		}
+	}
+
+	return fd, nil
 }
 
 func (s *ServerSession) dirFDAndPath(rawPath, resolvedPath string) (int, string) {
