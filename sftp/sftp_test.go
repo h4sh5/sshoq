@@ -967,19 +967,6 @@ func TestConcurrentStress_ReadWrite(t *testing.T) {
 	}
 }
 
-func TestDropPrivileges_NoOpWhenAlreadyTargetUser(t *testing.T) {
-	u := currentTestUser(t.TempDir())
-	if err := dropPrivileges(u); err != nil {
-		t.Fatalf("dropPrivileges failed when already target user: %v", err)
-	}
-}
-
-func TestDropPrivileges_RequiresUser(t *testing.T) {
-	if err := dropPrivileges(nil); err == nil {
-		t.Fatal("expected error for nil user")
-	}
-}
-
 func TestBuildGroupIDs(t *testing.T) {
 	u := currentTestUser(t.TempDir())
 	gids, err := buildGroupIDs(u)

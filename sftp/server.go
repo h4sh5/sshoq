@@ -15,7 +15,6 @@ import (
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sys/unix"
 
-	ssh3 "github.com/h4sh5/sshoq"
 	ssh3Messages "github.com/h4sh5/sshoq/message"
 	"github.com/h4sh5/sshoq/util/unix_util"
 )
@@ -27,7 +26,7 @@ const (
 )
 
 type ServerSession struct {
-	channel    ssh3.Channel
+	channel    sftpChannel
 	currentDir string
 	user       *unix_util.User
 	groups     map[uint32]bool
@@ -36,7 +35,14 @@ type ServerSession struct {
 	baseIno    uint64
 }
 
-func ServeChannel(ctx context.Context, user *unix_util.User, channel ssh3.Channel) {
+// sftpChannel is the minimal channel surface used by the SFTP request loop.
+type sftpChannel interface {
+	NextMessage() (ssh3Messages.Message, error)
+	WriteData(dataBuf []byte, dataType ssh3Messages.SSHDataType) (int, error)
+	Close()
+}
+
+func serveChannelInProcess(ctx context.Context, user *unix_util.User, channel sftpChannel) {
 	session := &ServerSession{
 		channel:    channel,
 		currentDir: user.Dir,
@@ -57,12 +63,6 @@ func ServeChannel(ctx context.Context, user *unix_util.User, channel ssh3.Channe
 	log.Info().Msgf("starting SFTP session for user %s", user.Username)
 	defer channel.Close()
 	defer log.Info().Msgf("ending SFTP session for user %s", user.Username)
-
-	if err := dropPrivileges(user); err != nil {
-		log.Error().Msgf("sftp: failed to drop privileges for user %s: %s", user.Username, err)
-		session.respond(&Response{Error: "failed to drop privileges"})
-		return
-	}
 
 	for {
 		msg, err := channel.NextMessage()
@@ -624,52 +624,6 @@ func (s *ServerSession) checkAncestorExecute(path string) error {
 	}
 
 	return nil
-}
-
-// dropPrivileges switches the current OS thread's effective/real/saved user and
-// group IDs to those of the authenticated user. It also updates the
-// supplementary group list to match the user's normal login groups so that all
-// filesystem operations performed during the SFTP session use the user's own
-// permissions instead of root's.
-func dropPrivileges(user *unix_util.User) error {
-	if user == nil {
-		return fmt.Errorf("no user provided")
-	}
-
-	// If the server is already running as the target user, there is nothing to do.
-	if uint64(os.Getuid()) == user.Uid && uint64(os.Getgid()) == user.Gid {
-		return nil
-	}
-
-	groupIDs, err := buildGroupIDs(user)
-	if err != nil {
-		return fmt.Errorf("failed to build group list: %w", err)
-	}
-
-	// Set supplementary groups first, while we still have the privileges to do so.
-	if err := syscall.Setgroups(groupIDs); err != nil {
-		return fmt.Errorf("setgroups failed: %w", err)
-	}
-
-	// Drop the group ID before the user ID.
-	if err := syscall.Setgid(int(user.Gid)); err != nil {
-		return fmt.Errorf("setgid failed: %w", err)
-	}
-
-	// Drop all user IDs (real, effective, saved) to the target user.
-	if err := setAllUIDs(int(user.Uid)); err != nil {
-		return fmt.Errorf("setuid failed: %w", err)
-	}
-
-	return nil
-}
-
-// setAllUIDs sets the real, effective, and saved user IDs to uid. On Linux it
-// uses Setresuid so all three IDs are explicitly set; on other Unix platforms
-// it falls back to Setreuid, which updates the real and effective IDs and, on
-// BSD-derived systems, also sets the saved ID to the effective ID.
-func setAllUIDs(uid int) error {
-	return syscall.Setreuid(uid, uid)
 }
 
 func buildGroupIDs(user *unix_util.User) ([]int, error) {

@@ -1053,6 +1053,13 @@ func (i *autogenCertificates) Set(value string) error {
 }
 
 func ServerMain() int {
+	// SFTP child handler entry point. This must run before flag parsing and
+	// server initialization so that the forked SFTP worker starts with the
+	// smallest possible surface and with the authenticated user's privileges.
+	if os.Getenv("SSHOQ_SFTP_CHILD") == "1" {
+		return ssh3sftp.RunHandler(context.Background())
+	}
+
 	bindAddr := flag.String("bind", "[::]:443", "the address:port pair to listen to, e.g. 0.0.0.0:443")
 	verbose := flag.Bool("v", false, "verbose mode, if set")
 	displayVersion := flag.Bool("version", false, "if set, displays the software version on standard output and exit")
