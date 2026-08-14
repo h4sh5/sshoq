@@ -58,6 +58,12 @@ func ServeChannel(ctx context.Context, user *unix_util.User, channel ssh3.Channe
 	defer channel.Close()
 	defer log.Info().Msgf("ending SFTP session for user %s", user.Username)
 
+	if err := dropPrivileges(user); err != nil {
+		log.Error().Msgf("sftp: failed to drop privileges for user %s: %s", user.Username, err)
+		session.respond(&Response{Error: "failed to drop privileges"})
+		return
+	}
+
 	for {
 		msg, err := channel.NextMessage()
 		if err != nil {
@@ -618,4 +624,69 @@ func (s *ServerSession) checkAncestorExecute(path string) error {
 	}
 
 	return nil
+}
+
+// dropPrivileges switches the current OS thread's effective/real/saved user and
+// group IDs to those of the authenticated user. It also updates the
+// supplementary group list to match the user's normal login groups so that all
+// filesystem operations performed during the SFTP session use the user's own
+// permissions instead of root's.
+func dropPrivileges(user *unix_util.User) error {
+	if user == nil {
+		return fmt.Errorf("no user provided")
+	}
+
+	// If the server is already running as the target user, there is nothing to do.
+	if uint64(os.Getuid()) == user.Uid && uint64(os.Getgid()) == user.Gid {
+		return nil
+	}
+
+	groupIDs, err := buildGroupIDs(user)
+	if err != nil {
+		return fmt.Errorf("failed to build group list: %w", err)
+	}
+
+	// Set supplementary groups first, while we still have the privileges to do so.
+	if err := syscall.Setgroups(groupIDs); err != nil {
+		return fmt.Errorf("setgroups failed: %w", err)
+	}
+
+	// Drop the group ID before the user ID.
+	if err := syscall.Setgid(int(user.Gid)); err != nil {
+		return fmt.Errorf("setgid failed: %w", err)
+	}
+
+	// Drop all user IDs (real, effective, saved) to the target user.
+	if err := syscall.Setresuid(int(user.Uid), int(user.Uid), int(user.Uid)); err != nil {
+		return fmt.Errorf("setresuid failed: %w", err)
+	}
+
+	return nil
+}
+
+func buildGroupIDs(user *unix_util.User) ([]int, error) {
+	lookupUser, err := osuser.Lookup(user.Username)
+	if err != nil {
+		return []int{int(user.Gid)}, nil
+	}
+
+	gidStrs, err := lookupUser.GroupIds()
+	if err != nil {
+		return []int{int(user.Gid)}, nil
+	}
+
+	seen := map[int]bool{int(user.Gid): true}
+	groupIDs := []int{int(user.Gid)}
+	for _, gidStr := range gidStrs {
+		gid, err := strconv.Atoi(gidStr)
+		if err != nil {
+			continue
+		}
+		if !seen[gid] {
+			seen[gid] = true
+			groupIDs = append(groupIDs, gid)
+		}
+	}
+
+	return groupIDs, nil
 }
