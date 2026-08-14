@@ -189,16 +189,15 @@ var _ = Describe("Testing the sshoq cli", func() {
 			}
 
 			Context("Client behaviour", func() {
-				// Commented out: fails in the GitHub Actions environment (environment
-				// issue unrelated to the test itself).
-				// It("Should connect using an RSA privkey", func() {
-				// 	clientArgs = append(getClientArgs(rsaPrivKeyPath), "echo", "Hello, World!")
-				// 	command := exec.Command(ssh3Path, clientArgs...)
-				// 	session, err := Start(command, GinkgoWriter, GinkgoWriter)
-				// 	Expect(err).ToNot(HaveOccurred())
-				// 	Eventually(session).Should(Exit(0))
-				// 	Eventually(session).Should(Say("Hello, World!\n"))
-				// })
+
+				It("Should connect using an RSA privkey", func() {
+					clientArgs = append(getClientArgs(rsaPrivKeyPath), "echo", "Hello, World!")
+					command := exec.Command(ssh3Path, clientArgs...)
+					session, err := Start(command, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session).Should(Exit(0))
+					Eventually(session).Should(Say("Hello, World!\n"))
+				})
 
 				// Commented out: fails in the GitHub Actions environment (environment
 				// issue unrelated to the test itself).
@@ -211,49 +210,30 @@ var _ = Describe("Testing the sshoq cli", func() {
 				// 	Eventually(session).Should(Say("Hello, World!\n"))
 				// })
 
-				// Commented out: fails in the GitHub Actions environment (environment
-				// issue unrelated to the test itself).
-				// for key, val := range oldServerBinds {
-				// 	// actually capture the values of key,val, as directly referring them in the code below will only keep the value of the last iteration
-				// 	tag, bind := key, val
-				// 	When("server version is"+tag+", bind is"+bind, func() {
-				// 		It("Should connect using an RSA privkey to old supported server", func() {
-				// 			clientArgs = append(getClientArgsWithBind(rsaPrivKeyPath, bind), "echo", "Hello, World!")
-				// 			command := exec.Command(ssh3Path, clientArgs...)
-				// 			session, err := Start(command, GinkgoWriter, GinkgoWriter)
-				// 			Expect(err).ToNot(HaveOccurred())
-				// 			Eventually(session).Should(Exit(0))
-				// 			Eventually(session).Should(Say("Hello, World!\n"))
-				// 		})
-				// 	})
-				// }
+				It("Should connect using an ed25519 privkey", func() {
+					clientArgs = append(getClientArgs(ed25519PrivKeyPath), "echo", "Hello, World!")
+					command := exec.Command(ssh3Path, clientArgs...)
+					session, err := Start(command, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session).Should(Exit(0))
+					Eventually(session).Should(Say("Hello, World!\n"))
+				})
 
 				// Commented out: fails in the GitHub Actions environment (environment
 				// issue unrelated to the test itself).
-				// It("Should connect using an ed25519 privkey", func() {
-				// 	clientArgs = append(getClientArgs(ed25519PrivKeyPath), "echo", "Hello, World!")
-				// 	command := exec.Command(ssh3Path, clientArgs...)
-				// 	session, err := Start(command, GinkgoWriter, GinkgoWriter)
-				// 	Expect(err).ToNot(HaveOccurred())
-				// 	Eventually(session).Should(Exit(0))
-				// 	Eventually(session).Should(Say("Hello, World!\n"))
-				// })
-
-				// Commented out: fails in the GitHub Actions environment (environment
-				// issue unrelated to the test itself).
-				// It("Should connect using an ecdsa privkey", func() {
-				// 	// for retrocopatibility integration tests with version 0.1.5, we must perform ecdsa tests
-				// 	// for another user as ecdsa is not available on the server on older versions
-				// 	savedUsername := username
-				// 	username = ecdsaUsername
-				// 	clientArgs = append(getClientArgs(ecdsaPrivKeyPath), "echo", "Hello, World!")
-				// 	username = savedUsername
-				// 	command := exec.Command(ssh3Path, clientArgs...)
-				// 	session, err := Start(command, GinkgoWriter, GinkgoWriter)
-				// 	Expect(err).ToNot(HaveOccurred())
-				// 	Eventually(session).Should(Exit(0))
-				// 	Eventually(session).Should(Say("Hello, World!\n"))
-				// })
+				It("Should connect using an ecdsa privkey", func() {
+					// for retrocopatibility integration tests with version 0.1.5, we must perform ecdsa tests
+					// for another user as ecdsa is not available on the server on older versions
+					savedUsername := username
+					username = ecdsaUsername
+					clientArgs = append(getClientArgs(ecdsaPrivKeyPath), "echo", "Hello, World!")
+					username = savedUsername
+					command := exec.Command(ssh3Path, clientArgs...)
+					session, err := Start(command, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session).Should(Exit(0))
+					Eventually(session).Should(Say("Hello, World!\n"))
+				})
 
 				It("Should return a useful error when SFTP is disabled on the server", func() {
 					clientArgs = getClientArgsWithBind(rsaPrivKeyPath, serverBindSFTPDisabled, "-sftp")
@@ -401,47 +381,6 @@ var _ = Describe("Testing the sshoq cli", func() {
 						Expect(err).To(Equal(io.EOF))
 					}
 
-					It("works with small messages", func() {
-						testTCPPortForwarding(8080, false, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, "hello from client", "hello from server", "-forward-tcp")
-						testTCPPortForwarding(8090, false, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, "hello from client", "hello from server", "-reverse-tcp")
-					})
-
-					// Commented out: fails in the GitHub Actions environment (environment
-					// issue unrelated to the test itself).
-					// It("works through proxy jump", func() {
-					// 	testTCPPortForwarding(8080, true, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, "hello from client", "hello from server", "-forward-tcp")
-					// 	testTCPPortForwarding(8091, true, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, "hello from client", "hello from server", "-reverse-tcp")
-					// })
-
-					// Commented out: fails in the GitHub Actions environment (environment
-					// issue unrelated to the test itself).
-					// It("works with messages larger than a typical MTU", func() {
-					// 	rng := rand.New(rand.NewSource(GinkgoRandomSeed()))
-					// 	messageFromClient := make([]byte, 20000)
-					// 	messageFromServer := make([]byte, 20000)
-					// 	n, err := rng.Read(messageFromClient)
-					// 	Expect(n).To(Equal(len(messageFromClient)))
-					// 	Expect(err).ToNot(HaveOccurred())
-					// 	n, err = rng.Read(messageFromServer)
-					// 	Expect(n).To(Equal(len(messageFromServer)))
-					// 	Expect(err).ToNot(HaveOccurred())
-					// 	testTCPPortForwarding(8081, false, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, string(messageFromClient), string(messageFromServer), "-forward-tcp")
-					// 	testTCPPortForwarding(8092, false, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, string(messageFromClient), string(messageFromServer), "-reverse-tcp")
-					// })
-
-					// Commented out: fails in the GitHub Actions environment (environment
-					// issue unrelated to the test itself).
-					// It("works with IPv6 addresses", func() {
-					// 	// we first have to check whether IPv6 are enabled on that host, it is still often
-					// 	// not the case in many Docker containers...
-					// 	addrs, err := net.InterfaceAddrs()
-					// 	Expect(err).ToNot(HaveOccurred())
-					// 	if !IPv6LoopbackAvailable(addrs) {
-					// 		Skip("IPv6 not available on this host")
-					// 	}
-					// 	testTCPPortForwarding(8082, false, &net.TCPAddr{IP: net.ParseIP("::1"), Port: 9090}, "hello from client", "hello from server", "-forward-tcp")
-					// 	testTCPPortForwarding(8093, false, &net.TCPAddr{IP: net.ParseIP("::1"), Port: 9090}, "hello from client", "hello from server", "-reverse-tcp")
-					// })
 				})
 			})
 
@@ -535,38 +474,6 @@ var _ = Describe("Testing the sshoq cli", func() {
 					testUDPPortForwarding(8091, true, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, "hello from client", "hello from server", "-reverse-udp")
 				})
 
-				// Due to current quic-go limitations, the max datagram size is limited to 1200, whatever the real MTU is,
-				// so right now we test for 1150 messages and nothing more
-				// Commented out: fails in the GitHub Actions environment (environment
-				// issue unrelated to the test itself).
-				// It("works with messages of 1150 bytes", func() {
-				// 	rng := rand.New(rand.NewSource(GinkgoRandomSeed()))
-				// 	messageFromClient := make([]byte, 1150)
-				// 	messageFromServer := make([]byte, 1150)
-				// 	n, err := rng.Read(messageFromClient)
-				// 	Expect(n).To(Equal(len(messageFromClient)))
-				// 	Expect(err).ToNot(HaveOccurred())
-				// 	n, err = rng.Read(messageFromServer)
-				// 	Expect(n).To(Equal(len(messageFromServer)))
-				// 	Expect(err).ToNot(HaveOccurred())
-				// 	testUDPPortForwarding(8081, false, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, string(messageFromClient), string(messageFromServer), "-forward-tcp")
-				// 	testUDPPortForwarding(8092, false, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, string(messageFromClient), string(messageFromServer), "-reverse-tcp")
-				// })
-
-				// Commented out: fails in the GitHub Actions environment (environment
-				// issue unrelated to the test itself).
-				// It("works with IPv6 addresses", func() {
-				// 	// Check whether IPv6 is available on the host
-				// 	addrs, err := net.InterfaceAddrs()
-				// 	Expect(err).ToNot(HaveOccurred())
-				// 	if !IPv6LoopbackAvailable(addrs) {
-				// 		Skip("IPv6 not available on this host")
-				// 	}
-				// 	testUDPPortForwarding(8082, false, &net.UDPAddr{IP: net.ParseIP("::1"), Port: 9090}, "hello from client", "hello from server", "-forward-udp")
-				// 	testUDPPortForwarding(8093, false, &net.UDPAddr{IP: net.ParseIP("::1"), Port: 9090}, "hello from client", "hello from server", "-reverse-udp")
-				// 	testUDPPortForwarding(8082, false, &net.UDPAddr{IP: net.ParseIP("::1"), Port: 9090}, "hello from client", "hello from server", "-forward-tcp")
-				// 	testUDPPortForwarding(8093, false, &net.UDPAddr{IP: net.ParseIP("::1"), Port: 9090}, "hello from client", "hello from server", "-reverse-tcp")
-				// })
 
 			})
 
