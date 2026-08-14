@@ -39,6 +39,7 @@ type Conversation struct {
 	peerVersion               Version
 
 	channelsAcceptQueue *util.AcceptQueue[Channel]
+	channelOpenHandler  func(Channel) error
 }
 
 func GenerateConversationID(tls *tls.ConnectionState) (convID ConversationID, err error) {
@@ -402,6 +403,10 @@ func (c *Conversation) AddDatagram(ctx context.Context, datagram []byte) error {
 func (c *Conversation) Close() {
 	c.controlStream.Close()
 	c.cancelContext(nil)
+}
+
+func (c *Conversation) SetChannelOpenHandler(handler func(Channel) error) {
+	c.channelOpenHandler = handler
 }
 
 func (c *Conversation) Context() context.Context {

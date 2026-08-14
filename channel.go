@@ -18,6 +18,8 @@ type ChannelOpenFailure struct {
 	ErrorMsg   string
 }
 
+const SSH_OPEN_ADMINISTRATIVELY_PROHIBITED uint64 = 1
+
 func (e ChannelOpenFailure) Error() string {
 	return fmt.Sprintf("Channel open failure: reason: %d: %s", e.ReasonCode, e.ErrorMsg)
 }
@@ -83,6 +85,8 @@ type Channel interface {
 	MaxPacketSize() uint64
 	WriteData(dataBuf []byte, dataType ssh3.SSHDataType) (int, error)
 	ChannelType() string
+	WaitOpen() error
+	RejectOpen(reasonCode uint64, errorMsg string) error
 	confirmChannel(maxPacketSize uint64) error
 	setDatagramSender(func(datagram []byte) error)
 	waitAddDatagram(ctx context.Context, datagram []byte) error
@@ -476,6 +480,30 @@ func (c *channelImpl) NextMessage() (ssh3.Message, error) {
 	return genericMessage, nil
 }
 
+func (c *channelImpl) WaitOpen() error {
+	if c.confirmReceived {
+		return nil
+	}
+	err := c.maybeSendHeader()
+	if err != nil {
+		return err
+	}
+	genericMessage, err := c.nextMessage()
+	if err != nil {
+		return err
+	}
+
+	switch message := genericMessage.(type) {
+	case *ssh3.ChannelOpenConfirmationMessage:
+		c.confirmReceived = true
+		return nil
+	case *ssh3.ChannelOpenFailureMessage:
+		return ChannelOpenFailure{ReasonCode: message.ReasonCode, ErrorMsg: message.ErrorMessageUTF8}
+	default:
+		return MessageOnNonConfirmedChannel{message: genericMessage}
+	}
+}
+
 func (c *channelImpl) maybeSendHeader() error {
 	if len(c.header) > 0 {
 		written, err := c.send.Write(c.header)
@@ -565,6 +593,19 @@ func (c *channelImpl) SendDatagram(datagram []byte) error {
 func (c *channelImpl) SendRequest(r *ssh3.ChannelRequestMessage) error {
 	//TODO: make it thread safe
 	return c.sendMessage(r)
+}
+
+func (c *channelImpl) RejectOpen(reasonCode uint64, errorMsg string) error {
+	err := c.sendMessage(&ssh3.ChannelOpenFailureMessage{
+		ReasonCode:       reasonCode,
+		ErrorMessageUTF8: errorMsg,
+		LanguageTag:      "en",
+	})
+	if err != nil {
+		return err
+	}
+	c.Close()
+	return nil
 }
 
 func (c *channelImpl) CancelRead() {

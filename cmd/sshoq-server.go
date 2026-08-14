@@ -39,8 +39,8 @@ import (
 	ssh3 "github.com/h4sh5/sshoq"
 	"github.com/h4sh5/sshoq/internal"
 	ssh3Messages "github.com/h4sh5/sshoq/message"
-	ssh3sftp "github.com/h4sh5/sshoq/sftp"
 	"github.com/h4sh5/sshoq/server_auth"
+	ssh3sftp "github.com/h4sh5/sshoq/sftp"
 	util "github.com/h4sh5/sshoq/util"
 	"github.com/h4sh5/sshoq/util/unix_util"
 )
@@ -1133,7 +1133,7 @@ func ServerMain() int {
 			certPathExists = true
 			keyPathExists = true
 		}
-		
+
 	}
 
 	if *verbose {
@@ -1221,6 +1221,16 @@ func ServerMain() int {
 		if err != nil {
 			return err
 		}
+		conv.SetChannelOpenHandler(func(channel ssh3.Channel) error {
+			if channel.ChannelType() == "sftp" && *disableSFTP {
+				log.Warn().Msgf("rejecting SFTP channel for user %s: feature disabled", authenticatedUsername)
+				return ssh3.ChannelOpenFailure{
+					ReasonCode: ssh3.SSH_OPEN_ADMINISTRATIVELY_PROHIBITED,
+					ErrorMsg:   "SFTP is disabled on the server",
+				}
+			}
+			return nil
+		})
 		for {
 			channel, err := conv.AcceptChannel(conv.Context())
 			if err != nil {
@@ -1238,11 +1248,6 @@ func ServerMain() int {
 				handleUDPReverseForwardingChannel(conv.Context(), authenticatedUser, conv, c)
 			default:
 				if channel.ChannelType() == "sftp" {
-					if *disableSFTP {
-						log.Warn().Msgf("rejecting SFTP channel for user %s: feature disabled", authenticatedUsername)
-						channel.Close()
-						continue
-					}
 					go ssh3sftp.ServeChannel(conv.Context(), authenticatedUser, channel)
 					continue
 				}
