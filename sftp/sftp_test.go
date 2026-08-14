@@ -5,6 +5,7 @@ import (
 	"os"
 	osuser "os/user"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	ssh3 "github.com/h4sh5/sshoq"
@@ -210,6 +211,27 @@ func TestServerHandleRequest_put(t *testing.T) {
 	}
 }
 
+func TestServerHandleRequest_putAppliesAuthenticatedUserOwnership(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to change created file ownership")
+	}
+
+	tmp := t.TempDir()
+	sess := &ServerSession{currentDir: tmp, user: &unix_util.User{Username: "test-user", Uid: 1, Gid: 1}}
+	resp := sess.handleRequest(Request{Cmd: "put", Path: "owned.txt", Data: []byte("x")})
+	if !resp.OK {
+		t.Fatalf("put failed: %s", resp.Error)
+	}
+
+	var st syscall.Stat_t
+	if err := syscall.Stat(filepath.Join(tmp, "owned.txt"), &st); err != nil {
+		t.Fatalf("stat error: %v", err)
+	}
+	if st.Uid != 1 || st.Gid != 1 {
+		t.Fatalf("expected ownership 1:1, got %d:%d", st.Uid, st.Gid)
+	}
+}
+
 func TestServerHandleRequest_putDoesNotCreateParentDir(t *testing.T) {
 	tmp := t.TempDir()
 	sess := &ServerSession{currentDir: tmp}
@@ -233,6 +255,27 @@ func TestServerHandleRequest_mkdir(t *testing.T) {
 	info, err := os.Stat(filepath.Join(tmp, "newdir"))
 	if err != nil || !info.IsDir() {
 		t.Fatalf("directory not created")
+	}
+}
+
+func TestServerHandleRequest_mkdirAppliesAuthenticatedUserOwnership(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to change created directory ownership")
+	}
+
+	tmp := t.TempDir()
+	sess := &ServerSession{currentDir: tmp, user: &unix_util.User{Username: "test-user", Uid: 2, Gid: 2}}
+	resp := sess.handleRequest(Request{Cmd: "mkdir", Path: "newdir"})
+	if !resp.OK {
+		t.Fatalf("mkdir failed: %s", resp.Error)
+	}
+
+	var st syscall.Stat_t
+	if err := syscall.Stat(filepath.Join(tmp, "newdir"), &st); err != nil {
+		t.Fatalf("stat error: %v", err)
+	}
+	if st.Uid != 2 || st.Gid != 2 {
+		t.Fatalf("expected ownership 2:2, got %d:%d", st.Uid, st.Gid)
 	}
 }
 

@@ -3,6 +3,7 @@ package sftp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -343,6 +344,13 @@ func (s *ServerSession) handleRequest(req Request) *Response {
 			resp.Error = err.Error()
 			break
 		}
+		if isNewFile {
+			if err := s.applyOwnership(fd); err != nil {
+				unix.Close(fd)
+				resp.Error = err.Error()
+				break
+			}
+		}
 		file := os.NewFile(uintptr(fd), target)
 		if file == nil {
 			unix.Close(fd)
@@ -401,7 +409,11 @@ func (s *ServerSession) handleRequest(req Request) *Response {
 		if err != nil {
 			resp.Error = err.Error()
 		} else {
-			resp.OK = true
+			if err := s.applyOwnershipForPath(parentFd, name); err != nil {
+				resp.Error = err.Error()
+			} else {
+				resp.OK = true
+			}
 		}
 
 	case "rm":
@@ -523,6 +535,35 @@ func (s *ServerSession) openParentDir(rawPath, resolvedPath string) (int, string
 		return -1, "", err
 	}
 	return fd, name, nil
+}
+
+func (s *ServerSession) applyOwnership(fd int) error {
+	if s.user == nil {
+		return nil
+	}
+
+	uid := int(s.user.Uid)
+	gid := int(s.user.Gid)
+	if uid == os.Getuid() && gid == os.Getgid() {
+		return nil
+	}
+
+	if err := unix.Fchown(fd, uid, gid); err != nil {
+		if errors.Is(err, unix.EPERM) || errors.Is(err, unix.EINVAL) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *ServerSession) applyOwnershipForPath(parentFd int, name string) error {
+	dirfd, err := unix.Openat(parentFd, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(dirfd)
+	return s.applyOwnership(dirfd)
 }
 
 func (s *ServerSession) checkFDPermission(fd int, required int) error {
