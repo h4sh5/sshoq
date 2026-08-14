@@ -35,6 +35,12 @@ type ServerSession struct {
 	baseIno    uint64
 	userNames  map[uint32]string
 	groupNames map[uint32]string
+
+	// lookupUserID and lookupGroupID resolve numeric IDs to names. They are
+	// indirections over os/user so tests can force lookup failures
+	// deterministically on every platform.
+	lookupUserID  func(string) (*osuser.User, error)
+	lookupGroupID func(string) (*osuser.Group, error)
 }
 
 // sftpChannel is the minimal channel surface used by the SFTP request loop.
@@ -175,7 +181,11 @@ func (s *ServerSession) userName(uid uint32) string {
 		return name
 	}
 	name := strconv.FormatUint(uint64(uid), 10)
-	if u, err := osuser.LookupId(name); err == nil && u.Username != "" {
+	lookup := s.lookupUserID
+	if lookup == nil {
+		lookup = osuser.LookupId
+	}
+	if u, err := lookup(name); err == nil && u.Username != "" {
 		name = u.Username
 	}
 	s.userNames[uid] = name
@@ -193,7 +203,11 @@ func (s *ServerSession) groupName(gid uint32) string {
 		return name
 	}
 	name := strconv.FormatUint(uint64(gid), 10)
-	if g, err := osuser.LookupGroupId(name); err == nil && g.Name != "" {
+	lookup := s.lookupGroupID
+	if lookup == nil {
+		lookup = osuser.LookupGroupId
+	}
+	if g, err := lookup(name); err == nil && g.Name != "" {
 		name = g.Name
 	}
 	s.groupNames[gid] = name

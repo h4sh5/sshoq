@@ -180,26 +180,72 @@ func TestServerHandleRequest_lsOwnershipNames(t *testing.T) {
 }
 
 func TestServerSession_userNameFallback(t *testing.T) {
-	sess := &ServerSession{}
-	// 2^32-1 is not a valid user on any reasonable system.
-	got := sess.userName(4294967295)
-	if got != "4294967295" {
+	sess := &ServerSession{
+		lookupUserID: func(string) (*osuser.User, error) {
+			return nil, fmt.Errorf("no such user")
+		},
+	}
+	got := sess.userName(1000)
+	if got != "1000" {
 		t.Fatalf("expected numeric fallback, got %q", got)
 	}
 	// Cached result is returned on the second call.
-	if sess.userNames[4294967295] != got {
-		t.Fatalf("expected cached user name, got %q", sess.userNames[4294967295])
+	if sess.userNames[1000] != got {
+		t.Fatalf("expected cached user name, got %q", sess.userNames[1000])
+	}
+}
+
+func TestServerSession_userNameCaching(t *testing.T) {
+	calls := 0
+	sess := &ServerSession{
+		lookupUserID: func(id string) (*osuser.User, error) {
+			calls++
+			return &osuser.User{Username: "alice"}, nil
+		},
+	}
+	if got := sess.userName(1000); got != "alice" {
+		t.Fatalf("unexpected user name: %q", got)
+	}
+	if got := sess.userName(1000); got != "alice" {
+		t.Fatalf("unexpected cached user name: %q", got)
+	}
+	if calls != 1 {
+		t.Fatalf("expected 1 lookup, got %d", calls)
 	}
 }
 
 func TestServerSession_groupNameFallback(t *testing.T) {
-	sess := &ServerSession{}
-	got := sess.groupName(4294967295)
-	if got != "4294967295" {
+	sess := &ServerSession{
+		lookupGroupID: func(string) (*osuser.Group, error) {
+			return nil, fmt.Errorf("no such group")
+		},
+	}
+	got := sess.groupName(1001)
+	if got != "1001" {
 		t.Fatalf("expected numeric fallback, got %q", got)
 	}
-	if sess.groupNames[4294967295] != got {
-		t.Fatalf("expected cached group name, got %q", sess.groupNames[4294967295])
+	// Cached result is returned on the second call.
+	if sess.groupNames[1001] != got {
+		t.Fatalf("expected cached group name, got %q", sess.groupNames[1001])
+	}
+}
+
+func TestServerSession_groupNameCaching(t *testing.T) {
+	calls := 0
+	sess := &ServerSession{
+		lookupGroupID: func(id string) (*osuser.Group, error) {
+			calls++
+			return &osuser.Group{Name: "staff"}, nil
+		},
+	}
+	if got := sess.groupName(1001); got != "staff" {
+		t.Fatalf("unexpected group name: %q", got)
+	}
+	if got := sess.groupName(1001); got != "staff" {
+		t.Fatalf("unexpected cached group name: %q", got)
+	}
+	if calls != 1 {
+		t.Fatalf("expected 1 lookup, got %d", calls)
 	}
 }
 
