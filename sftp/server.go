@@ -665,14 +665,11 @@ func dropPrivileges(user *unix_util.User) error {
 }
 
 // setAllUIDs sets the real, effective, and saved user IDs to uid. On Linux it
-// uses Setresuid when available; on other Unix platforms it falls back to
-// Setreuid, which updates the real and effective IDs and, on BSD-derived
-// systems, also sets the saved ID to the effective ID.
+// uses Setresuid so all three IDs are explicitly set; on other Unix platforms
+// it falls back to Setreuid, which updates the real and effective IDs and, on
+// BSD-derived systems, also sets the saved ID to the effective ID.
 func setAllUIDs(uid int) error {
-	if err := syscall.Setreuid(uid, uid); err != nil {
-		return err
-	}
-	return nil
+	return syscall.Setreuid(uid, uid)
 }
 
 func buildGroupIDs(user *unix_util.User) ([]int, error) {
