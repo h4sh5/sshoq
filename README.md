@@ -208,11 +208,10 @@ Example syntax where gateway is the jump host and 10.0.0.2 is the final destinat
 
 ### File Sharing
 
-For the time being there's no plan for sftp or scp client or server implementations for this project. 
+SFTP subsystem is part of the sshoq server and is enabled by default.
 
-However, file sharing can be done by forwarding the existing sftp-server (part of OpenSSH) on an existing system over TCP port forwarding.
+Use `sshoq -sftp user@host`  to spawn the sftp client upon connecting to use regular sftp commands such as `ls`, `cd` and `get` to retrieve files.
 
-For example, this is how you can use it with [SSHFS](https://github.com/libfuse/sshfs):
 
 #### File Sharing with SSHFS
 
