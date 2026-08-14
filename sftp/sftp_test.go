@@ -93,6 +93,35 @@ func TestServerHandleRequest_pwd(t *testing.T) {
 	}
 }
 
+func TestCheckAncestorExecuteUsesSessionCurrentDir(t *testing.T) {
+	tmp := t.TempDir()
+	sessionDir := filepath.Join(tmp, "session-root")
+	if err := os.MkdirAll(filepath.Join(sessionDir, "sub"), 0o755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+
+	otherDir := filepath.Join(tmp, "other")
+	if err := os.MkdirAll(otherDir, 0o755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd failed: %v", err)
+	}
+	if err := os.Chdir(otherDir); err != nil {
+		t.Fatalf("chdir failed: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(cwd)
+	})
+
+	sess := &ServerSession{currentDir: sessionDir}
+	if err := sess.checkAncestorExecute(filepath.Join("sub", "child.txt")); err != nil {
+		t.Fatalf("expected ancestor check to resolve from session current dir: %v", err)
+	}
+}
+
 func TestServerHandleRequest_cd(t *testing.T) {
 	tmp := t.TempDir()
 	sub := filepath.Join(tmp, "subdir")

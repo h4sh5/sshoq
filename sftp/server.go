@@ -613,7 +613,22 @@ func (s *ServerSession) checkAncestorExecute(path string) error {
 		return nil
 	}
 
-	if filepath.IsAbs(clean) {
+	resolved := s.resolvePath(clean)
+	if resolved == "." || resolved == "" {
+		return nil
+	}
+	resolved = filepath.Clean(resolved)
+
+	if resolved == string(filepath.Separator) {
+		return nil
+	}
+
+	parts := strings.Split(strings.TrimPrefix(resolved, string(filepath.Separator)), string(filepath.Separator))
+	if len(parts) == 0 {
+		return nil
+	}
+
+	if filepath.IsAbs(resolved) {
 		var rootSt syscall.Stat_t
 		if err := syscall.Stat(string(filepath.Separator), &rootSt); err != nil {
 			return err
@@ -623,29 +638,14 @@ func (s *ServerSession) checkAncestorExecute(path string) error {
 		}
 	}
 
-	parts := strings.Split(clean, string(filepath.Separator))
-	if len(parts) <= 1 {
-		return nil
-	}
-
-	current := ""
-	if filepath.IsAbs(clean) {
-		current = string(filepath.Separator)
-		parts = strings.Split(strings.TrimPrefix(clean, string(filepath.Separator)), string(filepath.Separator))
-	}
-
+	current := string(filepath.Separator)
 	for i := 0; i < len(parts)-1; i++ {
 		part := parts[i]
 		if part == "" || part == "." {
 			continue
 		}
 
-		if current == "" {
-			current = part
-		} else {
-			current = filepath.Join(current, part)
-		}
-
+		current = filepath.Join(current, part)
 		var st syscall.Stat_t
 		if err := syscall.Stat(current, &st); err != nil {
 			return err
