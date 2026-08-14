@@ -240,18 +240,18 @@ func (s *ServerSession) handleRequest(req Request) *Response {
 		}
 
 	case "stat":
-		info, err := os.Stat(target)
+		st, err := s.statPath(req.Path, target)
 		if err != nil {
 			resp.Error = err.Error()
-		} else {
-			resp.OK = true
-			resp.Info = &FileInfo{
-				Name:    info.Name(),
-				Size:    info.Size(),
-				Mode:    uint32(info.Mode()),
-				IsDir:   info.IsDir(),
-				ModTime: info.ModTime().Unix(),
-			}
+			break
+		}
+		resp.OK = true
+		resp.Info = &FileInfo{
+			Name:    filepath.Base(target),
+			Size:    st.Size,
+			Mode:    uint32(st.Mode),
+			IsDir:   (st.Mode & unix.S_IFMT) == unix.S_IFDIR,
+			ModTime: st.Mtim.Sec,
 		}
 
 	case "get":
@@ -456,6 +456,21 @@ func (s *ServerSession) handleRequest(req Request) *Response {
 		resp.Error = fmt.Sprintf("unknown command: %s", req.Cmd)
 	}
 	return resp
+}
+
+func (s *ServerSession) statPath(rawPath, resolvedPath string) (*unix.Stat_t, error) {
+	if err := s.checkAncestorExecute(resolvedPath); err != nil {
+		return nil, err
+	}
+
+	dirfd, pathArg := s.dirFDAndPath(rawPath, resolvedPath)
+
+	var st unix.Stat_t
+	if err := unix.Fstatat(dirfd, pathArg, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return nil, err
+	}
+
+	return &st, nil
 }
 
 func (s *ServerSession) dirFDAndPath(rawPath, resolvedPath string) (int, string) {
