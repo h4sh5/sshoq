@@ -1057,6 +1057,7 @@ func ServerMain() int {
 	verbose := flag.Bool("v", false, "verbose mode, if set")
 	displayVersion := flag.Bool("version", false, "if set, displays the software version on standard output and exit")
 	urlPath := flag.String("url-path", "/sshoq-server", "the secret URL path on which the ssh3 server listens")
+	disableSFTP := flag.Bool("disable-sftp", false, "if set, disable the built-in SFTP channel handler on the server")
 	generateSelfSignedCert := flag.Bool("generate-selfsigned-cert", false, "if set, generates a self-self-signed cerificate and key "+
 		"that will be stored at the paths indicated by the -cert and -key args (they must not already exist)")
 	certPath := flag.String("cert", "./cert.pem", "the filename of the server certificate (or fullchain)")
@@ -1237,6 +1238,11 @@ func ServerMain() int {
 				handleUDPReverseForwardingChannel(conv.Context(), authenticatedUser, conv, c)
 			default:
 				if channel.ChannelType() == "sftp" {
+					if *disableSFTP {
+						log.Warn().Msgf("rejecting SFTP channel for user %s: feature disabled", authenticatedUsername)
+						channel.Close()
+						continue
+					}
 					go ssh3sftp.ServeChannel(conv.Context(), authenticatedUser, channel)
 					continue
 				}
