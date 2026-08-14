@@ -675,9 +675,11 @@ func TestServeChannel_TwoRequests(t *testing.T) {
 
 // queuedMockChannel is a mock channel that returns the next queued message on
 // each NextMessage call. It is used to drive concurrent SFTP sessions from
-// a goroutine without pre-populating the full message list.
+// a goroutine without pre-populating the full message list. The embedded
+// MockChannel is accessed through mutex-protected wrappers so the test is safe
+// under the race detector.
 type queuedMockChannel struct {
-	ssh3.MockChannel
+	*ssh3.MockChannel
 	mu       sync.Mutex
 	messages []ssh3Messages.Message
 	closed   bool
@@ -685,7 +687,7 @@ type queuedMockChannel struct {
 }
 
 func newQueuedMockChannel() *queuedMockChannel {
-	q := &queuedMockChannel{}
+	q := &queuedMockChannel{MockChannel: ssh3.NewMockChannel()}
 	q.cond = sync.NewCond(&q.mu)
 	return q
 }
@@ -699,9 +701,9 @@ func (q *queuedMockChannel) enqueue(msgs ...ssh3Messages.Message) {
 
 func (q *queuedMockChannel) Close() {
 	q.mu.Lock()
+	defer q.mu.Unlock()
 	q.closed = true
 	q.cond.Broadcast()
-	q.mu.Unlock()
 	q.MockChannel.Close()
 }
 
@@ -720,13 +722,31 @@ func (q *queuedMockChannel) NextMessage() (ssh3Messages.Message, error) {
 	return msg, nil
 }
 
+func (q *queuedMockChannel) WriteData(dataBuf []byte, dataType ssh3Messages.SSHDataType) (int, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.MockChannel.WriteData(dataBuf, dataType)
+}
+
+func (q *queuedMockChannel) Writes() [][]byte {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.MockChannel.Writes
+}
+
+func (q *queuedMockChannel) IsClosed() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.MockChannel.Closed
+}
+
 // waitResponses blocks until at least n responses have been written to the
 // channel. It is used to avoid closing the channel before the server has
 // processed all queued requests.
 func (q *queuedMockChannel) waitResponses(n int) {
 	for {
 		q.mu.Lock()
-		if len(q.Writes) >= n {
+		if len(q.MockChannel.Writes) >= n {
 			q.mu.Unlock()
 			return
 		}
@@ -791,8 +811,8 @@ func TestConcurrentServeChannels_MultipleUsers(t *testing.T) {
 
 	wg.Wait()
 
-	respsA := readResponses(t, chA.Writes, 3)
-	respsB := readResponses(t, chB.Writes, 3)
+	respsA := readResponses(t, chA.Writes(), 3)
+	respsB := readResponses(t, chB.Writes(), 3)
 
 	if !respsA[0].OK || respsA[0].Path != tmpA {
 		t.Fatalf("user A pwd response: %+v", respsA[0])
@@ -815,7 +835,7 @@ func TestConcurrentServeChannels_MultipleUsers(t *testing.T) {
 		t.Fatalf("user B stat response: %+v", respsB[2])
 	}
 
-	if !chA.Closed || !chB.Closed {
+	if !chA.IsClosed() || !chB.IsClosed() {
 		t.Fatalf("expected both channels to close")
 	}
 }
@@ -859,8 +879,8 @@ func TestConcurrentServeChannels_SharedDirectory(t *testing.T) {
 
 	wg.Wait()
 
-	respsA := readResponses(t, chA.Writes, 3)
-	respsB := readResponses(t, chB.Writes, 3)
+	respsA := readResponses(t, chA.Writes(), 3)
+	respsB := readResponses(t, chB.Writes(), 3)
 
 	for i, resp := range respsA {
 		if !resp.OK {
