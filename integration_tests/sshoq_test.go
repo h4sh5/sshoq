@@ -399,6 +399,16 @@ var _ = Describe("Testing the sshoq cli", func() {
 						Expect(n).To(Equal(0))
 						Expect(err).To(Equal(io.EOF))
 					}
+					It("TCP forwarding works with small messages", func() {
+					testTCPPortForwarding(8081, false, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9091}, "hello from client", "hello from server", "-forward-udp")
+					testTCPPortForwarding(8091, false, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9091}, "hello from client", "hello from server", "-reverse-udp")
+					})
+
+					It("TCP forwarding works through proxy jump", func() {
+						testTCPPortForwarding(8081, true, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9091}, "hello from client", "hello from server", "-forward-udp")
+						testTCPPortForwarding(8091, true, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9091}, "hello from client", "hello from server", "-reverse-udp")
+					})
+					
 
 				})
 			})
@@ -491,16 +501,6 @@ var _ = Describe("Testing the sshoq cli", func() {
 				It("UDP forwarding works through proxy jump", func() {
 					testUDPPortForwarding(8080, true, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, "hello from client", "hello from server", "-forward-udp")
 					testUDPPortForwarding(8091, true, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, "hello from client", "hello from server", "-reverse-udp")
-				})
-
-				It("TCP forwarding works with small messages", func() {
-					testTCPPortForwarding(8081, false, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9091}, "hello from client", "hello from server", "-forward-udp")
-					testTCPPortForwarding(8091, false, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9091}, "hello from client", "hello from server", "-reverse-udp")
-				})
-
-				It("TCP forwarding works through proxy jump", func() {
-					testTCPPortForwarding(8081, true, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9091}, "hello from client", "hello from server", "-forward-udp")
-					testTCPPortForwarding(8091, true, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9091}, "hello from client", "hello from server", "-reverse-udp")
 				})
 
 
