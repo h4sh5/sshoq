@@ -63,7 +63,6 @@ jobs:
       - name: Integration tests
         run: sudo -E PATH=$PATH make -e integration-tests
         env:
-          RUNNER_TRACKING_ID: ""
           CERT_PEM: /cert.pem
           CERT_PRIV_KEY: /priv.key
           ATTACKER_PRIVKEY: /attacker_id_rsa
