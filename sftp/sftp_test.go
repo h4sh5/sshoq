@@ -666,3 +666,37 @@ func TestServeChannel_TwoRequests(t *testing.T) {
 		t.Fatal("expected channel closed")
 	}
 }
+
+func TestDropPrivileges_NoOpWhenAlreadyTargetUser(t *testing.T) {
+	u := currentTestUser(t.TempDir())
+	if err := dropPrivileges(u); err != nil {
+		t.Fatalf("dropPrivileges failed when already target user: %v", err)
+	}
+}
+
+func TestDropPrivileges_RequiresUser(t *testing.T) {
+	if err := dropPrivileges(nil); err == nil {
+		t.Fatal("expected error for nil user")
+	}
+}
+
+func TestBuildGroupIDs(t *testing.T) {
+	u := currentTestUser(t.TempDir())
+	gids, err := buildGroupIDs(u)
+	if err != nil {
+		t.Fatalf("buildGroupIDs error: %v", err)
+	}
+	if len(gids) == 0 {
+		t.Fatal("expected at least one group")
+	}
+	foundPrimary := false
+	for _, gid := range gids {
+		if gid == int(u.Gid) {
+			foundPrimary = true
+			break
+		}
+	}
+	if !foundPrimary {
+		t.Fatalf("expected primary gid %d in %v", u.Gid, gids)
+	}
+}
