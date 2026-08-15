@@ -1161,3 +1161,154 @@ func TestBuildGroupIDs(t *testing.T) {
 		t.Fatalf("expected primary gid %d in %v", u.Gid, gids)
 	}
 }
+
+// captureStdout runs fn while routing standard output to a buffer, returning
+// whatever fn printed to stdout.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+
+	done := make(chan string)
+	go func() {
+		out, _ := io.ReadAll(r)
+		done <- string(out)
+	}()
+
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close write end: %v", err)
+	}
+	os.Stdout = old
+
+	// w is closed, so the goroutine's ReadAll unblocks and sends the captured
+	// buffer; a plain receive cannot deadlock.
+	return <-done
+}
+
+func TestGlobSplit(t *testing.T) {
+	cases := []struct {
+		arg         string
+		wantDir     string
+		wantPattern string
+		wantOK      bool
+	}{
+		{"", "", "", false},
+		{"plain", "", "", false},
+		{"path/plain", "", "", false},
+		{"a/b.c", "", "", false},
+		{"test*", "", "test*", true},
+		{"path/test*", "path", "test*", true},
+		{"*.txt", "", "*.txt", true},
+		{"[abc]", "", "[abc]", true},
+		{"f?o", "", "f?o", true},
+		{"dir/b*c", "dir", "b*c", true},
+		{"/home/test*", "/home", "test*", true},
+	}
+	for _, c := range cases {
+		dir, pat, ok := globSplit(c.arg)
+		if dir != c.wantDir || pat != c.wantPattern || ok != c.wantOK {
+			t.Errorf("globSplit(%q) = (%q, %q, %v), want (%q, %q, %v)",
+				c.arg, dir, pat, ok, c.wantDir, c.wantPattern, c.wantOK)
+		}
+	}
+}
+
+func lsEntries(names ...string) []FileInfo {
+	out := make([]FileInfo, 0, len(names))
+	for _, n := range names {
+		out = append(out, FileInfo{Name: n})
+	}
+	return out
+}
+
+func TestClientDoLsNoArg(t *testing.T) {
+	ch := newMockChannel(makeJSONDataMsg(&Response{
+		OK:      true,
+		Entries: lsEntries("."),
+	}))
+	if err := doLs(ch, "/remote", []string{"ls"}); err != nil {
+		t.Fatalf("doLs error: %v", err)
+	}
+	var got Request
+	if len(ch.Writes) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(ch.Writes))
+	}
+	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Cmd != "ls" || got.Path != "/remote" {
+		t.Fatalf("expected ls /remote, got %s %q", got.Cmd, got.Path)
+	}
+}
+
+func TestClientDoLsWildcard(t *testing.T) {
+	ch := newMockChannel(makeJSONDataMsg(&Response{
+		OK:      true,
+		Entries: lsEntries("atest", "test", "testa", "test2", "nope"),
+	}))
+	out := captureStdout(t, func() {
+		if err := doLs(ch, "/remote/path", []string{"ls", "test*"}); err != nil {
+			t.Fatalf("doLs error: %v", err)
+		}
+	})
+
+	var got Request
+	if len(ch.Writes) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(ch.Writes))
+	}
+	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Cmd != "ls" || got.Path != "/remote/path" {
+		t.Fatalf("expected ls /remote/path, got %s %q", got.Cmd, got.Path)
+	}
+	// Only entries whose final component matches test* must be printed.
+	for _, want := range []string{"test", "testa", "test2"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in output:\n%s", want, out)
+		}
+	}
+	// Entries that do not match must not be listed. Neither "atest" nor "nope"
+	// is a substring of any matching name, so we can assert their absence.
+	if strings.Contains(out, "atest") || strings.Contains(out, "nope") {
+		t.Errorf("unexpected non-matching entry in output:\n%s", out)
+	}
+	lines := 0
+	for _, l := range strings.Split(out, "\n") {
+		if strings.TrimSpace(l) != "" {
+			lines++
+		}
+	}
+	if lines != 3 {
+		t.Errorf("expected 3 matching entries, got %d:\n%s", lines, out)
+	}
+}
+
+func TestClientDoLsNoMatch(t *testing.T) {
+	ch := newMockChannel(makeJSONDataMsg(&Response{
+		OK:      true,
+		Entries: lsEntries("one", "two"),
+	}))
+	out := captureStdout(t, func() {
+		if err := doLs(ch, "/remote", []string{"ls", "zzz*"}); err != nil {
+			t.Fatalf("doLs error: %v", err)
+		}
+	})
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("expected no output for non-matching glob, got:\n%s", out)
+	}
+}
+
+func TestClientDoLsInvalidPattern(t *testing.T) {
+	ch := newMockChannel(makeJSONDataMsg(&Response{OK: true, Entries: lsEntries("a")}))
+	err := doLs(ch, "/remote", []string{"ls", "["})
+	if err == nil {
+		t.Fatal("expected error for invalid glob pattern")
+	}
+}

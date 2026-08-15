@@ -114,25 +114,9 @@ func RunInteractiveClient(c *client.Client) error {
 			}
 
 		case "ls":
-			target := remoteDir
-			if len(parts) > 1 {
-				if path.IsAbs(parts[1]) {
-					target = parts[1]
-				} else {
-					target = path.Join(remoteDir, parts[1])
-				}
-			}
-			resp, err := doRequest(channel, &Request{Cmd: "ls", Path: target})
-			if err != nil {
+			if err := doLs(channel, remoteDir, parts); err != nil {
 				fmt.Fprintf(os.Stderr, "ls: %s\n", err)
 				continue
-			}
-			if !resp.OK {
-				fmt.Fprintf(os.Stderr, "ls: %s\n", resp.Error)
-				continue
-			}
-			for _, e := range resp.Entries {
-				printEntry(e.Name, sftpFileInfoFromEntry(e))
 			}
 
 		case "get":
@@ -249,6 +233,94 @@ func RunInteractiveClient(c *client.Client) error {
 	}
 
 	return scanner.Err()
+}
+
+func doLs(channel ssh3.Channel, remoteDir string, parts []string) error {
+	arg := ""
+	if len(parts) > 1 {
+		arg = parts[1]
+	}
+
+	// Split a possibly-globbed argument into the directory to list and a
+	// pattern to filter its entries. Glob metacharacters (*, ?, [range]) only
+	// apply to the final path component, matching shell glob semantics; "*" does
+	// not cross a "/". When arg has no metacharacters we fall back to listing
+	// the path directly, preserving the previous behavior.
+	listDir := arg
+	pattern := ""
+	if dir, pat, ok := globSplit(arg); ok {
+		listDir = dir
+		pattern = pat
+	}
+
+	// Resolve the directory relative to the remote working directory, mirroring
+	// the handling of a non-glob "ls <path>".
+	if pattern != "" || listDir != "" {
+		if listDir == "" {
+			listDir = remoteDir
+		} else if !path.IsAbs(listDir) {
+			listDir = path.Join(remoteDir, listDir)
+		}
+	} else {
+		listDir = remoteDir
+	}
+
+	resp, err := doRequest(channel, &Request{Cmd: "ls", Path: listDir})
+	if err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("%s", resp.Error)
+	}
+
+	entries := resp.Entries
+	if pattern != "" {
+		var matched []FileInfo
+		for _, e := range entries {
+			ok, err := path.Match(pattern, e.Name)
+			if err != nil {
+				return fmt.Errorf("invalid pattern \"%s\": %w", pattern, err)
+			}
+			if ok {
+				matched = append(matched, e)
+			}
+		}
+		entries = matched
+	}
+
+	for _, e := range entries {
+		printEntry(e.Name, sftpFileInfoFromEntry(e))
+	}
+	return nil
+}
+
+// globSplit reports whether arg contains glob metacharacters in its final path
+// component and, if so, returns the directory prefix (before the last "/") and
+// the pattern (the final component) to match against directory entries. When arg
+// has no metacharacters it returns ("", "", false).
+func globSplit(arg string) (dir, pattern string, ok bool) {
+	// The final path component starts after the last "/".
+	slash := -1
+	for i := 0; i < len(arg); i++ {
+		if arg[i] == '/' {
+			slash = i
+		}
+	}
+	component := arg
+	if slash >= 0 {
+		component = arg[slash+1:]
+	}
+
+	for i := 0; i < len(component); i++ {
+		switch component[i] {
+		case '*', '?', '[':
+			if slash < 0 {
+				return "", arg, true
+			}
+			return arg[:slash], arg[slash+1:], true
+		}
+	}
+	return "", "", false
 }
 
 func parseTransferArgs(parts []string, cmd string) (recursive bool, source string, target string, err error) {
@@ -417,7 +489,7 @@ func ensureRemoteDir(channel ssh3.Channel, remotePath string) error {
 func printHelp() {
 	fmt.Println(`Commands:
   cd <path>       change remote directory
-  ls [path]       list remote directory
+  ls [path]       list remote directory (path may contain * ? [glob] patterns)
   pwd             print remote working directory
   get [-r] <src> [dst]   download remote file or directory
   put [-r] <src> [dst]   upload local file or directory
