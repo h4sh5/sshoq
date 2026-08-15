@@ -33,6 +33,14 @@ type ServerSession struct {
 	baseDirFd  int
 	baseDev    uint64
 	baseIno    uint64
+	userNames  map[uint32]string
+	groupNames map[uint32]string
+
+	// lookupUserID and lookupGroupID resolve numeric IDs to names. They are
+	// indirections over os/user so tests can force lookup failures
+	// deterministically on every platform.
+	lookupUserID  func(string) (*osuser.User, error)
+	lookupGroupID func(string) (*osuser.Group, error)
 }
 
 // sftpChannel is the minimal channel surface used by the SFTP request loop.
@@ -151,6 +159,61 @@ func (s *ServerSession) pinBaseDir() error {
 	return nil
 }
 
+// ownershipFromInfo extracts the owning user and group IDs from an
+// os.FileInfo obtained via the os package (lstat on Unix). It returns
+// zero values when the underlying platform does not expose ownership.
+func ownershipFromInfo(info os.FileInfo) (uid, gid uint32) {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, 0
+	}
+	return uint32(st.Uid), uint32(st.Gid)
+}
+
+// userName resolves a numeric UID to a user name, caching the result for the
+// lifetime of the session. It falls back to the numeric ID when the name
+// cannot be resolved.
+func (s *ServerSession) userName(uid uint32) string {
+	if s.userNames == nil {
+		s.userNames = make(map[uint32]string)
+	}
+	if name, ok := s.userNames[uid]; ok {
+		return name
+	}
+	name := strconv.FormatUint(uint64(uid), 10)
+	lookup := s.lookupUserID
+	if lookup == nil {
+		lookup = osuser.LookupId
+	}
+	if u, err := lookup(name); err == nil && u.Username != "" {
+		name = u.Username
+	}
+	s.userNames[uid] = name
+	return name
+}
+
+// groupName resolves a numeric GID to a group name, caching the result for the
+// lifetime of the session. It falls back to the numeric ID when the name
+// cannot be resolved.
+func (s *ServerSession) groupName(gid uint32) string {
+	if s.groupNames == nil {
+		s.groupNames = make(map[uint32]string)
+	}
+	if name, ok := s.groupNames[gid]; ok {
+		return name
+	}
+	name := strconv.FormatUint(uint64(gid), 10)
+	lookup := s.lookupGroupID
+	if lookup == nil {
+		lookup = osuser.LookupGroupId
+	}
+	if g, err := lookup(name); err == nil && g.Name != "" {
+		name = g.Name
+	}
+	s.groupNames[gid] = name
+	return name
+}
+
 func (s *ServerSession) respond(resp *Response) error {
 	data, err := json.Marshal(resp)
 	if err != nil {
@@ -236,12 +299,17 @@ func (s *ServerSession) handleRequest(req Request) *Response {
 			if err != nil {
 				continue
 			}
+			uid, gid := ownershipFromInfo(info)
 			resp.Entries = append(resp.Entries, FileInfo{
-				Name:    e.Name(),
-				Size:    info.Size(),
-				Mode:    uint32(info.Mode()),
-				IsDir:   e.IsDir(),
-				ModTime: info.ModTime().Unix(),
+				Name:      e.Name(),
+				Size:      info.Size(),
+				Mode:      uint32(info.Mode()),
+				IsDir:     e.IsDir(),
+				ModTime:   info.ModTime().Unix(),
+				UID:       uid,
+				GID:       gid,
+				UserName:  s.userName(uid),
+				GroupName: s.groupName(gid),
 			})
 		}
 
@@ -253,11 +321,15 @@ func (s *ServerSession) handleRequest(req Request) *Response {
 		}
 		resp.OK = true
 		resp.Info = &FileInfo{
-			Name:    filepath.Base(target),
-			Size:    st.Size,
-			Mode:    uint32(st.Mode),
-			IsDir:   (st.Mode & unix.S_IFMT) == unix.S_IFDIR,
-			ModTime: st.Mtim.Sec,
+			Name:      filepath.Base(target),
+			Size:      st.Size,
+			Mode:      uint32(st.Mode),
+			IsDir:     (st.Mode & unix.S_IFMT) == unix.S_IFDIR,
+			ModTime:   st.Mtim.Sec,
+			UID:       st.Uid,
+			GID:       st.Gid,
+			UserName:  s.userName(st.Uid),
+			GroupName: s.groupName(st.Gid),
 		}
 
 	case "get":
