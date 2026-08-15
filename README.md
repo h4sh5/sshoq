@@ -57,6 +57,34 @@ make
 
 You will find the built client and server binaries in `bin/`
 
+### Running the integration tests locally
+
+The integration tests (`integration_tests/`) need a running sshoq-server, SSH
+keys and system users to exercise the client/server behaviour. On GitHub
+Actions these prerequisites are set up by the workflow, but you can also
+create them locally with the provided script (Linux and root privileges
+required):
+
+```bash
+sudo ./setup_integration_tests.sh
+```
+
+The script generates a self-signed certificate and the test SSH keys (in
+`/tmp/sshoq-integration-tests` by default, override with
+`SSH3_INTEGRATION_TESTS_KEY_DIR`), creates the `ssh3-testuser` and
+`ssh3-ecdsa-testuser` users and populates their `.ssh3/authorized_identities`.
+It is idempotent, so it can safely be re-run. If `openssh-client`, `openssl`
+or a C compiler are missing they are installed through `apt-get`.
+
+Then run the tests (root privileges are needed: the suite writes into the test
+user's home directory):
+
+```bash
+sudo -E PATH=$PATH make -e integration-tests
+```
+
+This is equivalent to `sudo make integration-tests-setup && sudo -E PATH=$PATH make -e integration-tests`.
+
 
 ## Deploying an SSHOQ server
 

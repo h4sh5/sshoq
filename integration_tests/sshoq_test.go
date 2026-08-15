@@ -348,7 +348,13 @@ var _ = Describe("Testing the sshoq cli", func() {
 						if proxyJump {
 							additionalArgs = append(additionalArgs, "-proxy-jump", fmt.Sprintf("%s@%s%s", username, proxyServerBind, DEFAULT_PROXY_URL_PATH))
 						}
-						additionalArgs = append(additionalArgs, forwardingType, fmt.Sprintf("%d@%s@%d", localPort, remoteAddr.IP, remoteAddr.Port))
+						if remoteAddr.IP.To4() == nil {
+							// with an IPv6 remote address, also bind the local forward socket on
+							// the IPv6 loopback (4-parts syntax: bindAddress@localPort@remoteIP@remotePort)
+							additionalArgs = append(additionalArgs, forwardingType, fmt.Sprintf("::1@%d@%s@%d", localPort, remoteAddr.IP, remoteAddr.Port))
+						} else {
+							additionalArgs = append(additionalArgs, forwardingType, fmt.Sprintf("%d@%s@%d", localPort, remoteAddr.IP, remoteAddr.Port))
+						}
 						clientArgs := getClientArgs(rsaPrivKeyPath, additionalArgs...)
 						command := exec.Command(ssh3Path, clientArgs...)
 						session, err := Start(command, GinkgoWriter, GinkgoWriter)
@@ -472,7 +478,13 @@ var _ = Describe("Testing the sshoq cli", func() {
 					if proxyJump {
 						additionalArgs = append(additionalArgs, "-proxy-jump", fmt.Sprintf("%s@%s%s", username, proxyServerBind, DEFAULT_PROXY_URL_PATH))
 					}
-					additionalArgs = append(additionalArgs, forwardingType, fmt.Sprintf("%d@%s@%d", localPort, remoteAddr.IP, remoteAddr.Port))
+					if remoteAddr.IP.To4() == nil {
+						// with an IPv6 remote address, also bind the local forward socket on
+						// the IPv6 loopback (4-parts syntax: bindAddress@localPort@remoteIP@remotePort)
+						additionalArgs = append(additionalArgs, forwardingType, fmt.Sprintf("::1@%d@%s@%d", localPort, remoteAddr.IP, remoteAddr.Port))
+					} else {
+						additionalArgs = append(additionalArgs, forwardingType, fmt.Sprintf("%d@%s@%d", localPort, remoteAddr.IP, remoteAddr.Port))
+					}
 					clientArgs := getClientArgs(rsaPrivKeyPath, additionalArgs...)
 					command := exec.Command(ssh3Path, clientArgs...)
 					session, err := Start(command, GinkgoWriter, GinkgoWriter)
@@ -530,8 +542,8 @@ var _ = Describe("Testing the sshoq cli", func() {
 					n, err = rng.Read(messageFromServer)
 					Expect(n).To(Equal(len(messageFromServer)))
 					Expect(err).ToNot(HaveOccurred())
-					testUDPPortForwarding(8081, false, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, string(messageFromClient), string(messageFromServer), "-forward-tcp")
-					testUDPPortForwarding(8092, false, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, string(messageFromClient), string(messageFromServer), "-reverse-tcp")
+					testUDPPortForwarding(8081, false, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, string(messageFromClient), string(messageFromServer), "-forward-udp")
+					testUDPPortForwarding(8092, false, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, string(messageFromClient), string(messageFromServer), "-reverse-udp")
 				})
 
 				It("works with IPv6 addresses", func() {
@@ -543,8 +555,6 @@ var _ = Describe("Testing the sshoq cli", func() {
 					}
 					testUDPPortForwarding(8082, false, &net.UDPAddr{IP: net.ParseIP("::1"), Port: 9090}, "hello from client", "hello from server", "-forward-udp")
 					testUDPPortForwarding(8093, false, &net.UDPAddr{IP: net.ParseIP("::1"), Port: 9090}, "hello from client", "hello from server", "-reverse-udp")
-					testUDPPortForwarding(8082, false, &net.UDPAddr{IP: net.ParseIP("::1"), Port: 9090}, "hello from client", "hello from server", "-forward-tcp")
-					testUDPPortForwarding(8093, false, &net.UDPAddr{IP: net.ParseIP("::1"), Port: 9090}, "hello from client", "hello from server", "-reverse-tcp")
 				})
 
 			})
