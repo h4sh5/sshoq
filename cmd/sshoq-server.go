@@ -365,6 +365,13 @@ func execCmdInBackground(channel ssh3.Channel, openPty *openPty, user *unix_util
 
 		readStdout := func() {
 			defer close(stdoutChan)
+			defer func() {
+				// the pipe read ends are no longer closed by Wait() (see below), so we
+				// close them once the output is fully read to avoid leaking file descriptors
+				if closer, ok := runningCommand.stdoutR.(io.Closer); ok {
+					closer.Close()
+				}
+			}()
 			if runningCommand.stdoutR != nil {
 				for {
 					buf := make([]byte, channel.MaxPacketSize())
@@ -380,6 +387,11 @@ func execCmdInBackground(channel ssh3.Channel, openPty *openPty, user *unix_util
 		}
 		readStderr := func() {
 			defer close(stderrChan)
+			defer func() {
+				if closer, ok := runningCommand.stderrR.(io.Closer); ok {
+					closer.Close()
+				}
+			}()
 			if runningCommand.stderrR != nil {
 				for {
 					buf := make([]byte, channel.MaxPacketSize())
@@ -397,7 +409,18 @@ func execCmdInBackground(channel ssh3.Channel, openPty *openPty, user *unix_util
 		go readStdout()
 		go readStderr()
 		go func() {
-			execResultChan <- runningCommand.Wait()
+			// Use Process.Wait() rather than Cmd.Wait(): the latter closes the stdout
+			// and stderr pipe read ends after the process exits, racing with the
+			// readStdout/readStderr goroutines above and potentially discarding the
+			// command output (Read then returns os.ErrClosed). The pipes are closed
+			// explicitly once fully read instead. Cmd.Wait() only additionally wraps
+			// the error in an *exec.ExitError, which is reconstructed here.
+			state, _ := runningCommand.Process.Wait()
+			var waitErr error
+			if state != nil && !state.Success() {
+				waitErr = &exec.ExitError{ProcessState: state}
+			}
+			execResultChan <- waitErr
 			close(execResultChan)
 		}()
 

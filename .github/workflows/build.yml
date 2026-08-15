@@ -15,10 +15,6 @@ jobs:
           goos: [linux]
           ecdsatestuser: [ssh3-ecdsa-testuser]
           testuser: [ssh3-testuser]
-          testpasswd: [ssh3-testpasswd]
-          ecdsatestpasswd: [ssh3-testpasswd]
-          testuserhome: [/home/ssh3-testuser]
-          ecdsatestuserhome: [/home/ssh3-ecdsatestuser]
           archparams: [{goarch: amd64, cc: gcc}] #,{goarch: arm64, cc: aarch64-linux-gnu-gcc}]
     runs-on: ubuntu-22.04
 
@@ -30,36 +26,10 @@ jobs:
           go-version: '${{matrix.go-version}}'
       - name: Install dependencies to generate ssh keys and certificates
         run: sudo apt -y update && sudo apt -y install openssh-client openssl
-      - name: Generate server cert
-        run: pushd / && sudo sh ${{ github.workspace }}/generate_openssl_selfsigned_certificate.sh && popd
-      - name: Generate testuser's SSH key
-        run: sudo ssh-keygen -b 4096 -t rsa -f /testuser_id_rsa -q -N ""
-      - name: Generate testuser's ed25519 SSH key
-        run: sudo ssh-keygen -t ed25519 -f /testuser_id_ed25519 -q -N ""
-      - name: Generate testuser's ecdsa SSH key
-        run: sudo ssh-keygen -t ecdsa -f /testuser_id_ecdsa -q -N ""
-      - name: Generate attacker's SSH key
-        run: sudo ssh-keygen -b 4096 -t rsa -f /attacker_id_rsa -q -N ""
+      - name: Set up integration test environment (users, keys, certificates)
+        run: sudo -E PATH=$PATH SSH3_INTEGRATION_TESTS_KEY_DIR=/ ${{ github.workspace }}/setup_integration_tests.sh
       - name: Install
         run: make install
-      - name: Add test user
-        run: sudo useradd -m -d ${{matrix.testuserhome}} -s /bin/bash ${{matrix.testuser}} && echo "${{matrix.testuser}}:${{matrix.testpasswd}}" | sudo chpasswd
-      - name: Add ecdsa test user (should be removed in the future when support for 0.1.5 is removed)
-        run: sudo useradd -m -d ${{matrix.ecdsatestuserhome}} -s /bin/bash ${{matrix.ecdsatestuser}} && echo "${{matrix.ecdsatestuser}}:${{matrix.ecdsatestpasswd}}" | sudo chpasswd
-      - name: Create .ssh3 directory
-        run: sudo su ${{matrix.testuser}} -c 'mkdir -p ${{matrix.testuserhome}}/.ssh ${{matrix.testuserhome}}/.ssh3'
-      - name: Create .ssh3 directory for ecdsatestuser
-        run: sudo su ${{matrix.ecdsatestuser}} -c 'mkdir -p ${{matrix.ecdsatestuserhome}}/.ssh ${{matrix.ecdsatestuserhome}}/.ssh3'
-      - name: Ensure there are no existing .profile or similar files for testuser
-        run:  sudo rm -f ${{matrix.testuserhome}}/.profile ${{matrix.testuserhome}}/.bash_profile ${{matrix.testuserhome}}/.bash_login
-      - name: add the attacker's key as commented in testuser's authorzed identities
-        run: echo "#" $(cat attacker_id_rsa.pub) | sudo tee -a ${{matrix.testuserhome}}/.ssh3/authorized_identities
-      - name: Put test public keys in testuser's authorized_identities
-        run: cat /testuser_id_rsa.pub /testuser_id_ed25519.pub | sudo tee -a ${{matrix.testuserhome}}/.ssh3/authorized_identities
-      - name: Put ecdsa public key in ecdsatestuser's authorized_identities (currently needed for retrocompatibility integration tests, ecdsatestuser should be removed in the future)
-        run: cat /testuser_id_ecdsa.pub | sudo tee -a ${{matrix.ecdsatestuserhome}}/.ssh3/authorized_identities
-      - name: log authorized_identities
-        run: cat ${{matrix.testuserhome}}/.ssh3/authorized_identities
       - name: Integration tests
         run: sudo -E PATH=$PATH make -e integration-tests
         env:

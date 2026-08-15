@@ -3,6 +3,7 @@ package integration_tests
 import (
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"os"
 	"os/exec"
@@ -189,7 +190,6 @@ var _ = Describe("Testing the sshoq cli", func() {
 			}
 
 			Context("Client behaviour", func() {
-
 				It("Should connect using an RSA privkey", func() {
 					clientArgs = append(getClientArgs(rsaPrivKeyPath), "echo", "Hello, World!")
 					command := exec.Command(ssh3Path, clientArgs...)
@@ -199,36 +199,30 @@ var _ = Describe("Testing the sshoq cli", func() {
 					Eventually(session).Should(Say("Hello, World!\n"))
 				})
 
-				// Commented out: fails in the GitHub Actions environment (environment
-				// issue unrelated to the test itself).
-				// It("Should connect using an RSA privkey through proxy jump", func() {
-				// 	clientArgs = append(getClientArgs(rsaPrivKeyPath, "-proxy-jump", fmt.Sprintf("%s@%s%s", username, proxyServerBind, DEFAULT_PROXY_URL_PATH)), "echo", "Hello, World!")
-				// 	command := exec.Command(ssh3Path, clientArgs...)
-				// 	session, err := Start(command, GinkgoWriter, GinkgoWriter)
-				// 	Expect(err).ToNot(HaveOccurred())
-				// 	Eventually(session).Should(Exit(0))
-				// 	Eventually(session).Should(Say("Hello, World!\n"))
-				// })
+				It("Should connect using an RSA privkey through proxy jump", func() {
+					clientArgs = append(getClientArgs(rsaPrivKeyPath, "-proxy-jump", fmt.Sprintf("%s@%s%s", username, proxyServerBind, DEFAULT_PROXY_URL_PATH)), "echo", "Hello, World!")
+					command := exec.Command(ssh3Path, clientArgs...)
+					session, err := Start(command, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session).Should(Exit(0))
+					Eventually(session).Should(Say("Hello, World!\n"))
+				})
 
-				// Commented out: fails in the GitHub Actions environment (environment
-				// issue unrelated to the test itself).
-				// for key, val := range oldServerBinds {
-				// 	// actually capture the values of key,val, as directly referring them in the code below will only keep the value of the last iteration
-				// 	tag, bind := key, val
-				// 	When("server version is"+tag+", bind is"+bind, func() {
-				// 		It("Should connect using an RSA privkey to old supported server", func() {
-				// 			clientArgs = append(getClientArgsWithBind(rsaPrivKeyPath, bind), "echo", "Hello, World!")
-				// 			command := exec.Command(ssh3Path, clientArgs...)
-				// 			session, err := Start(command, GinkgoWriter, GinkgoWriter)
-				// 			Expect(err).ToNot(HaveOccurred())
-				// 			Eventually(session).Should(Exit(0))
-				// 			Eventually(session).Should(Say("Hello, World!\n"))
-				// 		})
-				// 	})
-				// }
+				for key, val := range oldServerBinds {
+					// actually capture the values of key,val, as directly referring them in the code below will only keep the value of the last iteration
+					tag, bind := key, val
+					When("server version is"+tag+", bind is"+bind, func() {
+						It("Should connect using an RSA privkey to old supported server", func() {
+							clientArgs = append(getClientArgsWithBind(rsaPrivKeyPath, bind), "echo", "Hello, World!")
+							command := exec.Command(ssh3Path, clientArgs...)
+							session, err := Start(command, GinkgoWriter, GinkgoWriter)
+							Expect(err).ToNot(HaveOccurred())
+							Eventually(session).Should(Exit(0))
+							Eventually(session).Should(Say("Hello, World!\n"))
+						})
+					})
+				}
 
-				// Commented out: fails in the GitHub Actions environment (environment
-				// issue unrelated to the test itself).
 				It("Should connect using an ed25519 privkey", func() {
 					clientArgs = append(getClientArgs(ed25519PrivKeyPath), "echo", "Hello, World!")
 					command := exec.Command(ssh3Path, clientArgs...)
@@ -238,21 +232,19 @@ var _ = Describe("Testing the sshoq cli", func() {
 					Eventually(session).Should(Say("Hello, World!\n"))
 				})
 
-				// Commented out: fails in the GitHub Actions environment (environment
-				// issue unrelated to the test itself).
-				// It("Should connect using an ecdsa privkey", func() {
-				// 	// for retrocopatibility integration tests with version 0.1.5, we must perform ecdsa tests
-				// 	// for another user as ecdsa is not available on the server on older versions
-				// 	savedUsername := username
-				// 	username = ecdsaUsername
-				// 	clientArgs = append(getClientArgs(ecdsaPrivKeyPath), "echo", "Hello, World!")
-				// 	username = savedUsername
-				// 	command := exec.Command(ssh3Path, clientArgs...)
-				// 	session, err := Start(command, GinkgoWriter, GinkgoWriter)
-				// 	Expect(err).ToNot(HaveOccurred())
-				// 	Eventually(session).Should(Exit(0))
-				// 	Eventually(session).Should(Say("Hello, World!\n"))
-				// })
+				It("Should connect using an ecdsa privkey", func() {
+					// for retrocopatibility integration tests with version 0.1.5, we must perform ecdsa tests
+					// for another user as ecdsa is not available on the server on older versions
+					savedUsername := username
+					username = ecdsaUsername
+					clientArgs = append(getClientArgs(ecdsaPrivKeyPath), "echo", "Hello, World!")
+					username = savedUsername
+					command := exec.Command(ssh3Path, clientArgs...)
+					session, err := Start(command, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session).Should(Exit(0))
+					Eventually(session).Should(Say("Hello, World!\n"))
+				})
 
 				It("Should return a useful error when SFTP is disabled on the server", func() {
 					clientArgs = getClientArgsWithBind(rsaPrivKeyPath, serverBindSFTPDisabled, "-sftp")
@@ -263,34 +255,32 @@ var _ = Describe("Testing the sshoq cli", func() {
 					Eventually(session.Err).Should(Say("could not open sftp channel: .*SFTP is disabled on the server"))
 				})
 
-				// Commented out: fails in the GitHub Actions environment (environment
-				// issue unrelated to the test itself).
-				// It("Should return the correct exit status", func() {
-				// 	clientArgs0 := append(getClientArgs(rsaPrivKeyPath), "exit", "0")
-				// 	clientArgs1 := append(getClientArgs(rsaPrivKeyPath), "exit", "1")
-				// 	clientArgs255 := append(getClientArgs(rsaPrivKeyPath), "exit", "255")
-				// 	clientArgsMinus1 := append(getClientArgs(rsaPrivKeyPath), "exit", "-1")
+				It("Should return the correct exit status", func() {
+					clientArgs0 := append(getClientArgs(rsaPrivKeyPath), "exit", "0")
+					clientArgs1 := append(getClientArgs(rsaPrivKeyPath), "exit", "1")
+					clientArgs255 := append(getClientArgs(rsaPrivKeyPath), "exit", "255")
+					clientArgsMinus1 := append(getClientArgs(rsaPrivKeyPath), "exit", "-1")
 
-				// 	command0 := exec.Command(ssh3Path, clientArgs0...)
-				// 	session, err := Start(command0, GinkgoWriter, GinkgoWriter)
-				// 	Expect(err).ToNot(HaveOccurred())
-				// 	Eventually(session).Should(Exit(0))
+					command0 := exec.Command(ssh3Path, clientArgs0...)
+					session, err := Start(command0, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session).Should(Exit(0))
 
-				// 	command1 := exec.Command(ssh3Path, clientArgs1...)
-				// 	session, err = Start(command1, GinkgoWriter, GinkgoWriter)
-				// 	Expect(err).ToNot(HaveOccurred())
-				// 	Eventually(session).Should(Exit(1))
+					command1 := exec.Command(ssh3Path, clientArgs1...)
+					session, err = Start(command1, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session).Should(Exit(1))
 
-				// 	command255 := exec.Command(ssh3Path, clientArgs255...)
-				// 	session, err = Start(command255, GinkgoWriter, GinkgoWriter)
-				// 	Expect(err).ToNot(HaveOccurred())
-				// 	Eventually(session).Should(Exit(255))
+					command255 := exec.Command(ssh3Path, clientArgs255...)
+					session, err = Start(command255, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session).Should(Exit(255))
 
-				// 	commandMinus1 := exec.Command(ssh3Path, clientArgsMinus1...)
-				// 	session, err = Start(commandMinus1, GinkgoWriter, GinkgoWriter)
-				// 	Expect(err).ToNot(HaveOccurred())
-				// 	Eventually(session).Should(Exit(255))
-				// })
+					commandMinus1 := exec.Command(ssh3Path, clientArgsMinus1...)
+					session, err = Start(commandMinus1, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session).Should(Exit(255))
+				})
 
 				It("Should run the interactive shell in login mode and read .profile", func() {
 					clientArgs = getClientArgs(rsaPrivKeyPath)
@@ -320,8 +310,10 @@ var _ = Describe("Testing the sshoq cli", func() {
 							localIP = "127.0.0.1"
 						}
 						serverStarted := make(chan struct{})
+						done := make(chan struct{})
 						// Start a TCP server on the specified remote IP and port
 						go func() {
+							defer close(done)
 							defer close(serverStarted)
 							defer GinkgoRecover()
 							listener, err := net.ListenTCP("tcp", remoteAddr)
@@ -358,7 +350,13 @@ var _ = Describe("Testing the sshoq cli", func() {
 						if proxyJump {
 							additionalArgs = append(additionalArgs, "-proxy-jump", fmt.Sprintf("%s@%s%s", username, proxyServerBind, DEFAULT_PROXY_URL_PATH))
 						}
-						additionalArgs = append(additionalArgs, forwardingType, fmt.Sprintf("%d@%s@%d", localPort, remoteAddr.IP, remoteAddr.Port))
+						if remoteAddr.IP.To4() == nil {
+							// with an IPv6 remote address, also bind the local forward socket on
+							// the IPv6 loopback (4-parts syntax: bindAddress@localPort@remoteIP@remotePort)
+							additionalArgs = append(additionalArgs, forwardingType, fmt.Sprintf("::1@%d@%s@%d", localPort, remoteAddr.IP, remoteAddr.Port))
+						} else {
+							additionalArgs = append(additionalArgs, forwardingType, fmt.Sprintf("%d@%s@%d", localPort, remoteAddr.IP, remoteAddr.Port))
+						}
 						clientArgs := getClientArgs(rsaPrivKeyPath, additionalArgs...)
 						command := exec.Command(ssh3Path, clientArgs...)
 						session, err := Start(command, GinkgoWriter, GinkgoWriter)
@@ -385,31 +383,70 @@ var _ = Describe("Testing the sshoq cli", func() {
 						// Close the client-side connection
 						conn.(*net.TCPConn).CloseWrite()
 
-						// Read message from server
+						// Read message from server. The client may deliver the last data together
+						// with the EOF (it half-closes the socket right after writing the final
+						// data), so a read returning data and io.EOF at once is expected and must
+						// not be treated as an error.
 						buffer := make([]byte, len(messageFromServer))
 						conn.SetReadDeadline(time.Now().Add(1 * time.Second))
-						n, err = conn.Read(buffer)
-						Expect(err).ToNot(HaveOccurred())
-						Expect(n).To(Equal(len(messageFromServer)))
-						Expect(string(buffer[:n])).To(Equal(messageFromServer))
+						total := 0
+						for total < len(buffer) {
+							n, err = conn.Read(buffer[total:])
+							total += n
+							if err != nil {
+								Expect(err).To(SatisfyAny(BeNil(), Equal(io.EOF)))
+								break
+							}
+						}
+						Expect(total).To(Equal(len(messageFromServer)))
+						Expect(string(buffer)).To(Equal(messageFromServer))
 
 						// If the messages are correctly exchanged, the forwarding is working as expected
 						// Now, check that the TCP conn is well closed and that no additional byte was sent
 						n, err = conn.Read(buffer)
 						Expect(n).To(Equal(0))
 						Expect(err).To(Equal(io.EOF))
+
+						// wait for the remote goroutine to finish: its listener is bound on the
+						// shared remote port, and the next sub-test reuses the same port
+						Eventually(done).Should(BeClosed())
 					}
-					It("TCP forwarding works with small messages", func() {
-					testTCPPortForwarding(8081, false, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9091}, "hello from client", "hello from server", "-forward-udp")
-					testTCPPortForwarding(8091, false, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9091}, "hello from client", "hello from server", "-reverse-udp")
+
+					It("works with small messages", func() {
+						testTCPPortForwarding(8080, false, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, "hello from client", "hello from server", "-forward-tcp")
+						testTCPPortForwarding(8090, false, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, "hello from client", "hello from server", "-reverse-tcp")
 					})
 
-					It("TCP forwarding works through proxy jump", func() {
-						testTCPPortForwarding(8081, true, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9091}, "hello from client", "hello from server", "-forward-udp")
-						testTCPPortForwarding(8091, true, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9091}, "hello from client", "hello from server", "-reverse-udp")
+					It("works through proxy jump", func() {
+						testTCPPortForwarding(8080, true, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, "hello from client", "hello from server", "-forward-tcp")
+						testTCPPortForwarding(8091, true, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, "hello from client", "hello from server", "-reverse-tcp")
 					})
-					
 
+					It("works with messages larger than a typical MTU", func() {
+						rng := rand.New(rand.NewSource(GinkgoRandomSeed()))
+						messageFromClient := make([]byte, 20000)
+						messageFromServer := make([]byte, 20000)
+						n, err := rng.Read(messageFromClient)
+						Expect(n).To(Equal(len(messageFromClient)))
+						Expect(err).ToNot(HaveOccurred())
+						n, err = rng.Read(messageFromServer)
+						Expect(n).To(Equal(len(messageFromServer)))
+						Expect(err).ToNot(HaveOccurred())
+						testTCPPortForwarding(8081, false, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, string(messageFromClient), string(messageFromServer), "-forward-tcp")
+						testTCPPortForwarding(8092, false, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, string(messageFromClient), string(messageFromServer), "-reverse-tcp")
+					})
+
+					It("works with IPv6 addresses", func() {
+						// we first have to check whether IPv6 are enabled on that host, it is still often
+						// not the case in many Docker containers...
+						addrs, err := net.InterfaceAddrs()
+						Expect(err).ToNot(HaveOccurred())
+						if !IPv6LoopbackAvailable(addrs) {
+							Skip("IPv6 not available on this host")
+						}
+						testTCPPortForwarding(8082, false, &net.TCPAddr{IP: net.ParseIP("::1"), Port: 9090}, "hello from client", "hello from server", "-forward-tcp")
+						testTCPPortForwarding(8093, false, &net.TCPAddr{IP: net.ParseIP("::1"), Port: 9090}, "hello from client", "hello from server", "-reverse-tcp")
+					})
 				})
 			})
 
@@ -429,8 +466,10 @@ var _ = Describe("Testing the sshoq cli", func() {
 						localIPWithoutBrackets = localIP
 					}
 					serverStarted := make(chan struct{})
+					done := make(chan struct{})
 					// Start a UDP server on the specified remote IP and port
 					go func() {
+						defer close(done)
 						defer close(serverStarted)
 						defer GinkgoRecover()
 						conn, err := net.ListenUDP("udp", remoteAddr)
@@ -457,7 +496,13 @@ var _ = Describe("Testing the sshoq cli", func() {
 					if proxyJump {
 						additionalArgs = append(additionalArgs, "-proxy-jump", fmt.Sprintf("%s@%s%s", username, proxyServerBind, DEFAULT_PROXY_URL_PATH))
 					}
-					additionalArgs = append(additionalArgs, forwardingType, fmt.Sprintf("%d@%s@%d", localPort, remoteAddr.IP, remoteAddr.Port))
+					if remoteAddr.IP.To4() == nil {
+						// with an IPv6 remote address, also bind the local forward socket on
+						// the IPv6 loopback (4-parts syntax: bindAddress@localPort@remoteIP@remotePort)
+						additionalArgs = append(additionalArgs, forwardingType, fmt.Sprintf("::1@%d@%s@%d", localPort, remoteAddr.IP, remoteAddr.Port))
+					} else {
+						additionalArgs = append(additionalArgs, forwardingType, fmt.Sprintf("%d@%s@%d", localPort, remoteAddr.IP, remoteAddr.Port))
+					}
 					clientArgs := getClientArgs(rsaPrivKeyPath, additionalArgs...)
 					command := exec.Command(ssh3Path, clientArgs...)
 					session, err := Start(command, GinkgoWriter, GinkgoWriter)
@@ -491,18 +536,48 @@ var _ = Describe("Testing the sshoq cli", func() {
 					Expect(err).ToNot(HaveOccurred())
 					Expect(n).To(Equal(len(messageFromServer)))
 					Expect(string(buffer[:n])).To(Equal(messageFromServer))
+
+					// wait for the remote goroutine to finish: its socket is bound on the
+					// shared remote port, and the next sub-test reuses the same port
+					Eventually(done).Should(BeClosed())
 				}
 
-				It("UDP forwarding works with small messages", func() {
+				It("works with small messages", func() {
 					testUDPPortForwarding(8080, false, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, "hello from client", "hello from server", "-forward-udp")
 					testUDPPortForwarding(8090, false, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, "hello from client", "hello from server", "-reverse-udp")
 				})
 
-				It("UDP forwarding works through proxy jump", func() {
+				It("works through proxy jump", func() {
 					testUDPPortForwarding(8080, true, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, "hello from client", "hello from server", "-forward-udp")
 					testUDPPortForwarding(8091, true, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, "hello from client", "hello from server", "-reverse-udp")
 				})
 
+				// Due to current quic-go limitations, the max datagram size is limited to 1200, whatever the real MTU is,
+				// so right now we test for 1150 messages and nothing more
+				It("works with messages of 1150 bytes", func() {
+					rng := rand.New(rand.NewSource(GinkgoRandomSeed()))
+					messageFromClient := make([]byte, 1150)
+					messageFromServer := make([]byte, 1150)
+					n, err := rng.Read(messageFromClient)
+					Expect(n).To(Equal(len(messageFromClient)))
+					Expect(err).ToNot(HaveOccurred())
+					n, err = rng.Read(messageFromServer)
+					Expect(n).To(Equal(len(messageFromServer)))
+					Expect(err).ToNot(HaveOccurred())
+					testUDPPortForwarding(8081, false, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, string(messageFromClient), string(messageFromServer), "-forward-udp")
+					testUDPPortForwarding(8092, false, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, string(messageFromClient), string(messageFromServer), "-reverse-udp")
+				})
+
+				It("works with IPv6 addresses", func() {
+					// Check whether IPv6 is available on the host
+					addrs, err := net.InterfaceAddrs()
+					Expect(err).ToNot(HaveOccurred())
+					if !IPv6LoopbackAvailable(addrs) {
+						Skip("IPv6 not available on this host")
+					}
+					testUDPPortForwarding(8082, false, &net.UDPAddr{IP: net.ParseIP("::1"), Port: 9090}, "hello from client", "hello from server", "-forward-udp")
+					testUDPPortForwarding(8093, false, &net.UDPAddr{IP: net.ParseIP("::1"), Port: 9090}, "hello from client", "hello from server", "-reverse-udp")
+				})
 
 			})
 
