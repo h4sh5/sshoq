@@ -236,9 +236,13 @@ Example syntax where gateway is the jump host and 10.0.0.2 is the final destinat
 
 ### File Sharing (experimental)
 
-SFTP is implemented natively within the server and is enabled by default. To use sftp mode on the client, run
+SFTP is implemented natively within the server and is enabled by default. To disable SFTP mode on the server, use `sshoq-server -disable-sftp`
+
+To use sftp mode on the client, run this to drop into a SFTP shell:
 
 `sshoq -sftp user@host`
+
+Type `help` in the `sftp>` prompt to see what commands are available.
 
 ### Local port forwarding
 
