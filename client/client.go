@@ -346,6 +346,9 @@ func forwardReverseUDPInBackground(ctx context.Context, channel ssh3.Channel, co
 type Client struct {
 	qconn quic.EarlyConnection
 	*ssh3.Conversation
+	// reverseTCPRemoteAddr is the destination address used to forward the
+	// server-initiated reverse TCP channels opened for -reverse-tcp.
+	reverseTCPRemoteAddr *net.TCPAddr
 }
 
 func Dial(ctx context.Context, config *client_config.Config, qconn quic.EarlyConnection,
@@ -809,37 +812,18 @@ func (c *Client) ForwardTCP(ctx context.Context, localTCPAddr *net.TCPAddr, remo
 }
 
 func (c *Client) ReverseTCP(ctx context.Context, localTCPAddr *net.TCPAddr, remoteTCPAddr *net.TCPAddr) (*net.TCPAddr, error) {
-	log.Debug().Msgf("start TCP forwarding from %s to %s", localTCPAddr, remoteTCPAddr)
+	log.Debug().Msgf("start reverse TCP forwarding from %s to %s", localTCPAddr, remoteTCPAddr)
+
+	// The server-initiated "open-request-reverse-tcp" channels are the handled by
+	// the global channel accept loop in RunSession, where the destination address
+	// is read from reverseTCPRemoteAddr (no dedicated accept loop here).
+	c.reverseTCPRemoteAddr = remoteTCPAddr
 
 	forwardingChannel, err := c.RequestTCPReverseChannel(30000, 10, localTCPAddr, remoteTCPAddr)
 	if err != nil {
 		log.Error().Msgf("could open new TCP reverse forwarding channel: %s", err)
 		return remoteTCPAddr, nil
 	}
-
-	go func() {
-		for {
-			channel, err := c.AcceptChannel(c.Context())
-			if err != nil {
-				log.Debug().Msgf("Error accepting channel")
-			}
-
-			switch channel.ChannelType() {
-			case "open-request-reverse-tcp":
-				log.Debug().Msgf("start reverse TCP forwarding from %s to %s", localTCPAddr, remoteTCPAddr)
-
-				conn, err := net.DialTCP("tcp", nil, remoteTCPAddr)
-				if err != nil {
-					return
-				}
-				forwardReverseTCPInBackground(ctx, channel, conn)
-				if err != nil {
-					channel.Close()
-					return
-				}
-			}
-		}
-	}()
 	forwardingChannel.Close()
 	return remoteTCPAddr, nil
 }
@@ -1006,6 +990,22 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, forcePTYAlloc bo
 			}
 
 			switch channel.ChannelType() {
+			case "open-request-reverse-tcp":
+				// reverse TCP channels are opened by the server for -reverse-tcp;
+				// the destination address is set by ReverseTCP.
+				if c.reverseTCPRemoteAddr == nil {
+					log.Error().Msgf("received a reverse TCP forwarding channel but no reverse TCP forwarding was requested")
+					channel.Close()
+					continue
+				}
+				log.Debug().Msgf("start reverse TCP forwarding to %s", c.reverseTCPRemoteAddr)
+				conn, err := net.DialTCP("tcp", nil, c.reverseTCPRemoteAddr)
+				if err != nil {
+					log.Error().Msgf("could not dial reverse TCP destination %s: %s", c.reverseTCPRemoteAddr, err)
+					channel.Close()
+					continue
+				}
+				forwardReverseTCPInBackground(ctx, channel, conn)
 			default:
 				// Unknown/unwanted channel -> close or log
 				channel.Close()
@@ -1109,8 +1109,7 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, forcePTYAlloc bo
 		}
 	} else {
 
-
-		channel.SendRequest(
+		err = channel.SendRequest(
 			&ssh3Messages.ChannelRequestMessage{
 				WantReply: true,
 				ChannelRequest: &ssh3Messages.ExecRequest{
@@ -1118,12 +1117,11 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, forcePTYAlloc bo
 				},
 			},
 		)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Could send exec request: %+v", err)
+			return err
+		}
 		log.Debug().Msgf("sent exec request for command \"%s\"", strings.Join(command, " "))
-	}
-
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Could send shell request: %+v", err)
-		return err
 	}
 
 	sendLock := &sync.Mutex{}

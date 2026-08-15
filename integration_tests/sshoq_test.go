@@ -310,8 +310,10 @@ var _ = Describe("Testing the sshoq cli", func() {
 							localIP = "127.0.0.1"
 						}
 						serverStarted := make(chan struct{})
+						done := make(chan struct{})
 						// Start a TCP server on the specified remote IP and port
 						go func() {
+							defer close(done)
 							defer close(serverStarted)
 							defer GinkgoRecover()
 							listener, err := net.ListenTCP("tcp", remoteAddr)
@@ -381,19 +383,33 @@ var _ = Describe("Testing the sshoq cli", func() {
 						// Close the client-side connection
 						conn.(*net.TCPConn).CloseWrite()
 
-						// Read message from server
+						// Read message from server. The client may deliver the last data together
+						// with the EOF (it half-closes the socket right after writing the final
+						// data), so a read returning data and io.EOF at once is expected and must
+						// not be treated as an error.
 						buffer := make([]byte, len(messageFromServer))
 						conn.SetReadDeadline(time.Now().Add(1 * time.Second))
-						n, err = conn.Read(buffer)
-						Expect(err).ToNot(HaveOccurred())
-						Expect(n).To(Equal(len(messageFromServer)))
-						Expect(string(buffer[:n])).To(Equal(messageFromServer))
+						total := 0
+						for total < len(buffer) {
+							n, err = conn.Read(buffer[total:])
+							total += n
+							if err != nil {
+								Expect(err).To(SatisfyAny(BeNil(), Equal(io.EOF)))
+								break
+							}
+						}
+						Expect(total).To(Equal(len(messageFromServer)))
+						Expect(string(buffer)).To(Equal(messageFromServer))
 
 						// If the messages are correctly exchanged, the forwarding is working as expected
 						// Now, check that the TCP conn is well closed and that no additional byte was sent
 						n, err = conn.Read(buffer)
 						Expect(n).To(Equal(0))
 						Expect(err).To(Equal(io.EOF))
+
+						// wait for the remote goroutine to finish: its listener is bound on the
+						// shared remote port, and the next sub-test reuses the same port
+						Eventually(done).Should(BeClosed())
 					}
 
 					It("works with small messages", func() {
@@ -450,8 +466,10 @@ var _ = Describe("Testing the sshoq cli", func() {
 						localIPWithoutBrackets = localIP
 					}
 					serverStarted := make(chan struct{})
+					done := make(chan struct{})
 					// Start a UDP server on the specified remote IP and port
 					go func() {
+						defer close(done)
 						defer close(serverStarted)
 						defer GinkgoRecover()
 						conn, err := net.ListenUDP("udp", remoteAddr)
@@ -518,6 +536,10 @@ var _ = Describe("Testing the sshoq cli", func() {
 					Expect(err).ToNot(HaveOccurred())
 					Expect(n).To(Equal(len(messageFromServer)))
 					Expect(string(buffer[:n])).To(Equal(messageFromServer))
+
+					// wait for the remote goroutine to finish: its socket is bound on the
+					// shared remote port, and the next sub-test reuses the same port
+					Eventually(done).Should(BeClosed())
 				}
 
 				It("works with small messages", func() {
