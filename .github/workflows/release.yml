@@ -37,6 +37,7 @@ jobs:
       - name: Install aarch64 cross-compiler (linux-arm64 only)
         if: matrix.variant.install-arm64-cross == 'true'
         run: |
+          sudo apt-get update
           sudo dpkg --add-architecture arm64
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu libcrypt-dev:arm64
