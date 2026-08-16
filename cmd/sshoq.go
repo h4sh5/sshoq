@@ -97,8 +97,8 @@ func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog 
 
 	var qconf quic.Config
 
-	qconf.MaxIncomingUniStreams = 10000
-	qconf.MaxIncomingStreams = 10000
+	qconf.MaxIncomingUniStreams = 100000
+	qconf.MaxIncomingStreams = 100000
 	qconf.Allow0RTT = false
 	qconf.EnableDatagrams = true
 	qconf.KeepAlivePeriod = 1 * time.Second
@@ -251,6 +251,139 @@ func parseAddrPort(addrPort string) (localIP net.IP, localPort int, remoteIP net
 		return nil, 0, nil, 0, fmt.Errorf("port too large %d", remotePort)
 	}
 	return localIP, localPort, remoteIP, remotePort, err
+}
+
+// stringSliceFlag is a flag.Value that accumulates every occurrence of the flag,
+// allowing repeated flags such as multiple -L or -R (like OpenSSH).
+type stringSliceFlag []string
+
+func (s *stringSliceFlag) String() string {
+	return strings.Join(*s, ",")
+}
+
+func (s *stringSliceFlag) Set(value string) error {
+	*s = append(*s, value)
+	return nil
+}
+
+// localIPForForwarding picks the local bind IP according to the remote address
+// family, defaulting to the loopback of the same family, like OpenSSH does.
+func localIPForForwarding(localIP net.IP, remoteIP net.IP) net.IP {
+	if remoteIP.To4() != nil {
+		if localIP.To4() != nil {
+			return localIP.To4()
+		}
+		return net.IPv4(127, 0, 0, 1)
+	}
+	if remoteIP.To16() != nil {
+		if localIP.To16() != nil {
+			return localIP.To16()
+		}
+		return net.IPv6loopback
+	}
+	return nil
+}
+
+// parseTCPForwarding parses a single forwarding spec "[bindip:]localport@remoteip@remoteport"
+// into a local/remote TCP address pair.
+func parseTCPForwarding(forwardSpec string) (local *net.TCPAddr, remote *net.TCPAddr, err error) {
+	localIP, localPort, remoteIP, remotePort, err := parseAddrPort(forwardSpec)
+	if err != nil {
+		return nil, nil, err
+	}
+	bindIP := localIPForForwarding(localIP, remoteIP)
+	if bindIP == nil {
+		return nil, nil, fmt.Errorf("unrecognized remote IP length %d", len(remoteIP))
+	}
+	return &net.TCPAddr{IP: bindIP, Port: localPort}, &net.TCPAddr{IP: remoteIP, Port: remotePort}, nil
+}
+
+// parseUDPForwarding parses a single forwarding spec "[bindip:]localport@remoteip@remoteport"
+// into a local/remote UDP address pair.
+func parseUDPForwarding(forwardSpec string) (local *net.UDPAddr, remote *net.UDPAddr, err error) {
+	localIP, localPort, remoteIP, remotePort, err := parseAddrPort(forwardSpec)
+	if err != nil {
+		return nil, nil, err
+	}
+	bindIP := localIPForForwarding(localIP, remoteIP)
+	if bindIP == nil {
+		return nil, nil, fmt.Errorf("unrecognized remote IP length %d", len(remoteIP))
+	}
+	return &net.UDPAddr{IP: bindIP, Port: localPort}, &net.UDPAddr{IP: remoteIP, Port: remotePort}, nil
+}
+
+// splitForwardingSpecs expands a single flag value into individual forwarding specs.
+// Comma separated values (previously supported by -forward-udp/-reverse-udp) are
+// kept for backwards compatibility, and repeated flags are all handled here too.
+func splitForwardingSpecs(groups []string) []string {
+	var specs []string
+	for _, group := range groups {
+		for _, spec := range strings.Split(group, ",") {
+			spec = strings.TrimSpace(spec)
+			if spec == "" {
+				continue
+			}
+			specs = append(specs, spec)
+		}
+	}
+	return specs
+}
+
+// setupForwardings starts every local and remote port forwarding that was
+// requested on the command line. Multiple -L, -R, -forward-tcp, -forward-udp,
+// -reverse-tcp and -reverse-udp flags can be freely combined, in any order, and
+// with a mix of TCP and UDP. It returns the updated multicast UDP connection
+// (if any was created) that subsequent forwardings should reuse.
+func setupForwardings(ctx context.Context, c *client.Client, forwardTCP, reverseTCP, forwardUDP, reverseUDP []string, fwUDPmulticonn *net.UDPConn) (*net.UDPConn, error) {
+	// Local TCP forwardings (-L / -forward-tcp): a local port is forwarded to a remote port.
+	for _, spec := range splitForwardingSpecs(forwardTCP) {
+		local, remote, err := parseTCPForwarding(spec)
+		if err != nil {
+			return fwUDPmulticonn, fmt.Errorf("TCP forwarding parsing error for %q: %s", spec, err)
+		}
+		if _, err := c.ForwardTCP(ctx, local, remote); err != nil {
+			return fwUDPmulticonn, fmt.Errorf("could not forward TCP %s -> %s: %s", local, remote, err)
+		}
+	}
+
+	// Reverse TCP forwardings (-R / -reverse-tcp): a remote port is forwarded to a local port.
+	for _, spec := range splitForwardingSpecs(reverseTCP) {
+		local, remote, err := parseTCPForwarding(spec)
+		if err != nil {
+			return fwUDPmulticonn, fmt.Errorf("TCP reverse parsing error for %q: %s", spec, err)
+		}
+		if _, err := c.ReverseTCP(ctx, local, remote); err != nil {
+			return fwUDPmulticonn, fmt.Errorf("could not reverse TCP %s -> %s: %s", local, remote, err)
+		}
+	}
+
+	// Local UDP forwardings (-forward-udp): a local port is forwarded to a remote port.
+	for _, spec := range splitForwardingSpecs(forwardUDP) {
+		local, remote, err := parseUDPForwarding(spec)
+		if err != nil {
+			return fwUDPmulticonn, fmt.Errorf("UDP forwarding parsing error for %q: %s", spec, err)
+		}
+		_, conn, err := c.ForwardUDP(ctx, local, remote, fwUDPmulticonn)
+		if err != nil {
+			return fwUDPmulticonn, fmt.Errorf("could not forward UDP %s -> %s: %s", local, remote, err)
+		}
+		if local.IP.IsMulticast() {
+			fwUDPmulticonn = conn
+		}
+	}
+
+	// Reverse UDP forwardings (-reverse-udp): a remote port is forwarded to a local port.
+	for _, spec := range splitForwardingSpecs(reverseUDP) {
+		local, remote, err := parseUDPForwarding(spec)
+		if err != nil {
+			return fwUDPmulticonn, fmt.Errorf("UDP reverse parsing error for %q: %s", spec, err)
+		}
+		if _, err := c.ReverseUDP(ctx, local, remote); err != nil {
+			return fwUDPmulticonn, fmt.Errorf("could not reverse UDP %s -> %s: %s", local, remote, err)
+		}
+	}
+
+	return fwUDPmulticonn, nil
 }
 
 func getConfigOptions(hostUrl *url.URL, sshConfig *ssh_config.Config, optionParsers map[client_config.OptionName]client_config.OptionParser) (*client_config.Config, error) {
@@ -484,12 +617,16 @@ func ClientMain() int {
 	noPKCE := flag.Bool("no-pkce", false, "if set perform PKCE challenge-response with oidc")
 	forcePTYAlloc := flag.Bool("force-pty", false, "if set, forces PTY allocation before command execution. Useful for interactive programs.")
 	forwardSSHAgent := flag.Bool("forward-agent", false, "if set, forwards ssh agent to be used with sshv2 connections on the remote host")
-	forwardTCP := flag.String("forward-tcp", "", "forward a remote TCP port to a local port. Syntax same as SSH2 but with @ instead of : (e.g. 8080@::1@80 or 8080@192.168.1.1@80)")
-	forwardUDP := flag.String("forward-udp", "", "forward a remote UDP port to a local port. Syntax same as SSH2 but with @ instead of : (e.g. 5353@::1@53)")
-	reverseTCP := flag.String("reverse-tcp", "", "reverse forward a local TCP port to a remote port. Syntax same as SSH2 but with @ instead of : (e.g. 80@127.0.0.1@8080)")
-	reverseUDP := flag.String("reverse-udp", "", "reverse forward a local UDP port to a remote port. Syntax same as SSH2 but with @ instead of : (e.g. 53@127.0.0.1@5353)")
-	flag.StringVar(forwardTCP, "L", *forwardTCP, "alias for -forward-tcp")
-	flag.StringVar(reverseTCP, "R", *reverseTCP, "alias for -reverse-tcp")
+	var forwardTCP stringSliceFlag
+	var forwardUDP stringSliceFlag
+	var reverseTCP stringSliceFlag
+	var reverseUDP stringSliceFlag
+	flag.Var(&forwardTCP, "forward-tcp", "forward a remote TCP port to a local port. Syntax same as SSH2 but with @ instead of : (e.g. 8080@::1@80 or 8080@192.168.1.1@80). May be specified multiple times.")
+	flag.Var(&forwardUDP, "forward-udp", "forward a remote UDP port to a local port. Syntax same as SSH2 but with @ instead of : (e.g. 5353@::1@53). May be specified multiple times.")
+	flag.Var(&reverseTCP, "reverse-tcp", "reverse forward a local TCP port to a remote port. Syntax same as SSH2 but with @ instead of : (e.g. 80@127.0.0.1@8080). May be specified multiple times.")
+	flag.Var(&reverseUDP, "reverse-udp", "reverse forward a local UDP port to a remote port. Syntax same as SSH2 but with @ instead of : (e.g. 53@127.0.0.1@5353). May be specified multiple times.")
+	flag.Var(&forwardTCP, "L", "alias for -forward-tcp (may be specified multiple times)")
+	flag.Var(&reverseTCP, "R", "alias for -reverse-tcp (may be specified multiple times)")
 	proxyJump := flag.String("proxy-jump", "", "if set, performs a proxy jump using the specified remote host as proxy (requires server with version >= 0.1.5)")
 	sftpMode := flag.Bool("sftp", false, "if set, start an interactive SFTP session")
 	scpMode := flag.Bool("scp", false, "if set, copy files to or from the remote host non-interactively, like scp")
@@ -593,91 +730,8 @@ func ClientMain() int {
 		urlFromParam = fmt.Sprintf("https://%s", urlFromParam)
 	}
 
-	var localUDPAddr *net.UDPAddr = nil
-	var remoteUDPAddr *net.UDPAddr = nil
-	var localTCPAddr *net.TCPAddr = nil
-	var remoteTCPAddr *net.TCPAddr = nil
-
 	var fwUDPmulticonn *net.UDPConn
 	fwUDPmulticonn = nil
-
-	if *forwardTCP != "" {
-		localIP, localPort, remoteIP, remotePort, err := parseAddrPort(*forwardTCP)
-		if err != nil {
-			log.Error().Msgf("UDP forwarding parsing error %s", err)
-		}
-		remoteTCPAddr = &net.TCPAddr{
-			IP:   remoteIP,
-			Port: remotePort,
-		}
-		if remoteIP.To4() != nil {
-			if localIP.To4() != nil {
-				localTCPAddr = &net.TCPAddr{
-					IP:   localIP.To4(),
-					Port: localPort,
-				}
-			} else {
-				localTCPAddr = &net.TCPAddr{
-					IP:   net.IPv4(127, 0, 0, 1),
-					Port: localPort,
-				}
-			}
-		} else if remoteIP.To16() != nil {
-			if localIP.To16() != nil {
-				localTCPAddr = &net.TCPAddr{
-					IP:   localIP.To16(),
-					Port: localPort,
-				}
-			} else {
-				localTCPAddr = &net.TCPAddr{
-					IP:   net.IPv6loopback,
-					Port: localPort,
-				}
-			}
-		} else {
-			log.Error().Msgf("Unrecognized IP length %d", len(remoteIP))
-			return -1
-		}
-	}
-
-	if *reverseTCP != "" {
-		localIP, localPort, remoteIP, remotePort, err := parseAddrPort(*reverseTCP)
-		if err != nil {
-			log.Error().Msgf("TCP reverse parsing error %s", err)
-		}
-		remoteTCPAddr = &net.TCPAddr{
-			IP:   remoteIP,
-			Port: remotePort,
-		}
-		if remoteIP.To4() != nil {
-			if localIP.To4() != nil {
-				localTCPAddr = &net.TCPAddr{
-					IP:   localIP.To4(),
-					Port: localPort,
-				}
-			} else {
-				localTCPAddr = &net.TCPAddr{
-					IP:   net.IPv4(127, 0, 0, 1),
-					Port: localPort,
-				}
-			}
-		} else if remoteIP.To16() != nil {
-			if localIP.To16() != nil {
-				localTCPAddr = &net.TCPAddr{
-					IP:   localIP.To16(),
-					Port: localPort,
-				}
-			} else {
-				localTCPAddr = &net.TCPAddr{
-					IP:   net.IPv6loopback,
-					Port: localPort,
-				}
-			}
-		} else {
-			log.Error().Msgf("Unrecognized IP length %d", len(remoteIP))
-			return -1
-		}
-	}
 
 	var sshConfig *ssh_config.Config
 	var configBytes []byte
@@ -890,144 +944,13 @@ func ClientMain() int {
 		log.Error().Msgf("could not dial %s: %s", options.CanonicalHostFormat(), err)
 		return -1
 	}
-	if *forwardTCP != "" && localTCPAddr != nil && remoteTCPAddr != nil {
-		_, err := c.ForwardTCP(ctx, localTCPAddr, remoteTCPAddr)
-		if err != nil {
-			log.Error().Msgf("could not forward UDP: %s", err)
-			return -1
-		}
-	}
-	if *reverseTCP != "" && localTCPAddr != nil && remoteTCPAddr != nil {
-		_, err := c.ReverseTCP(ctx, localTCPAddr, remoteTCPAddr)
-		if err != nil {
-			log.Error().Msgf("could not reverse TCP: %s", err)
-			return -1
-		}
-	}
-
-	if *reverseUDP != "" {
-		v := strings.TrimSpace(*reverseUDP)
-		if v == "" {
-			return -1
-		}
-		parts := strings.Split(v, ",")
-		for _, p := range parts {
-			p = strings.TrimSpace(p)
-			if p == "" {
-				continue
-			}
-			log.Printf("reverseUDP p: %s", p)
-			localIP, localPort, remoteIP, remotePort, err := parseAddrPort(p)
-			if err != nil {
-				log.Error().Msgf("UDP reverse parsing error %s", err)
-			}
-			remoteUDPAddr = &net.UDPAddr{
-				IP:   remoteIP,
-				Port: remotePort,
-			}
-			if remoteIP.To4() != nil {
-				if localIP.To4() != nil {
-					localUDPAddr = &net.UDPAddr{
-						IP:   localIP.To4(),
-						Port: localPort,
-					}
-				} else {
-					localUDPAddr = &net.UDPAddr{
-						IP:   net.IPv4(127, 0, 0, 1),
-						Port: localPort,
-					}
-				}
-			} else if remoteIP.To16() != nil {
-				if localIP.To16() != nil {
-					localUDPAddr = &net.UDPAddr{
-						IP:   localIP.To16(),
-						Port: localPort,
-					}
-				} else {
-					localUDPAddr = &net.UDPAddr{
-						IP:   net.IPv6loopback,
-						Port: localPort,
-					}
-				}
-
-			} else {
-				log.Error().Msgf("Unrecognized IP length %d", len(remoteIP))
-				return -1
-			}
-
-			if *reverseUDP != "" && localUDPAddr != nil && remoteUDPAddr != nil {
-				_, err := c.ReverseUDP(ctx, localUDPAddr, remoteUDPAddr)
-				if err != nil {
-					log.Error().Msgf("could not reverse UDP: %s", err)
-					return -1
-				}
-			}
-
-		}
-	}
-
-	if *forwardUDP != "" {
-		v := strings.TrimSpace(*forwardUDP)
-		if v == "" {
-			return -1
-		}
-		parts := strings.Split(v, ",")
-		for _, p := range parts {
-			p = strings.TrimSpace(p)
-			if p == "" {
-				continue
-			}
-			log.Printf("forwardUDP p: %s", p)
-			localIP, localPort, remoteIP, remotePort, err := parseAddrPort(p)
-			if err != nil {
-				log.Error().Msgf("UDP forwarding parsing error %s", err)
-			}
-			remoteUDPAddr = &net.UDPAddr{
-				IP:   remoteIP,
-				Port: remotePort,
-			}
-			if remoteIP.To4() != nil {
-				if localIP.To4() != nil {
-					localUDPAddr = &net.UDPAddr{
-						IP:   localIP.To4(),
-						Port: localPort,
-					}
-				} else {
-					localUDPAddr = &net.UDPAddr{
-						IP:   net.IPv4(127, 0, 0, 1),
-						Port: localPort,
-					}
-				}
-			} else if remoteIP.To16() != nil {
-				if localIP.To16() != nil {
-					localUDPAddr = &net.UDPAddr{
-						IP:   localIP.To16(),
-						Port: localPort,
-					}
-				} else {
-					localUDPAddr = &net.UDPAddr{
-						IP:   net.IPv6loopback,
-						Port: localPort,
-					}
-				}
-			} else {
-				log.Error().Msgf("Unrecognized IP length %d", len(remoteIP))
-				return -1
-			}
-
-			if *forwardUDP != "" && localUDPAddr != nil && remoteUDPAddr != nil {
-				_, conn, err := c.ForwardUDP(ctx, localUDPAddr, remoteUDPAddr, fwUDPmulticonn)
-				if err != nil {
-					log.Error().Msgf("could not forward UDP: %s", err)
-					return -1
-				}
-				if localUDPAddr.IP.IsMulticast() {
-					fwUDPmulticonn = conn
-				}
-			}
-
-		}
-
+	// Set up all requested local and remote port forwardings. Multiple -L, -R,
+	// -forward-tcp, -forward-udp, -reverse-tcp and -reverse-udp flags can now
+	// be combined freely, including a mix of TCP and UDP.
+	fwUDPmulticonn, err = setupForwardings(ctx, c, forwardTCP, reverseTCP, forwardUDP, reverseUDP, fwUDPmulticonn)
+	if err != nil {
+		log.Error().Msgf("%s", err)
+		return -1
 	}
 
 	if *sftpMode {

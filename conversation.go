@@ -342,9 +342,11 @@ func (c *Conversation) OpenTCPReverseForwardingChannel(maxPacketSize uint64, dat
 	if err != nil {
 		return nil, err
 	}
-	//missing additional bites!! if occurs more than a single reverse forwarding, there will be no way to tell appart which request is for which destination
-
-	channel := NewChannel(uint64(c.controlStream.StreamID()), c.conversationID, uint64(str.StreamID()), "open-request-reverse-tcp", maxPacketSize, &StreamByteReader{str}, str, nil, c.channelsManager, true, true, false, datagramsQueueSize, nil)
+	// The destination address (the socket at reach of the SSH3 client that the
+	// data must be forwarded to) is encoded in the channel type, like it is for
+	// UDP reverse forwardings, so that multiple simultaneous reverse TCP
+	// forwardings can be told apart by the client.
+	channel := NewChannel(uint64(c.controlStream.StreamID()), c.conversationID, uint64(str.StreamID()), "open-request-reverse-tcp,"+remoteAddr.String(), maxPacketSize, &StreamByteReader{str}, str, nil, c.channelsManager, true, true, false, datagramsQueueSize, nil)
 	channel.maybeSendHeader()
 	c.channelsManager.addChannel(channel)
 	return &TCPOpenReverseForwardingChannelImpl{Channel: channel, RemoteAddr: remoteAddr}, nil

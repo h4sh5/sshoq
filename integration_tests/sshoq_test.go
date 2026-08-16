@@ -461,6 +461,169 @@ var _ = Describe("Testing the sshoq cli", func() {
 						testTCPPortForwarding(8082, false, &net.TCPAddr{IP: net.ParseIP("::1"), Port: 9090}, "hello from client", "hello from server", "-forward-tcp")
 						testTCPPortForwarding(8093, false, &net.TCPAddr{IP: net.ParseIP("::1"), Port: 9090}, "hello from client", "hello from server", "-reverse-tcp")
 					})
+
+					// tcpForwardingSpec describes one TCP port forwarding used by the
+					// multiple-forwarding tests: either a local forward (-L) or a
+					// reverse forward (-R).
+					type tcpForwardingSpec struct {
+						forwardingType    string // "-forward-tcp" or "-reverse-tcp"
+						localPort         uint16 // bound on the client (-L) or on the server (-R)
+						remotePort        uint16 // destination at server's reach (-L) or at client's reach (-R)
+						messageFromClient string
+						messageFromServer string
+					}
+
+					// testMultipleTCPPortForwardings starts a single client that sets up
+					// several TCP port forwardings at once (multiple -forward-tcp/-L
+					// and/or -reverse-tcp/-R flags) and checks that every forwarding
+					// works concurrently.
+					testMultipleTCPPortForwardings := func(forwardings []tcpForwardingSpec) {
+						const bindIP = "127.0.0.1"
+
+						serverStarted := make(chan struct{}, len(forwardings))
+						done := make(chan struct{}, len(forwardings))
+						errCh := make(chan error, len(forwardings))
+
+						// Start one target TCP server per forwarding
+						for _, fwd := range forwardings {
+							fwd := fwd
+							go func() {
+								defer GinkgoRecover()
+								listener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.ParseIP(bindIP), Port: int(fwd.remotePort)})
+								if err != nil {
+									errCh <- err
+									return
+								}
+								defer listener.Close()
+								serverStarted <- struct{}{}
+
+								conn, err := listener.Accept()
+								if err != nil {
+									errCh <- err
+									return
+								}
+								defer conn.Close()
+
+								// Read the message coming from the client through the tunnel
+								buffer := make([]byte, len(fwd.messageFromClient))
+								if _, err := io.ReadFull(conn, buffer); err != nil {
+									errCh <- err
+									return
+								}
+								if string(buffer) != fwd.messageFromClient {
+									errCh <- fmt.Errorf("target %d: got %q, want %q", fwd.remotePort, buffer, fwd.messageFromClient)
+									return
+								}
+
+								// Send a message back through the tunnel
+								if _, err := conn.Write([]byte(fwd.messageFromServer)); err != nil {
+									errCh <- err
+									return
+								}
+								conn.(*net.TCPConn).CloseWrite()
+
+								// The client must close its side once the exchange is over
+								n, err := conn.Read(buffer)
+								if err != io.EOF || n != 0 {
+									errCh <- fmt.Errorf("target %d: expected EOF, got n=%d err=%v", fwd.remotePort, n, err)
+									return
+								}
+								done <- struct{}{}
+							}()
+						}
+
+						// Wait for all the target servers to be ready
+						for range forwardings {
+							Eventually(serverStarted).Should(Receive())
+						}
+
+						// Start the client with every forwarding declared at once
+						additionalArgs := []string{}
+						for _, fwd := range forwardings {
+							additionalArgs = append(additionalArgs, fwd.forwardingType, fmt.Sprintf("%d@%s@%d", fwd.localPort, bindIP, fwd.remotePort))
+						}
+						clientArgs := getClientArgs(rsaPrivKeyPath, additionalArgs...)
+						command := exec.Command(ssh3Path, clientArgs...)
+						session, err := Start(command, GinkgoWriter, GinkgoWriter)
+						Expect(err).ToNot(HaveOccurred())
+						defer session.Terminate()
+
+						// Connect to every forwarded port and exchange messages through each tunnel
+						for _, fwd := range forwardings {
+							func() {
+								localAddr := fmt.Sprintf("%s:%d", bindIP, fwd.localPort)
+								var conn net.Conn
+								// connection refused might happen between the time the process
+								// starts and actually listens the socket
+								Eventually(func() error {
+									var err error
+									conn, err = net.Dial("tcp", localAddr)
+									return err
+								}).ShouldNot(HaveOccurred())
+								defer conn.Close()
+
+								n, err := conn.Write([]byte(fwd.messageFromClient))
+								Expect(err).ToNot(HaveOccurred())
+								Expect(n).To(Equal(len(fwd.messageFromClient)))
+								conn.(*net.TCPConn).CloseWrite()
+
+								buffer := make([]byte, len(fwd.messageFromServer))
+								conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+								total := 0
+								for total < len(buffer) {
+									n, err = conn.Read(buffer[total:])
+									total += n
+									if err != nil {
+										Expect(err).To(SatisfyAny(BeNil(), Equal(io.EOF)))
+										break
+									}
+								}
+								Expect(total).To(Equal(len(fwd.messageFromServer)))
+								Expect(string(buffer)).To(Equal(fwd.messageFromServer))
+
+								// The tunnel must be closed on both sides: no extra byte
+								n, err = conn.Read(buffer)
+								Expect(n).To(Equal(0))
+								Expect(err).To(Equal(io.EOF))
+							}()
+						}
+
+						// Every target server must have received its message
+						remaining := len(forwardings)
+						for remaining > 0 {
+							select {
+							case err := <-errCh:
+								Fail(fmt.Sprintf("target server error: %s", err))
+							case <-done:
+								remaining--
+							case <-time.After(10 * time.Second):
+								Fail("timed out waiting for target servers to finish")
+							}
+						}
+					}
+
+					It("works with multiple local port forwardings (-L)", func() {
+						testMultipleTCPPortForwardings([]tcpForwardingSpec{
+							{"-forward-tcp", 8100, 9100, "hello to remote 1", "hello from remote 1"},
+							{"-forward-tcp", 8101, 9101, "hello to remote 2", "hello from remote 2"},
+						})
+					})
+
+					It("works with multiple remote port forwardings (-R)", func() {
+						testMultipleTCPPortForwardings([]tcpForwardingSpec{
+							{"-reverse-tcp", 8200, 9200, "hello to local 1", "hello from local 1"},
+							{"-reverse-tcp", 8201, 9201, "hello to local 2", "hello from local 2"},
+						})
+					})
+
+					It("works with a mix of local and remote port forwardings", func() {
+						testMultipleTCPPortForwardings([]tcpForwardingSpec{
+							{"-forward-tcp", 8300, 9300, "hello to remote 1", "hello from remote 1"},
+							{"-reverse-tcp", 8301, 9301, "hello to local 1", "hello from local 1"},
+							{"-forward-tcp", 8302, 9302, "hello to remote 2", "hello from remote 2"},
+							{"-reverse-tcp", 8303, 9303, "hello to local 2", "hello from local 2"},
+						})
+					})
 				})
 			})
 
