@@ -1,7 +1,6 @@
 package sftp
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"os"
@@ -29,15 +28,22 @@ func RunInteractiveClient(c *client.Client) error {
 	localDir, _ := os.Getwd()
 	remoteDir := "."
 
-	scanner := bufio.NewScanner(os.Stdin)
+	input, err := newInteractiveReader()
+	if err != nil {
+		return err
+	}
+	defer input.close()
 
 	for {
-		fmt.Printf("sftp> ")
-		if !scanner.Scan() {
-			break
+		line, err := input.readLine("sftp> ")
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
 		}
 
-		line := strings.TrimSpace(scanner.Text())
+		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
@@ -214,7 +220,7 @@ func RunInteractiveClient(c *client.Client) error {
 		}
 	}
 
-	return scanner.Err()
+	return nil
 }
 
 func doLs(channel ssh3.Channel, remoteDir string, parts []string) error {
