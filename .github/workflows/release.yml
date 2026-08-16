@@ -34,6 +34,9 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.25.x'
+      - name: Install libcrypt-dev (arm64)
+        if: matrix.variant.releaserfile == 'linux-arm64'
+        run: sudo apt-get update && sudo apt-get install -y libcrypt-dev
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v5
         with:
