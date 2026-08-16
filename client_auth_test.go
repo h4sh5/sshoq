@@ -50,11 +50,11 @@ func TestNewDefaultPrivkeyFileAuthMethods_ExistingKeys(t *testing.T) {
 	if len(methods) != 3 {
 		t.Fatalf("expected 3 default auth methods, got %d", len(methods))
 	}
-	// order must follow the OpenSSH default order
+	// order must follow the default key order
 	expected := []string{
-		path.Join(sshDir, "id_ecdsa"),
 		path.Join(sshDir, "id_ed25519"),
 		path.Join(sshDir, "id_rsa"),
+		path.Join(sshDir, "id_ecdsa"),
 	}
 	for i, method := range methods {
 		if method.Filename() != expected[i] {

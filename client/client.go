@@ -445,6 +445,7 @@ func Dial(ctx context.Context, config *client_config.Config, qconn quic.EarlyCon
 				identity = m.IntoIdentity(string(password))
 			case *ssh3.PrivkeyFileAuthMethod:
 				log.Debug().Msgf("try file-based pubkey auth using file %s", m.Filename())
+				fmt.Fprintf(os.Stderr, "Trying private key: %s\n", m.Filename())
 				identity, err = m.IntoIdentityWithoutPassphrase()
 				// could not identify without passphrase, try agent authentication by using the key's public key
 				if passphraseErr, ok := err.(*ssh.PassphraseMissingError); ok {
