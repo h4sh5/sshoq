@@ -437,6 +437,38 @@ func (v *FlagValue) IsBoolFlag() bool {
 	return v.CLIOptionParser.IsBoolFlag()
 }
 
+// parseScpArgs splits the two scp-mode arguments into a transfer direction and
+// the local/remote paths. The remote argument uses '%' as the separator between
+// the sshoq server URL and the remote path, since ':' is already used for the
+// port designation
+// (e.g. user@host:443/sshoq-server%/tmp/remotefile). When the remote argument
+// is args[0] the transfer is a download, otherwise it is an upload.
+func parseScpArgs(args []string) (upload bool, localPath, remotePath, urlParam string, err error) {
+	if len(args) != 2 {
+		return false, "", "", "", fmt.Errorf("scp mode requires exactly two arguments: <local-path> <remote-url> (upload) or <remote-url> <local-path> (download)")
+	}
+	remoteIdx := -1
+	for i, arg := range args {
+		if strings.Contains(arg, "%") {
+			remoteIdx = i
+			break
+		}
+	}
+	if remoteIdx == -1 {
+		return false, "", "", "", fmt.Errorf("could not find the remote path separator '%%' in the arguments: the remote argument must look like user@host:443/sshoq-server%%/remote/path")
+	}
+	urlPathParts := strings.SplitN(args[remoteIdx], "%", 2)
+	if urlPathParts[0] == "" || urlPathParts[1] == "" {
+		return false, "", "", "", fmt.Errorf("invalid remote argument %q: expected user@host:port/sshoq-server%%/remote/path", args[remoteIdx])
+	}
+	if remoteIdx == 1 {
+		// upload: local source is args[0], remote destination is args[1]
+		return true, args[0], urlPathParts[1], urlPathParts[0], nil
+	}
+	// download: remote source is args[0], local destination is args[1]
+	return false, args[1], urlPathParts[1], urlPathParts[0], nil
+}
+
 func ClientMain() int {
 	internal.CloseClientPluginsRegistry()
 	internal.CloseServerPluginsRegistry()
@@ -460,6 +492,8 @@ func ClientMain() int {
 	flag.StringVar(reverseTCP, "R", *reverseTCP, "alias for -reverse-tcp")
 	proxyJump := flag.String("proxy-jump", "", "if set, performs a proxy jump using the specified remote host as proxy (requires server with version >= 0.1.5)")
 	sftpMode := flag.Bool("sftp", false, "if set, start an interactive SFTP session")
+	scpMode := flag.Bool("scp", false, "if set, copy files to or from the remote host non-interactively, like scp")
+	scpRecursive := flag.Bool("r", false, "if set with -scp, recursively copy directories")
 
 	var flagValues []*FlagValue
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
@@ -535,11 +569,29 @@ func ClientMain() int {
 		tty = nil
 	}
 
+	// In scp mode, one of the two arguments is the remote URL. It uses '%' to
+	// separate the sshoq server URL from the remote path, since ':' is already
+	// used for the port designation
+	// (e.g. user@host:443/sshoq-server%/tmp/remotefile).
+	var scpUpload bool
+	var scpLocalPath, scpRemotePath string
 	urlFromParam := args[0]
+	command := args[1:]
+	if *scpMode {
+		if *sftpMode {
+			log.Error().Msgf("cannot use -sftp and -scp at the same time")
+			return -1
+		}
+		var err error
+		scpUpload, scpLocalPath, scpRemotePath, urlFromParam, err = parseScpArgs(args)
+		if err != nil {
+			log.Error().Msgf("%s", err)
+			return -1
+		}
+	}
 	if !strings.HasPrefix(urlFromParam, "https://") {
 		urlFromParam = fmt.Sprintf("https://%s", urlFromParam)
 	}
-	command := args[1:]
 
 	var localUDPAddr *net.UDPAddr = nil
 	var remoteUDPAddr *net.UDPAddr = nil
@@ -980,6 +1032,8 @@ func ClientMain() int {
 
 	if *sftpMode {
 		err = sshoqsftp.RunInteractiveClient(c)
+	} else if *scpMode {
+		err = sshoqsftp.RunScpClient(c, scpUpload, *scpRecursive, scpLocalPath, scpRemotePath)
 	} else {
 		err = c.RunSession(tty, *forwardSSHAgent, *forcePTYAlloc, command...)
 	}

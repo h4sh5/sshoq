@@ -244,6 +244,24 @@ To use sftp mode on the client, run this to drop into a SFTP shell:
 
 Type `help` in the `sftp>` prompt to see what commands are available.
 
+For non-interactive, scp-style copy, use `-scp`. Since `:` is already used for the port designation in the connection URL, the remote path is separated from the sshoq server URL with `%`. Add `-r` to copy directories recursively:
+
+Upload a local file to a remote path:
+
+`sshoq -scp localfile user@remote:443/sshoq-server%/tmp/remotefile`
+
+Upload a local folder recursively to the remote host:
+
+`sshoq -scp -r ./localfolder user@remote:443/sshoq-server%/tmp/`
+
+Download a remote file to the local directory:
+
+`sshoq -scp user@remote:443/sshoq-server%.ssh/authorized_keys .`
+
+Download a remote folder recursively to the local directory:
+
+`sshoq -scp -r user@remote:443/sshoq-server%/etc/nginx .`
+
 ### Local port forwarding
 
 As a SSH compatibility shortcut, `-L` is the same as `-forward-tcp`

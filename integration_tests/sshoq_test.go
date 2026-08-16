@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -70,6 +71,19 @@ var _ = BeforeSuite(func() {
 		// run them is they are enabled explicitly.
 		ssh3ServerPath, err = BuildWithEnvironment("../cmd/sshoq-server/main.go", []string{fmt.Sprintf("CGO_ENABLED=%s", os.Getenv("CGO_ENABLED"))})
 		Expect(err).ToNot(HaveOccurred())
+
+		// The SFTP handler is served in a forked child process that runs with
+		// the authenticated user's UID/GID (see sftp.ServeChannel), so the
+		// server binary must be reachable and executable by that user. gexec
+		// compiles the binary into a chain of 0700 temp directories
+		// (/tmp/gexec_artifacts*/g*), which would prevent the child from being
+		// spawned (fork/exec: permission denied); open up every ancestor
+		// directory and the binary itself so SFTP sessions (e.g. -sftp or
+		// -scp) can run in the integration tests.
+		for dir := filepath.Dir(ssh3ServerPath); dir != "/" && dir != "."; dir = filepath.Dir(dir) {
+			Expect(os.Chmod(dir, 0o755)).To(Succeed())
+		}
+		Expect(os.Chmod(ssh3ServerPath, 0o755)).To(Succeed())
 		serverCommand = exec.Command(ssh3ServerPath,
 			"-bind", serverBind,
 			"-v",
@@ -447,6 +461,178 @@ var _ = Describe("Testing the sshoq cli", func() {
 						testTCPPortForwarding(8082, false, &net.TCPAddr{IP: net.ParseIP("::1"), Port: 9090}, "hello from client", "hello from server", "-forward-tcp")
 						testTCPPortForwarding(8093, false, &net.TCPAddr{IP: net.ParseIP("::1"), Port: 9090}, "hello from client", "hello from server", "-reverse-tcp")
 					})
+				})
+			})
+
+			Context("scp file transfer", func() {
+				// scpRemoteURL builds a client connection URL with the remote path
+				// appended after the '%' separator (':' is used for the port), e.g.
+				// ssh3-testuser@127.0.0.1:4433/sshoq-tests%/home/ssh3-testuser/x.txt.
+				// The connection URL is already part of the string, so scp client
+				// args are built manually instead of via getClientArgs (which
+				// appends a bare connection URL as the last argument).
+				scpRemoteURL := func(bind, remotePath string) string {
+					return fmt.Sprintf("%s@%s%s%%%s", username, bind, DEFAULT_URL_PATH, remotePath)
+				}
+
+				It("uploads a single file with -scp", func() {
+					localFile := filepath.Join(GinkgoT().TempDir(), "localfile.txt")
+					err := os.WriteFile(localFile, []byte("hello from scp upload"), 0644)
+					Expect(err).ToNot(HaveOccurred())
+
+					remoteFile := fmt.Sprintf("/home/%s/scp-uploaded-%d.txt", username, time.Now().UnixNano())
+					defer os.RemoveAll(remoteFile)
+
+					clientArgs := []string{
+						"-v", "-insecure", "-i", rsaPrivKeyPath,
+						"-scp",
+						localFile,
+						scpRemoteURL(serverBind, remoteFile),
+					}
+					command := exec.Command(ssh3Path, clientArgs...)
+					session, err := Start(command, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session).Should(Exit(0))
+					Eventually(session).Should(Say("Uploaded .*localfile.txt"))
+
+					content, err := os.ReadFile(remoteFile)
+					Expect(err).ToNot(HaveOccurred())
+					Expect(string(content)).To(Equal("hello from scp upload"))
+				})
+
+				It("uploads a directory recursively with -scp -r", func() {
+					localDir := filepath.Join(GinkgoT().TempDir(), "scp-folder")
+					err := os.MkdirAll(filepath.Join(localDir, "sub"), 0755)
+					Expect(err).ToNot(HaveOccurred())
+					err = os.WriteFile(filepath.Join(localDir, "a.txt"), []byte("alpha"), 0644)
+					Expect(err).ToNot(HaveOccurred())
+					err = os.WriteFile(filepath.Join(localDir, "sub", "b.txt"), []byte("beta"), 0644)
+					Expect(err).ToNot(HaveOccurred())
+
+					// the trailing '/' makes the remote folder be copied into the
+					// destination under its own basename, like scp -r
+					remoteParent := fmt.Sprintf("/home/%s/scp-dest-%d/", username, time.Now().UnixNano())
+					defer os.RemoveAll(remoteParent)
+
+					clientArgs := []string{
+						"-v", "-insecure", "-i", rsaPrivKeyPath,
+						"-scp", "-r",
+						localDir,
+						scpRemoteURL(serverBind, remoteParent),
+					}
+					command := exec.Command(ssh3Path, clientArgs...)
+					session, err := Start(command, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session).Should(Exit(0))
+
+					content, err := os.ReadFile(filepath.Join(remoteParent, "scp-folder", "a.txt"))
+					Expect(err).ToNot(HaveOccurred())
+					Expect(string(content)).To(Equal("alpha"))
+					content, err = os.ReadFile(filepath.Join(remoteParent, "scp-folder", "sub", "b.txt"))
+					Expect(err).ToNot(HaveOccurred())
+					Expect(string(content)).To(Equal("beta"))
+				})
+
+				It("downloads a single file with -scp", func() {
+					// first place a remote file via an scp upload, then fetch it back
+					localSrc := filepath.Join(GinkgoT().TempDir(), "src.txt")
+					err := os.WriteFile(localSrc, []byte("round trip content"), 0644)
+					Expect(err).ToNot(HaveOccurred())
+
+					remoteFile := fmt.Sprintf("/home/%s/scp-roundtrip-%d.txt", username, time.Now().UnixNano())
+					defer os.RemoveAll(remoteFile)
+
+					uploadArgs := []string{
+						"-v", "-insecure", "-i", rsaPrivKeyPath,
+						"-scp",
+						localSrc,
+						scpRemoteURL(serverBind, remoteFile),
+					}
+					upSession, err := Start(exec.Command(ssh3Path, uploadArgs...), GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(upSession).Should(Exit(0))
+
+					localDir := GinkgoT().TempDir()
+					// for a download, the remote URL comes first and the local
+					// destination second, so the args are built manually
+					clientArgs := []string{
+						"-v", "-insecure", "-i", rsaPrivKeyPath,
+						"-scp",
+						scpRemoteURL(serverBind, remoteFile),
+						localDir,
+					}
+					command := exec.Command(ssh3Path, clientArgs...)
+					session, err := Start(command, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session).Should(Exit(0))
+					Eventually(session).Should(Say("Downloaded .*scp-roundtrip-"))
+
+					// the downloaded file keeps the remote basename, like scp
+					content, err := os.ReadFile(filepath.Join(localDir, filepath.Base(remoteFile)))
+					Expect(err).ToNot(HaveOccurred())
+					Expect(string(content)).To(Equal("round trip content"))
+				})
+
+				It("downloads a directory recursively with -scp -r", func() {
+					// create a remote directory tree via an scp upload, then fetch it back
+					localSrcDir := filepath.Join(GinkgoT().TempDir(), "remote-folder")
+					err := os.MkdirAll(filepath.Join(localSrcDir, "nested"), 0755)
+					Expect(err).ToNot(HaveOccurred())
+					err = os.WriteFile(filepath.Join(localSrcDir, "one.txt"), []byte("first"), 0644)
+					Expect(err).ToNot(HaveOccurred())
+					err = os.WriteFile(filepath.Join(localSrcDir, "nested", "two.txt"), []byte("second"), 0644)
+					Expect(err).ToNot(HaveOccurred())
+
+					remoteParent := fmt.Sprintf("/home/%s/scp-rdest-%d/", username, time.Now().UnixNano())
+					defer os.RemoveAll(remoteParent)
+
+					uploadArgs := []string{
+						"-v", "-insecure", "-i", rsaPrivKeyPath,
+						"-scp", "-r",
+						localSrcDir,
+						scpRemoteURL(serverBind, remoteParent),
+					}
+					upSession, err := Start(exec.Command(ssh3Path, uploadArgs...), GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(upSession).Should(Exit(0))
+
+					localDir := GinkgoT().TempDir()
+					clientArgs := []string{
+						"-v", "-insecure", "-i", rsaPrivKeyPath,
+						"-scp", "-r",
+						scpRemoteURL(serverBind, filepath.Join(remoteParent, "remote-folder")),
+						localDir,
+					}
+					command := exec.Command(ssh3Path, clientArgs...)
+					session, err := Start(command, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session).Should(Exit(0))
+
+					content, err := os.ReadFile(filepath.Join(localDir, "remote-folder", "one.txt"))
+					Expect(err).ToNot(HaveOccurred())
+					Expect(string(content)).To(Equal("first"))
+					content, err = os.ReadFile(filepath.Join(localDir, "remote-folder", "nested", "two.txt"))
+					Expect(err).ToNot(HaveOccurred())
+					Expect(string(content)).To(Equal("second"))
+				})
+
+				It("returns a useful error when SFTP is disabled on the server", func() {
+					localFile := filepath.Join(GinkgoT().TempDir(), "localfile.txt")
+					err := os.WriteFile(localFile, []byte("x"), 0644)
+					Expect(err).ToNot(HaveOccurred())
+
+					remoteFile := fmt.Sprintf("/home/%s/scp-disabled-%d.txt", username, time.Now().UnixNano())
+					clientArgs := []string{
+						"-v", "-insecure", "-i", rsaPrivKeyPath,
+						"-scp",
+						localFile,
+						scpRemoteURL(serverBindSFTPDisabled, remoteFile),
+					}
+					command := exec.Command(ssh3Path, clientArgs...)
+					session, err := Start(command, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session).Should(Exit(255))
+					Eventually(session.Err).Should(Say("could not open sftp channel: .*SFTP is disabled on the server"))
 				})
 			})
 
