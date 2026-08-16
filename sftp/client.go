@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	ssh3 "github.com/h4sh5/sshoq"
 	"github.com/h4sh5/sshoq/client"
@@ -47,13 +48,22 @@ func RunInteractiveClient(c *client.Client) error {
 			return err
 		}
 
-		line = strings.TrimSpace(line)
-		if line == "" {
+		// Split the line into arguments with OpenSSH sftp quoting: single and
+		// double quotes protect whitespace and metacharacters, backslash
+		// escapes the next character, and '#' starts a comment. Glob
+		// metacharacters keep their escaping for commands that glob; commands
+		// that do not glob un-escape their paths via undoGlobEscape/unescape
+		// when they consume them.
+		parts, _, _, _, err := makeargv(line, false)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s\n", err)
+			continue
+		}
+		if len(parts) == 0 {
 			continue
 		}
 
-		parts := strings.Fields(line)
-		cmd := parts[0]
+		cmd := strings.ToLower(parts[0])
 
 		switch cmd {
 		case "exit", "quit":
@@ -64,7 +74,7 @@ func RunInteractiveClient(c *client.Client) error {
 				fmt.Println("usage: lcd <local-path>")
 				continue
 			}
-			if err := os.Chdir(parts[1]); err != nil {
+			if err := os.Chdir(undoGlobEscape(parts[1])); err != nil {
 				fmt.Fprintf(os.Stderr, "lcd: %s\n", err)
 			} else {
 				localDir, _ = os.Getwd()
@@ -73,7 +83,7 @@ func RunInteractiveClient(c *client.Client) error {
 		case "lls":
 			target := localDir
 			if len(parts) > 1 {
-				target = filepath.Join(localDir, parts[1])
+				target = filepath.Join(localDir, undoGlobEscape(parts[1]))
 			}
 			entries, err := os.ReadDir(target)
 			if err != nil {
@@ -91,10 +101,11 @@ func RunInteractiveClient(c *client.Client) error {
 		case "cd":
 			target := remoteDir
 			if len(parts) > 1 {
-				if path.IsAbs(parts[1]) {
-					target = parts[1]
+				arg := undoGlobEscape(parts[1])
+				if path.IsAbs(arg) {
+					target = arg
 				} else {
-					target = path.Join(remoteDir, parts[1])
+					target = path.Join(remoteDir, arg)
 				}
 			}
 			resp, err := doRequest(channel, &Request{Cmd: "cd", Path: target})
@@ -141,11 +152,13 @@ func RunInteractiveClient(c *client.Client) error {
 				fmt.Println(err.Error())
 				continue
 			}
-			localFile := localSource
+			// The source is not globbed by this client, so the escaped path is
+			// fully un-escaped to the literal file name.
+			localFile := unescape(localSource)
 			if !filepath.IsAbs(localFile) {
 				localFile = filepath.Join(localDir, localFile)
 			}
-			remoteFile := remoteTarget
+			remoteFile := undoGlobEscape(remoteTarget)
 			if remoteFile == "" {
 				remoteFile = filepath.Base(localFile)
 			}
@@ -166,7 +179,7 @@ func RunInteractiveClient(c *client.Client) error {
 				fmt.Println("usage: mkdir <remote-path>")
 				continue
 			}
-			target := parts[1]
+			target := undoGlobEscape(parts[1])
 			if !path.IsAbs(target) {
 				target = path.Join(remoteDir, target)
 			}
@@ -184,7 +197,9 @@ func RunInteractiveClient(c *client.Client) error {
 				fmt.Println("usage: rm <remote-file>")
 				continue
 			}
-			target := parts[1]
+			// rm is a glob command in OpenSSH; this client removes a single
+			// literal path, so the escaping is fully undone.
+			target := unescape(parts[1])
 			if !path.IsAbs(target) {
 				target = path.Join(remoteDir, target)
 			}
@@ -202,7 +217,7 @@ func RunInteractiveClient(c *client.Client) error {
 				fmt.Println("usage: rmdir <remote-dir>")
 				continue
 			}
-			target := parts[1]
+			target := undoGlobEscape(parts[1])
 			if !path.IsAbs(target) {
 				target = path.Join(remoteDir, target)
 			}
@@ -281,37 +296,53 @@ func newCompleter(channel ssh3.Channel, localDir, remoteDir *string) completeFun
 	}
 
 	return func(buf []rune, pos int) ([]string, int) {
-		// The word to complete is the whitespace-delimited token ending at the
-		// cursor. When the cursor sits on the command itself there is nothing
-		// to complete: only paths are completed, not commands.
-		wordStart := pos
-		for wordStart > 0 && !unicode.IsSpace(buf[wordStart-1]) {
-			wordStart--
-		}
-		if wordStart == 0 {
+		// Parse the line up to the cursor with the OpenSSH quoting rules in
+		// sloppy mode, so an unterminated quote (the user is mid-argument) is
+		// tolerated. The last argument is the one being completed.
+		prefix := string(buf[:pos])
+		args, spans, quote, terminated, _ := makeargv(prefix, true)
+		if len(args) == 0 {
 			return nil, 0
 		}
-		word := string(buf[wordStart:pos])
 
-		args := strings.Fields(string(buf[:pos]))
-		if len(args) == 0 {
-			return nil, wordStart
+		// When the cursor sits on whitespace the word being completed is the
+		// (empty) next argument at the cursor; otherwise it is the argument
+		// containing the cursor, replaced from where that argument begins
+		// (including its opening quote, if any) to the cursor. The spans are
+		// byte offsets into prefix, so they are converted to rune indices
+		// into buf.
+		runeAt := func(b int) int {
+			if b <= 0 {
+				return 0
+			}
+			return utf8.RuneCountInString(prefix[:b])
 		}
-		cmd := args[0]
+		start := pos
+		parsedWord := ""
+		if pos > 0 && !unicode.IsSpace(buf[pos-1]) {
+			start = runeAt(spans[len(spans)-1][0])
+			parsedWord = args[len(args)-1]
+			if len(args) == 1 {
+				return nil, 0 // the cursor is on the command word itself
+			}
+		}
+
+		cmd := strings.ToLower(args[0])
 
 		// The argument ordinal occupied by the word (1 = first argument),
-		// skipping flag arguments such as -r/--recursive.
+		// skipping flag arguments such as -r/--recursive. When the cursor is
+		// at an argument boundary the word is the next (empty) argument.
 		argIdx := 1
 		for _, a := range args[1:] {
-			if a == word {
+			if a == parsedWord {
 				break
 			}
 			if !strings.HasPrefix(a, "-") {
 				argIdx++
 			}
 		}
-		if strings.HasPrefix(word, "-") {
-			return nil, wordStart
+		if strings.HasPrefix(parsedWord, "-") {
+			return nil, start
 		}
 
 		local := false
@@ -325,14 +356,37 @@ func newCompleter(channel ssh3.Channel, localDir, remoteDir *string) completeFun
 		case "cd", "ls", "mkdir", "rm", "rmdir":
 			local = false
 		default:
-			return nil, wordStart
+			return nil, start
 		}
 
 		listDir := listRemote
 		if local {
 			listDir = listLocal
 		}
-		return completePath(word, listDir), wordStart
+		candidates := completePath(unescape(parsedWord), listDir)
+
+		// Render the candidates in the typed form, escaping the characters
+		// that are special to the command line. When the completed word sits
+		// inside quotes (an open quote at the cursor, or a word that already
+		// starts with one), the candidate is re-quoted: only the quote
+		// character itself needs escaping inside the quotes, and the quote is
+		// closed when the user's was still open.
+		quoted := quote != 0 && !terminated
+		var q byte
+		if quoted {
+			q = quote
+		} else if start < pos && (buf[start] == '\'' || buf[start] == '"') {
+			quoted = true
+			q = byte(buf[start])
+		}
+		for i, c := range candidates {
+			if quoted {
+				candidates[i] = string(q) + escapePath(c, q) + string(q)
+			} else {
+				candidates[i] = escapePath(c, 0)
+			}
+		}
+		return candidates, start
 	}
 }
 
@@ -391,6 +445,9 @@ func doLs(channel ssh3.Channel, remoteDir string, parts []string) error {
 		listDir = dir
 		pattern = pat
 	}
+	// The directory (whether globbed or not) is a literal path: remove the
+	// escaping makeargv preserved for glob matching.
+	listDir = unescape(listDir)
 
 	// Resolve the directory relative to the remote working directory, mirroring
 	// the handling of a non-glob "ls <path>".
@@ -458,6 +515,9 @@ func doGet(channel ssh3.Channel, localDir, remoteDir string, parts []string) err
 		sourceDir = dir
 		pattern = pat
 	}
+	// The directory (whether globbed or not) is a literal path: remove the
+	// escaping makeargv preserved for glob matching.
+	sourceDir = unescape(sourceDir)
 
 	// Resolve the source relative to the remote working directory, mirroring the
 	// handling of a non-glob "get <path>".
@@ -500,7 +560,9 @@ func doGet(channel ssh3.Channel, localDir, remoteDir string, parts []string) err
 
 	// No glob: preserve the previous single-target behavior.
 	remoteFile := sourceDir
-	localFile := localTarget
+	// The local target is not globbed: undo the escaping of glob
+	// metacharacters, mirroring OpenSSH's undo_glob_escape for get targets.
+	localFile := undoGlobEscape(localTarget)
 	if localFile == "" {
 		localFile = filepath.Base(filepath.Clean(remoteFile))
 	}
@@ -519,10 +581,13 @@ func downloadOne(channel ssh3.Channel, remoteFile, localFile string, recursive b
 	return downloadFile(channel, remoteFile, localFile)
 }
 
-// globSplit reports whether arg contains glob metacharacters in its final path
-// component and, if so, returns the directory prefix (before the last "/") and
-// the pattern (the final component) to match against directory entries. When arg
-// has no metacharacters it returns ("", "", false).
+// globSplit reports whether arg contains unescaped glob metacharacters in its
+// final path component and, if so, returns the directory prefix (before the
+// last "/") and the pattern (the final component) to match against directory
+// entries. Metacharacters escaped by a backslash (*, ?, [ preceded by \\,
+// which makeargv preserves for glob matching) are literal and do not turn the
+// argument into a glob. When arg has no unescaped metacharacters it returns
+// ("", "", false).
 func globSplit(arg string) (dir, pattern string, ok bool) {
 	// The final path component starts after the last "/".
 	slash := -1
@@ -536,16 +601,22 @@ func globSplit(arg string) (dir, pattern string, ok bool) {
 		component = arg[slash+1:]
 	}
 
+	hasMeta := false
 	for i := 0; i < len(component); i++ {
 		switch component[i] {
+		case '\\':
+			i++ // skip the escaped character: it is literal
 		case '*', '?', '[':
-			if slash < 0 {
-				return "", arg, true
-			}
-			return arg[:slash], arg[slash+1:], true
+			hasMeta = true
 		}
 	}
-	return "", "", false
+	if !hasMeta {
+		return "", "", false
+	}
+	if slash < 0 {
+		return "", arg, true
+	}
+	return arg[:slash], arg[slash+1:], true
 }
 
 func parseTransferArgs(parts []string, cmd string) (recursive bool, source string, target string, err error) {
@@ -726,8 +797,12 @@ func printHelp() {
   lpwd            print local working directory
   exit/quit       exit
 
-Tab completes file paths: local paths for lcd/lls and for the source of put
-and target of get; remote paths for all other arguments.`)
+Paths are parsed like OpenSSH sftp: single quotes ('...') and double quotes
+("...") protect spaces and metacharacters, and a backslash escapes the next
+character (e.g. get 'Downloads/Test File.txt' or put Test\ File.txt).
+A '#' outside quotes starts a comment. Tab completes file paths: local paths
+for lcd/lls and for the source of put and target of get; remote paths for all
+other arguments.`)
 }
 
 func printEntry(name string, info os.FileInfo) {
