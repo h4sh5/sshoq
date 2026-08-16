@@ -81,12 +81,85 @@ func TestReceiveResponse(t *testing.T) {
 	}
 }
 
-func TestReceiveResponse_WrongMessageType(t *testing.T) {
-	ch := newMockChannel(&ssh3Messages.ChannelRequestMessage{})
-	_, err := ReceiveResponse(ch)
-	if err == nil {
-		t.Fatal("expected error for non-data message")
+func TestReceiveResponse_SkipsNonDataMessages(t *testing.T) {
+	want := &Response{ID: 2, OK: true, Path: "/tmp"}
+	ch := newMockChannel(
+		&ssh3Messages.ChannelRequestMessage{},
+		makeJSONDataMsg(want),
+	)
+	got, err := ReceiveResponse(ch)
+	if err != nil {
+		t.Fatalf("ReceiveResponse error: %v", err)
 	}
+	if got.ID != want.ID || got.OK != want.OK || got.Path != want.Path {
+		t.Fatalf("unexpected response: %+v", got)
+	}
+}
+
+func TestReceiveResponse_ChunkedMessage(t *testing.T) {
+	// Build a large response that channelImpl.WriteData would split into
+	// several channel data messages (each message carries at most
+	// MaxPacketSize minus framing bytes). ReceiveResponse must reassemble the
+	// chunks into a single JSON document instead of parsing a truncated one.
+	var entries []FileInfo
+	for i := 0; i < 500; i++ {
+		entries = append(entries, FileInfo{
+			Name:      fmt.Sprintf("file_%03d.txt", i),
+			Size:      4096,
+			Mode:      0644,
+			IsDir:     false,
+			ModTime:   1786842766,
+			UID:       1000,
+			GID:       1000,
+			UserName:  "alice",
+			GroupName: "alice",
+		})
+	}
+	want := &Response{ID: 7, OK: true, Entries: entries}
+	raw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	msgs := splitIntoChannelMessages(raw)
+	if len(msgs) < 2 {
+		t.Fatalf("test response too small to be split across messages")
+	}
+
+	got, err := ReceiveResponse(newMockChannel(msgs...))
+	if err != nil {
+		t.Fatalf("ReceiveResponse error: %v", err)
+	}
+	if got.ID != want.ID || !got.OK || len(got.Entries) != len(want.Entries) {
+		t.Fatalf("unexpected reassembled response: id=%d ok=%v entries=%d", got.ID, got.OK, len(got.Entries))
+	}
+	if got.Entries[0].Name != want.Entries[0].Name ||
+		got.Entries[len(got.Entries)-1].Name != want.Entries[len(want.Entries)-1].Name {
+		t.Fatalf("reassembled entries mismatch: first=%q last=%q",
+			got.Entries[0].Name, got.Entries[len(got.Entries)-1].Name)
+	}
+}
+
+// splitIntoChannelMessages splits raw into as many DataOrExtendedDataMessage
+// payloads as channelImpl.WriteData would produce for a channel opened with the
+// default maximum packet size of 30000 bytes.
+func splitIntoChannelMessages(raw []byte) []ssh3Messages.Message {
+	const maxPacketSize = 30000
+	emptyMsgLen := (&ssh3Messages.DataOrExtendedDataMessage{
+		DataType: ssh3Messages.SSH_EXTENDED_DATA_NONE,
+	}).Length()
+	chunkSize := maxPacketSize - emptyMsgLen
+
+	var msgs []ssh3Messages.Message
+	for len(raw) > 0 {
+		n := chunkSize
+		if len(raw) < n {
+			n = len(raw)
+		}
+		msgs = append(msgs, makeDataMsg(raw[:n]))
+		raw = raw[n:]
+	}
+	return msgs
 }
 
 // --- Server tests ---
@@ -844,6 +917,48 @@ func TestServeChannel_TwoRequests(t *testing.T) {
 	}
 	if !ch.Closed {
 		t.Fatal("expected channel closed")
+	}
+}
+
+func TestServeChannel_ChunkedRequest(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Build a put request whose JSON payload exceeds one channel data message
+	// (the base64 encoding of the data alone is larger than MaxPacketSize), so
+	// the request arrives split across several messages. The server must
+	// reassemble it before handling, mirroring the response-side reassembly.
+	payload := bytes.Repeat([]byte("abcdefghij"), 3000) // 30000 bytes
+	req := Request{Cmd: "put", Path: filepath.Join(tmp, "big.bin"), Data: payload}
+	raw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	msgs := splitIntoChannelMessages(raw)
+	if len(msgs) < 2 {
+		t.Fatalf("test request too small to be split across messages")
+	}
+
+	ch := newMockChannel(msgs...)
+	user := currentTestUser(tmp)
+	ServeChannel(nil, user, ch)
+
+	if len(ch.Writes) != 1 {
+		t.Fatalf("expected 1 response, got %d", len(ch.Writes))
+	}
+	var resp Response
+	if err := json.Unmarshal(ch.Writes[0], &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("expected ok response, got %+v", resp)
+	}
+
+	got, err := os.ReadFile(filepath.Join(tmp, "big.bin"))
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("file content mismatch: got %d bytes, want %d", len(got), len(payload))
 	}
 }
 

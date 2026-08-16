@@ -73,7 +73,7 @@ func serveChannelInProcess(ctx context.Context, user *unix_util.User, channel sf
 	defer log.Info().Msgf("ending SFTP session for user %s", user.Username)
 
 	for {
-		msg, err := channel.NextMessage()
+		payload, err := receiveJSON(channel)
 		if err != nil {
 			if err != io.EOF {
 				log.Error().Msgf("sftp channel error: %s", err)
@@ -81,13 +81,8 @@ func serveChannelInProcess(ctx context.Context, user *unix_util.User, channel sf
 			return
 		}
 
-		dataMsg, ok := msg.(*ssh3Messages.DataOrExtendedDataMessage)
-		if !ok || dataMsg.DataType != ssh3Messages.SSH_EXTENDED_DATA_NONE {
-			continue
-		}
-
 		var req Request
-		if err := json.Unmarshal([]byte(dataMsg.Data), &req); err != nil {
+		if err := json.Unmarshal(payload, &req); err != nil {
 			session.respond(&Response{Error: fmt.Sprintf("invalid request: %s", err)})
 			continue
 		}
