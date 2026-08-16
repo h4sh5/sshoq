@@ -202,6 +202,181 @@ func TestLineEditorRendering(t *testing.T) {
 	}
 }
 
+// tabCompleter returns a static completer whose candidates are the words
+// starting with the token being edited, used to drive the line editor's tab
+// completion without a filesystem.
+func tabCompleter(all []string) completeFunc {
+	return func(buf []rune, pos int) ([]string, int) {
+		start := pos
+		for start > 0 && buf[start-1] != ' ' {
+			start--
+		}
+		word := string(buf[start:pos])
+		var out []string
+		for _, c := range all {
+			if strings.HasPrefix(c, word) {
+				out = append(out, c)
+			}
+		}
+		return out, start
+	}
+}
+
+func TestLineEditorTabCompletionUniqueFile(t *testing.T) {
+	var out bytes.Buffer
+	e := &lineEditor{
+		reader:    bufio.NewReader(strings.NewReader("cd dir/fi\t\r")),
+		out:       &out,
+		outFd:     -1,
+		width:     80,
+		prompt:    "sftp> ",
+		histPos:   -1,
+		completer: tabCompleter([]string{"dir/file"}),
+	}
+	line, err := e.read()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	// A unique file match is applied in full and followed by a space so the
+	// next argument can be typed immediately.
+	if line != "cd dir/file " {
+		t.Errorf("unique file completion: got %q, want %q", line, "cd dir/file ")
+	}
+}
+
+func TestLineEditorTabCompletionUniqueDirectory(t *testing.T) {
+	var out bytes.Buffer
+	e := &lineEditor{
+		reader:    bufio.NewReader(strings.NewReader("cd dir/su\t\r")),
+		out:       &out,
+		outFd:     -1,
+		width:     80,
+		prompt:    "sftp> ",
+		histPos:   -1,
+		completer: tabCompleter([]string{"dir/sub/"}),
+	}
+	line, err := e.read()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	// A unique directory keeps its trailing "/" (no space), so a further Tab
+	// descends into it.
+	if line != "cd dir/sub/" {
+		t.Errorf("unique directory completion: got %q, want %q", line, "cd dir/sub/")
+	}
+}
+
+func TestLineEditorTabCompletionCommonPrefix(t *testing.T) {
+	var out bytes.Buffer
+	e := &lineEditor{
+		reader:    bufio.NewReader(strings.NewReader("cd dir/pa\t\r")),
+		out:       &out,
+		outFd:     -1,
+		width:     80,
+		prompt:    "sftp> ",
+		histPos:   -1,
+		completer: tabCompleter([]string{"dir/part1", "dir/part2"}),
+	}
+	line, err := e.read()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if line != "cd dir/part" {
+		t.Errorf("common prefix completion: got %q, want %q", line, "cd dir/part")
+	}
+}
+
+func TestLineEditorTabCompletionSecondTabLists(t *testing.T) {
+	var out bytes.Buffer
+	e := &lineEditor{
+		reader:    bufio.NewReader(strings.NewReader("cd dir/pa\t\t\r")),
+		out:       &out,
+		outFd:     -1,
+		width:     80,
+		prompt:    "sftp> ",
+		histPos:   -1,
+		completer: tabCompleter([]string{"dir/part1", "dir/part2"}),
+	}
+	line, err := e.read()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	// The first Tab completes to the common prefix; the second lists the
+	// candidates below the prompt without changing the line.
+	if line != "cd dir/part" {
+		t.Errorf("second tab line: got %q, want %q", line, "cd dir/part")
+	}
+	if !strings.Contains(out.String(), "dir/part1") || !strings.Contains(out.String(), "dir/part2") {
+		t.Errorf("second tab should list candidates, got output %q", out.String())
+	}
+}
+
+func TestLineEditorTabCompletionNoCandidates(t *testing.T) {
+	var out bytes.Buffer
+	e := &lineEditor{
+		reader:    bufio.NewReader(strings.NewReader("cd nope\t\r")),
+		out:       &out,
+		outFd:     -1,
+		width:     80,
+		prompt:    "sftp> ",
+		histPos:   -1,
+		completer: tabCompleter([]string{"dir/file"}),
+	}
+	line, err := e.read()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if line != "cd nope" {
+		t.Errorf("no-match line: got %q, want %q", line, "cd nope")
+	}
+	if !strings.Contains(out.String(), "\a") {
+		t.Errorf("no-match completion should ring the bell, got output %q", out.String())
+	}
+}
+
+func TestLineEditorTabCompletionMidLine(t *testing.T) {
+	// The cursor sits in the middle of the line; completion must only touch
+	// the word ending at the cursor and leave the rest of the line intact.
+	var out bytes.Buffer
+	e := &lineEditor{
+		reader:    bufio.NewReader(strings.NewReader("get dir/fi suffix\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\t\r")),
+		out:       &out,
+		outFd:     -1,
+		width:     80,
+		prompt:    "sftp> ",
+		histPos:   -1,
+		completer: tabCompleter([]string{"dir/file", "other"}),
+	}
+	line, err := e.read()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	// "get dir/fi suffix" is 17 chars; moving 13 left lands the cursor after
+	// "dir/fi"; Tab completes it to "dir/file " in place.
+	if line != "get dir/file  suffix" {
+		t.Errorf("mid-line completion: got %q, want %q", line, "get dir/file  suffix")
+	}
+}
+
+func TestCommonPrefix(t *testing.T) {
+	cases := []struct {
+		in   []string
+		want string
+	}{
+		{[]string{"dir/part1", "dir/part2"}, "dir/part"},
+		{[]string{"a", "ab", "abc"}, "a"},
+		{[]string{"abc"}, "abc"},
+		{[]string{"x", "y"}, ""},
+		{[]string{"中文1", "中文2"}, "中文"},
+		{[]string{}, ""},
+	}
+	for _, c := range cases {
+		if got := commonPrefix(c.in); got != c.want {
+			t.Errorf("commonPrefix(%v) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestDisplayWidth(t *testing.T) {
 	cases := []struct {
 		in   string
