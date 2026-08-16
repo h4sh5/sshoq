@@ -346,9 +346,6 @@ func forwardReverseUDPInBackground(ctx context.Context, channel ssh3.Channel, co
 type Client struct {
 	qconn quic.EarlyConnection
 	*ssh3.Conversation
-	// reverseTCPRemoteAddr is the destination address used to forward the
-	// server-initiated reverse TCP channels opened for -reverse-tcp.
-	reverseTCPRemoteAddr *net.TCPAddr
 }
 
 func Dial(ctx context.Context, config *client_config.Config, qconn quic.EarlyConnection,
@@ -853,11 +850,10 @@ func (c *Client) ForwardTCP(ctx context.Context, localTCPAddr *net.TCPAddr, remo
 func (c *Client) ReverseTCP(ctx context.Context, localTCPAddr *net.TCPAddr, remoteTCPAddr *net.TCPAddr) (*net.TCPAddr, error) {
 	log.Debug().Msgf("start reverse TCP forwarding from %s to %s", localTCPAddr, remoteTCPAddr)
 
-	// The server-initiated "open-request-reverse-tcp" channels are the handled by
-	// the global channel accept loop in RunSession, where the destination address
-	// is read from reverseTCPRemoteAddr (no dedicated accept loop here).
-	c.reverseTCPRemoteAddr = remoteTCPAddr
-
+	// The server-initiated "open-request-reverse-tcp,<dest>" channels are handled
+	// by the global channel accept loop in RunSession, which reads the destination
+	// address from the channel type (so multiple reverse TCP forwardings can
+	// coexist).
 	forwardingChannel, err := c.RequestTCPReverseChannel(30000, 10, localTCPAddr, remoteTCPAddr)
 	if err != nil {
 		log.Error().Msgf("could open new TCP reverse forwarding channel: %s", err)
@@ -901,6 +897,22 @@ func parseAddrsFromChannelType(typ string) (*net.UDPAddr, *net.UDPAddr, error) {
 	}
 
 	return localUDPAddr, remoteUDPAddr, nil
+}
+
+// parseReverseTCPDestFromChannelType extracts the destination address (the
+// socket at reach of the SSH3 client) from an "open-request-reverse-tcp,<dest>"
+// channel type.
+func parseReverseTCPDestFromChannelType(typ string) (*net.TCPAddr, error) {
+	parts := strings.SplitN(typ, ",", 2)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("bad format (want: open-request-reverse-tcp,<remote>): %q", typ)
+	}
+	destStr := strings.TrimSpace(parts[1])
+	destAddr, err := net.ResolveTCPAddr("tcp", destStr)
+	if err != nil {
+		return nil, fmt.Errorf("parse reverse TCP destination addr %q: %w", destStr, err)
+	}
+	return destAddr, nil
 }
 
 func parseUDPRequestReverseHeader(channelID uint64, buf util.Reader) (*net.UDPAddr, *net.UDPAddr, error) {
@@ -1028,19 +1040,21 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, forcePTYAlloc bo
 				}
 			}
 
-			switch channel.ChannelType() {
-			case "open-request-reverse-tcp":
+			switch {
+			case strings.HasPrefix(typ, "open-request-reverse-tcp"):
 				// reverse TCP channels are opened by the server for -reverse-tcp;
-				// the destination address is set by ReverseTCP.
-				if c.reverseTCPRemoteAddr == nil {
-					log.Error().Msgf("received a reverse TCP forwarding channel but no reverse TCP forwarding was requested")
+				// the destination address is encoded in the channel type so that
+				// multiple simultaneous reverse TCP forwardings can be told apart.
+				reverseTCPDestAddr, err := parseReverseTCPDestFromChannelType(channel.ChannelType())
+				if err != nil {
+					log.Error().Msgf("received an invalid reverse TCP forwarding channel: %s", err)
 					channel.Close()
 					continue
 				}
-				log.Debug().Msgf("start reverse TCP forwarding to %s", c.reverseTCPRemoteAddr)
-				conn, err := net.DialTCP("tcp", nil, c.reverseTCPRemoteAddr)
+				log.Debug().Msgf("start reverse TCP forwarding to %s", reverseTCPDestAddr)
+				conn, err := net.DialTCP("tcp", nil, reverseTCPDestAddr)
 				if err != nil {
-					log.Error().Msgf("could not dial reverse TCP destination %s: %s", c.reverseTCPRemoteAddr, err)
+					log.Error().Msgf("could not dial reverse TCP destination %s: %s", reverseTCPDestAddr, err)
 					channel.Close()
 					continue
 				}

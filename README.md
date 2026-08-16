@@ -294,6 +294,12 @@ Similarly for UDP:
 
 Warning: Reverse UDP port forwarding is not well tested and may not be working fully.
 
+### Multiple port forwardings
+
+Like OpenSSH, all forwarding flags (`-L`, `-R`, `-forward-tcp`, `-forward-udp`, `-reverse-tcp`, `-reverse-udp`) can be repeated any number of times and combined freely, including a mix of TCP and UDP and of local and reverse forwardings:
+
+`sshoq -L 8080@127.0.0.1@3000 -L 8443@127.0.0.1@443 -R 2222@127.0.0.1@22 -forward-udp 8053@127.0.0.1@5353 -reverse-udp 8888@127.0.0.1@53 user@example.com/secret-path`
+
 ## SSHOQ is still experimental
 While SSHOQ shows promise for faster session establishment, it is still at an early proof-of-concept stage. As with any new complex protocol, **expert cryptographic review over an extended timeframe is required before reasonable security conclusions can be made**.
 
