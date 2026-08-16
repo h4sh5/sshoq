@@ -1534,3 +1534,114 @@ func TestClientDoGetInvalidPattern(t *testing.T) {
 		t.Fatal("expected error for invalid glob pattern")
 	}
 }
+
+func TestClientDoGetRecursiveDir(t *testing.T) {
+	localDir := t.TempDir()
+
+	ch := newMockChannel(
+		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "d", IsDir: true}}),
+		makeJSONDataMsg(&Response{OK: true, Entries: []FileInfo{{Name: "f.txt", Size: 5, Mode: 0644}}}),
+		makeJSONDataMsg(&Response{OK: true, Data: []byte("hello")}),
+		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
+	)
+
+	if err := doGet(ch, localDir, "/remote", []string{"get", "-r", "d"}); err != nil {
+		t.Fatalf("doGet -r dir error: %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(localDir, "d", "f.txt"))
+	if err != nil {
+		t.Fatalf("read downloaded file: %v", err)
+	}
+	if string(content) != "hello" {
+		t.Fatalf("unexpected content: %q", content)
+	}
+}
+
+// TestClientDoGetRecursiveWildcard exercises get -r with a glob source: the
+// parent directory is listed, entries matching the pattern are transferred
+// recursively (directories walked, files downloaded), and non-matching entries
+// are skipped, mirroring the wildcard behavior of a non-recursive get.
+func TestClientDoGetRecursiveWildcard(t *testing.T) {
+	localDir := t.TempDir()
+
+	ch := newMockChannel(
+		// ls of the globbed parent directory: "atest" does not match "test*",
+		// "test" is a directory and "testa" a file.
+		makeJSONDataMsg(&Response{OK: true, Entries: []FileInfo{
+			{Name: "atest"},
+			{Name: "test", IsDir: true},
+			{Name: "testa", Size: 5, Mode: 0644},
+		}}),
+		// Recursing into the matched directory "test".
+		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "test", IsDir: true}}),
+		makeJSONDataMsg(&Response{OK: true, Entries: []FileInfo{{Name: "nested.txt", Size: 11, Mode: 0644}}}),
+		makeJSONDataMsg(&Response{OK: true, Data: []byte("hello world")}),
+		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
+		// Downloading the matched file "testa".
+		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "testa", Size: 5, Mode: 0644}}),
+		makeJSONDataMsg(&Response{OK: true, Data: []byte("world")}),
+		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
+	)
+
+	if err := doGet(ch, localDir, "/remote/path", []string{"get", "-r", "test*"}); err != nil {
+		t.Fatalf("doGet -r wildcard error: %v", err)
+	}
+
+	// Only entries whose final component matches test* must be transferred, and
+	// matched directories must be downloaded recursively.
+	nested, err := os.ReadFile(filepath.Join(localDir, "test", "nested.txt"))
+	if err != nil {
+		t.Fatalf("read nested file: %v", err)
+	}
+	if string(nested) != "hello world" {
+		t.Fatalf("unexpected nested content: %q", nested)
+	}
+	content, err := os.ReadFile(filepath.Join(localDir, "testa"))
+	if err != nil {
+		t.Fatalf("read matched file: %v", err)
+	}
+	if string(content) != "world" {
+		t.Fatalf("unexpected file content: %q", content)
+	}
+	// Entries that do not match must not be downloaded.
+	if _, err := os.Stat(filepath.Join(localDir, "atest")); !os.IsNotExist(err) {
+		t.Errorf("expected no download for non-matching entry, stat err: %v", err)
+	}
+
+	// Requests: glob ls, then recursion into "test" (stat, ls, 2 get chunks),
+	// then download of "testa" (stat, 2 get chunks).
+	if len(ch.Writes) != 8 {
+		t.Fatalf("expected 8 requests, got %d", len(ch.Writes))
+	}
+	var got Request
+	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Cmd != "ls" || got.Path != "/remote/path" {
+		t.Fatalf("expected ls /remote/path, got %s %q", got.Cmd, got.Path)
+	}
+}
+
+func TestClientDoGetRecursiveWildcardNoMatch(t *testing.T) {
+	localDir := t.TempDir()
+
+	ch := newMockChannel(makeJSONDataMsg(&Response{
+		OK:      true,
+		Entries: lsEntries("one", "two"),
+	}))
+
+	if err := doGet(ch, localDir, "/remote", []string{"get", "-r", "zzz*"}); err != nil {
+		t.Fatalf("doGet error: %v", err)
+	}
+	if len(ch.Writes) != 1 {
+		t.Fatalf("expected only the ls request, got %d", len(ch.Writes))
+	}
+	entries, err := os.ReadDir(localDir)
+	if err != nil {
+		t.Fatalf("read local dir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected no downloads for non-matching recursive glob, got %d files", len(entries))
+	}
+}
