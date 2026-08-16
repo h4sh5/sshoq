@@ -1,8 +1,10 @@
 package sftp
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 
 	ssh3 "github.com/h4sh5/sshoq"
 	ssh3Messages "github.com/h4sh5/sshoq/message"
@@ -50,17 +52,74 @@ func SendRequest(ch ssh3.Channel, req *Request) error {
 	return err
 }
 
+// sftpMessageChannel is the minimal channel surface needed to receive the
+// data messages that carry SFTP requests and responses.
+type sftpMessageChannel interface {
+	NextMessage() (ssh3Messages.Message, error)
+}
+
+// receiveJSON reads one complete logical SFTP message from the channel and
+// returns its raw JSON payload. Channel writes split payloads larger than the
+// negotiated maximum packet size across several DataOrExtendedDataMessage
+// messages (see channelImpl.WriteData), so the payloads of consecutive data
+// messages are accumulated until they form a single complete JSON document.
+// Non-data messages are skipped, mirroring the previous request loop.
+func receiveJSON(ch sftpMessageChannel) ([]byte, error) {
+	var payload []byte
+	for {
+		msg, err := ch.NextMessage()
+		if err != nil {
+			return nil, err
+		}
+		dataMsg, ok := msg.(*ssh3Messages.DataOrExtendedDataMessage)
+		if !ok || dataMsg.DataType != ssh3Messages.SSH_EXTENDED_DATA_NONE {
+			continue
+		}
+		payload = append(payload, dataMsg.Data...)
+		complete, err := isCompleteJSON(payload)
+		if err != nil {
+			return nil, err
+		}
+		if complete {
+			return payload, nil
+		}
+	}
+}
+
+// isCompleteJSON reports whether payload is exactly one complete JSON document.
+// A payload that ends in the middle of a document (a truncated prefix of a
+// message that is still arriving across channel data messages) is reported as
+// incomplete, not as an error.
+func isCompleteJSON(payload []byte) (bool, error) {
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	var v interface{}
+	if err := dec.Decode(&v); err != nil {
+		if err == io.ErrUnexpectedEOF {
+			return false, nil
+		}
+		return false, err
+	}
+	// A second decode must hit EOF: the payload must be exactly one value,
+	// with no trailing data.
+	if err := dec.Decode(&v); err != nil {
+		if err == io.EOF {
+			return true, nil
+		}
+		if err == io.ErrUnexpectedEOF {
+			return false, nil
+		}
+		return false, err
+	}
+	return false, fmt.Errorf("multiple JSON values in one sftp message")
+}
+
 func ReceiveResponse(ch ssh3.Channel) (*Response, error) {
-	msg, err := ch.NextMessage()
+	payload, err := receiveJSON(ch)
 	if err != nil {
 		return nil, err
 	}
-	dataMsg, ok := msg.(*ssh3Messages.DataOrExtendedDataMessage)
-	if !ok || dataMsg.DataType != ssh3Messages.SSH_EXTENDED_DATA_NONE {
-		return nil, fmt.Errorf("unexpected message type on sftp channel")
-	}
 	resp := &Response{}
-	if err := json.Unmarshal([]byte(dataMsg.Data), resp); err != nil {
+	if err := json.Unmarshal(payload, resp); err != nil {
 		return nil, err
 	}
 	return resp, nil
