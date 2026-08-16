@@ -1231,8 +1231,8 @@ func ServerMain() int {
 		Allow0RTT:             false,
 		KeepAlivePeriod:       1 * time.Second,
 		EnableDatagrams:       true,
-		MaxIncomingStreams:    10000, // client-initiated bidi streams allowed
-		MaxIncomingUniStreams: 10000, // client-initiated uni streams allowed
+		MaxIncomingStreams:    100000, // client-initiated bidi streams allowed
+		MaxIncomingUniStreams: 100000, // client-initiated uni streams allowed
 	}
 
 	var err error

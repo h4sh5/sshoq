@@ -363,8 +363,8 @@ func Dial(ctx context.Context, config *client_config.Config, qconn quic.EarlyCon
 
 	var qconf quic.Config
 
-	qconf.MaxIncomingUniStreams = 10000
-	qconf.MaxIncomingStreams = 10000
+	qconf.MaxIncomingUniStreams = 100000
+	qconf.MaxIncomingStreams = 100000
 	qconf.Allow0RTT = false
 	qconf.EnableDatagrams = true
 	qconf.KeepAlivePeriod = 1 * time.Second
