@@ -71,13 +71,12 @@ func NewPrivkeyFileAuthMethod(filename string) *PrivkeyFileAuthMethod {
 // ~/.ssh) that OpenSSH tries by default when no identity file is explicitly
 // configured, following the order of ssh_config(5).
 var defaultPrivkeyBasenames = []string{
-	"id_dsa",
-	"id_ecdsa",
-	"id_ecdsa_sk",
 	"id_ed25519",
-	"id_ed25519_sk",
 	"id_rsa",
+	"id_ecdsa",
 	"id_xmss",
+	"id_ed25519_sk",
+	"id_ecdsa_sk",
 }
 
 // NewDefaultPrivkeyFileAuthMethods returns one PrivkeyFileAuthMethod per
