@@ -1312,3 +1312,110 @@ func TestClientDoLsInvalidPattern(t *testing.T) {
 		t.Fatal("expected error for invalid glob pattern")
 	}
 }
+
+func TestClientDoGetNoGlob(t *testing.T) {
+	localDir := t.TempDir()
+
+	ch := newMockChannel(
+		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "remote.txt", Size: 5}}),
+		makeJSONDataMsg(&Response{OK: true, Data: []byte("hello")}),
+		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
+	)
+
+	if err := doGet(ch, localDir, "/remote", []string{"get", "remote.txt"}); err != nil {
+		t.Fatalf("doGet error: %v", err)
+	}
+
+	var got Request
+	if len(ch.Writes) != 3 {
+		t.Fatalf("expected 3 requests, got %d", len(ch.Writes))
+	}
+	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Cmd != "stat" || got.Path != "/remote/remote.txt" {
+		t.Fatalf("expected stat /remote/remote.txt, got %s %q", got.Cmd, got.Path)
+	}
+	content, err := os.ReadFile(filepath.Join(localDir, "remote.txt"))
+	if err != nil {
+		t.Fatalf("read downloaded file: %v", err)
+	}
+	if string(content) != "hello" {
+		t.Fatalf("unexpected content: %q", content)
+	}
+}
+
+func TestClientDoGetWildcard(t *testing.T) {
+	localDir := t.TempDir()
+
+	ch := newMockChannel(
+		makeJSONDataMsg(&Response{OK: true, Entries: lsEntries("atest", "test", "testa", "nope")}),
+		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "test", Size: 5}}),
+		makeJSONDataMsg(&Response{OK: true, Data: []byte("hello")}),
+		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
+		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "testa", Size: 5}}),
+		makeJSONDataMsg(&Response{OK: true, Data: []byte("world")}),
+		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
+	)
+
+	if err := doGet(ch, localDir, "/remote/path", []string{"get", "test*"}); err != nil {
+		t.Fatalf("doGet error: %v", err)
+	}
+
+	var got Request
+	if len(ch.Writes) != 7 {
+		t.Fatalf("expected 7 requests, got %d", len(ch.Writes))
+	}
+	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Cmd != "ls" || got.Path != "/remote/path" {
+		t.Fatalf("expected ls /remote/path, got %s %q", got.Cmd, got.Path)
+	}
+
+	// Only entries whose final component matches test* must be downloaded.
+	for name, want := range map[string]string{"test": "hello", "testa": "world"} {
+		content, err := os.ReadFile(filepath.Join(localDir, name))
+		if err != nil {
+			t.Fatalf("read downloaded %s: %v", name, err)
+		}
+		if string(content) != want {
+			t.Errorf("unexpected content for %s: %q", name, content)
+		}
+	}
+	// Entries that do not match must not be downloaded.
+	if _, err := os.Stat(filepath.Join(localDir, "atest")); !os.IsNotExist(err) {
+		t.Errorf("expected no download for non-matching entry, stat err: %v", err)
+	}
+}
+
+func TestClientDoGetNoMatch(t *testing.T) {
+	localDir := t.TempDir()
+
+	ch := newMockChannel(makeJSONDataMsg(&Response{
+		OK:      true,
+		Entries: lsEntries("one", "two"),
+	}))
+
+	if err := doGet(ch, localDir, "/remote", []string{"get", "zzz*"}); err != nil {
+		t.Fatalf("doGet error: %v", err)
+	}
+	if len(ch.Writes) != 1 {
+		t.Fatalf("expected only the ls request, got %d", len(ch.Writes))
+	}
+	entries, err := os.ReadDir(localDir)
+	if err != nil {
+		t.Fatalf("read local dir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected no downloads for non-matching glob, got %d files", len(entries))
+	}
+}
+
+func TestClientDoGetInvalidPattern(t *testing.T) {
+	ch := newMockChannel(makeJSONDataMsg(&Response{OK: true, Entries: lsEntries("a")}))
+	err := doGet(ch, t.TempDir(), "/remote", []string{"get", "["})
+	if err == nil {
+		t.Fatal("expected error for invalid glob pattern")
+	}
+}

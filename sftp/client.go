@@ -120,27 +120,9 @@ func RunInteractiveClient(c *client.Client) error {
 			}
 
 		case "get":
-			recursive, remoteSource, localTarget, err := parseTransferArgs(parts, "get")
-			if err != nil {
-				fmt.Println(err.Error())
-				continue
-			}
-			remoteFile := remoteSource
-			if !path.IsAbs(remoteFile) {
-				remoteFile = path.Join(remoteDir, remoteFile)
-			}
-			localFile := localTarget
-			if localFile == "" {
-				localFile = filepath.Base(filepath.Clean(remoteFile))
-			}
-			localFile = filepath.Join(localDir, localFile)
-
-			if recursive {
-				if err := downloadRecursive(channel, remoteFile, localFile); err != nil {
-					fmt.Fprintf(os.Stderr, "get: %s\n", err)
-				}
-			} else if err := downloadFile(channel, remoteFile, localFile); err != nil {
+			if err := doGet(channel, localDir, remoteDir, parts); err != nil {
 				fmt.Fprintf(os.Stderr, "get: %s\n", err)
+				continue
 			}
 
 		case "put":
@@ -292,6 +274,90 @@ func doLs(channel ssh3.Channel, remoteDir string, parts []string) error {
 		printEntry(e.Name, sftpFileInfoFromEntry(e))
 	}
 	return nil
+}
+
+// doGet downloads a remote file or directory, or every entry in the resolved
+// source directory whose name matches a glob pattern. It mirrors doLs: when the
+// remote source contains glob metacharacters in its final path component (*, ?,
+// [range]) the source is split into the directory to list and a pattern to
+// filter its entries via globSplit, and each matching entry is downloaded. An
+// un-globbed source is downloaded directly, preserving the previous behavior.
+func doGet(channel ssh3.Channel, localDir, remoteDir string, parts []string) error {
+	recursive, remoteSource, localTarget, err := parseTransferArgs(parts, "get")
+	if err != nil {
+		return err
+	}
+
+	// Split a possibly-globbed source into the directory to list and a pattern
+	// to filter its entries. Glob metacharacters (*, ?, [range]) only apply to
+	// the final path component, matching shell glob semantics; "*" does not
+	// cross a "/". When the source has no metacharacters we fall back to
+	// downloading it directly, preserving the previous behavior.
+	sourceDir := remoteSource
+	pattern := ""
+	if dir, pat, ok := globSplit(remoteSource); ok {
+		sourceDir = dir
+		pattern = pat
+	}
+
+	// Resolve the source relative to the remote working directory, mirroring the
+	// handling of a non-glob "get <path>".
+	if pattern != "" || sourceDir != "" {
+		if sourceDir == "" {
+			sourceDir = remoteDir
+		} else if !path.IsAbs(sourceDir) {
+			sourceDir = path.Join(remoteDir, sourceDir)
+		}
+	} else {
+		sourceDir = remoteDir
+	}
+
+	if pattern != "" {
+		// Glob: list the parent directory and download each entry whose name
+		// matches the pattern.
+		resp, err := doRequest(channel, &Request{Cmd: "ls", Path: sourceDir})
+		if err != nil {
+			return err
+		}
+		if !resp.OK {
+			return fmt.Errorf("%s", resp.Error)
+		}
+		for _, e := range resp.Entries {
+			ok, err := path.Match(pattern, e.Name)
+			if err != nil {
+				return fmt.Errorf("invalid pattern \"%s\": %w", pattern, err)
+			}
+			if !ok {
+				continue
+			}
+			remoteFile := path.Join(sourceDir, e.Name)
+			localFile := filepath.Join(localDir, filepath.Base(filepath.Clean(remoteFile)))
+			if err := downloadOne(channel, remoteFile, localFile, recursive); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	// No glob: preserve the previous single-target behavior.
+	remoteFile := sourceDir
+	localFile := localTarget
+	if localFile == "" {
+		localFile = filepath.Base(filepath.Clean(remoteFile))
+	}
+	localFile = filepath.Join(localDir, localFile)
+	return downloadOne(channel, remoteFile, localFile, recursive)
+}
+
+// downloadOne downloads remoteFile to localFile, descending into directories when
+// recursive is set. It reproduces the transfer behavior of a non-glob "get".
+func downloadOne(channel ssh3.Channel, remoteFile, localFile string, recursive bool) error {
+	if recursive {
+		if err := downloadRecursive(channel, remoteFile, localFile); err != nil {
+			return err
+		}
+	}
+	return downloadFile(channel, remoteFile, localFile)
 }
 
 // globSplit reports whether arg contains glob metacharacters in its final path
@@ -491,7 +557,7 @@ func printHelp() {
   cd <path>       change remote directory
   ls [path]       list remote directory (path may contain * ? [glob] patterns)
   pwd             print remote working directory
-  get [-r] <src> [dst]   download remote file or directory
+  get [-r] <src> [dst]   download remote file or directory (src may contain * ? [glob] patterns)
   put [-r] <src> [dst]   upload local file or directory
   mkdir <path>    create remote directory
   rm <file>       remove remote file
