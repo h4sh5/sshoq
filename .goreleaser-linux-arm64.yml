@@ -35,6 +35,7 @@ builds:
     binary: sshoq-server
     env:
       - CGO_ENABLED=1
+      - CC=aarch64-linux-gnu-gcc
     goos:
       - linux
     goarch:
@@ -45,6 +46,7 @@ builds:
         env:
           - CGO_ENABLED=1
           - CGO_CFLAGS=
+          - CC=aarch64-linux-gnu-gcc
         ldflags:
           - -extldflags=-static
           - -linkmode=external
