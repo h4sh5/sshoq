@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	ssh3 "github.com/h4sh5/sshoq"
 	"github.com/h4sh5/sshoq/client"
@@ -33,6 +34,9 @@ func RunInteractiveClient(c *client.Client) error {
 		return err
 	}
 	defer input.close()
+	if input.editor != nil {
+		input.editor.completer = newCompleter(channel, &localDir, &remoteDir)
+	}
 
 	for {
 		line, err := input.readLine("sftp> ")
@@ -221,6 +225,153 @@ func RunInteractiveClient(c *client.Client) error {
 	}
 
 	return nil
+}
+
+// newCompleter builds the tab-completion callback for the interactive SFTP
+// shell. It completes remote paths (resolved against *remoteDir, listed over
+// the sftp channel) for commands that operate on the remote filesystem, and
+// local paths (resolved against *localDir) for lcd/lls; for get and put the
+// source argument is completed on the source side and the target argument on
+// the target side. Candidates are full replacements for the word being edited,
+// with directories ending in "/".
+func newCompleter(channel ssh3.Channel, localDir, remoteDir *string) completeFunc {
+	listRemote := func(dir string) ([]string, error) {
+		if dir == "." {
+			dir = *remoteDir
+		} else if dir != "/" && !path.IsAbs(dir) {
+			dir = path.Join(*remoteDir, dir)
+		}
+		resp, err := doRequest(channel, &Request{Cmd: "ls", Path: dir})
+		if err != nil {
+			return nil, err
+		}
+		if !resp.OK {
+			return nil, fmt.Errorf("%s", resp.Error)
+		}
+		names := make([]string, 0, len(resp.Entries))
+		for _, e := range resp.Entries {
+			if e.IsDir {
+				names = append(names, e.Name+"/")
+			} else {
+				names = append(names, e.Name)
+			}
+		}
+		return names, nil
+	}
+
+	listLocal := func(dir string) ([]string, error) {
+		if dir == "." {
+			dir = *localDir
+		} else if !filepath.IsAbs(dir) {
+			dir = filepath.Join(*localDir, dir)
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return nil, err
+		}
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			if e.IsDir() {
+				names = append(names, e.Name()+"/")
+			} else {
+				names = append(names, e.Name())
+			}
+		}
+		return names, nil
+	}
+
+	return func(buf []rune, pos int) ([]string, int) {
+		// The word to complete is the whitespace-delimited token ending at the
+		// cursor. When the cursor sits on the command itself there is nothing
+		// to complete: only paths are completed, not commands.
+		wordStart := pos
+		for wordStart > 0 && !unicode.IsSpace(buf[wordStart-1]) {
+			wordStart--
+		}
+		if wordStart == 0 {
+			return nil, 0
+		}
+		word := string(buf[wordStart:pos])
+
+		args := strings.Fields(string(buf[:pos]))
+		if len(args) == 0 {
+			return nil, wordStart
+		}
+		cmd := args[0]
+
+		// The argument ordinal occupied by the word (1 = first argument),
+		// skipping flag arguments such as -r/--recursive.
+		argIdx := 1
+		for _, a := range args[1:] {
+			if a == word {
+				break
+			}
+			if !strings.HasPrefix(a, "-") {
+				argIdx++
+			}
+		}
+		if strings.HasPrefix(word, "-") {
+			return nil, wordStart
+		}
+
+		local := false
+		switch cmd {
+		case "lcd", "lls":
+			local = true
+		case "get":
+			local = argIdx == 2 // the target is local
+		case "put":
+			local = argIdx == 1 // the source is local
+		case "cd", "ls", "mkdir", "rm", "rmdir":
+			local = false
+		default:
+			return nil, wordStart
+		}
+
+		listDir := listRemote
+		if local {
+			listDir = listLocal
+		}
+		return completePath(word, listDir), wordStart
+	}
+}
+
+// completePath returns candidate completions for word by listing the directory
+// it refers to and matching the entries against the word's final component.
+// listDir returns the names of the entries of dir, with a trailing "/" on
+// directories. Candidates are full replacements for word, so the caller can
+// substitute them directly into the line. It returns nil when the directory
+// cannot be listed.
+func completePath(word string, listDir func(dir string) ([]string, error)) []string {
+	dir := "."
+	prefix := word
+	base := "" // the word up to and including its last "/"
+	if i := strings.LastIndex(word, "/"); i >= 0 {
+		base = word[:i+1]
+		dir = word[:i]
+		if dir == "" {
+			dir = "/"
+		}
+		if strings.HasSuffix(word, "/") {
+			prefix = "" // list the directory itself
+		} else {
+			prefix = word[i+1:]
+		}
+	}
+
+	entries, err := listDir(dir)
+	if err != nil {
+		return nil
+	}
+
+	var candidates []string
+	for _, name := range entries {
+		if prefix != "" && !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		candidates = append(candidates, base+name)
+	}
+	return candidates
 }
 
 func doLs(channel ssh3.Channel, remoteDir string, parts []string) error {
@@ -573,7 +724,10 @@ func printHelp() {
   lcd <path>      change local directory
   lls [path]      list local directory
   lpwd            print local working directory
-  exit/quit       exit`)
+  exit/quit       exit
+
+Tab completes file paths: local paths for lcd/lls and for the source of put
+and target of get; remote paths for all other arguments.`)
 }
 
 func printEntry(name string, info os.FileInfo) {

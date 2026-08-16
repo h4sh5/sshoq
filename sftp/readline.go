@@ -16,6 +16,12 @@ import (
 // history navigation.
 const maxHistory = 500
 
+// completeFunc returns candidate completions for the word being edited and the
+// index into buf at which the word starts. Each candidate is a full
+// replacement for the word (not just its final path component), so the caller
+// can substitute it directly into the line; directory candidates end with "/".
+type completeFunc func(buf []rune, pos int) (candidates []string, start int)
+
 // interactiveReader reads lines of interactive input for the SFTP shell. It
 // uses readline-style editing (raw mode) when stdin and stdout are terminals,
 // and falls back to plain line scanning otherwise (e.g. piped input). The
@@ -99,6 +105,10 @@ type lineEditor struct {
 	history []string
 	histPos int    // index into history while navigating, -1 when editing a fresh line
 	stash   string // draft line saved when starting to navigate history
+	// tab completion state
+	completer completeFunc
+	tabWord   string // word completed by the last Tab press
+	tabActive bool   // whether the next Tab on the same word lists the candidates
 }
 
 func (e *lineEditor) read() (string, error) {
@@ -113,6 +123,14 @@ func (e *lineEditor) read() (string, error) {
 		if err != nil {
 			return "", err
 		}
+
+		if b == '\t' { // Tab: complete the word before the cursor
+			e.complete()
+			continue
+		}
+		// Any other key invalidates the pending tab-completion listing.
+		e.tabActive = false
+		e.tabWord = ""
 
 		switch {
 		case b == '\r' || b == '\n': // Enter
@@ -490,6 +508,167 @@ func (e *lineEditor) deleteWordBeforeCursor() {
 
 func isWordSep(r rune) bool {
 	return r == ' ' || r == '\t'
+}
+
+// complete performs tab completion for the word before the cursor, delegating
+// to the configured completer. A single candidate is applied in full (with a
+// trailing space for files, so the next argument can be typed); several
+// candidates are completed to their longest common prefix; and a second Tab on
+// the same word lists the candidates below the prompt. When nothing matches,
+// the terminal bell is rung.
+func (e *lineEditor) complete() {
+	if e.completer == nil {
+		return
+	}
+
+	candidates, start := e.completer(e.buf, e.pos)
+	if len(candidates) == 0 {
+		fmt.Fprint(e.out, "\a") // bell: nothing to complete
+		e.tabActive, e.tabWord = false, ""
+		return
+	}
+
+	word := string(e.buf[start:e.pos])
+
+	// A second consecutive Tab on the same word lists the candidates instead
+	// of completing again.
+	if e.tabActive && e.tabWord == word {
+		e.printCandidates(candidates)
+		e.tabActive, e.tabWord = false, ""
+		return
+	}
+
+	if len(candidates) == 1 {
+		// Unique match: apply it in full. Directories already carry a trailing
+		// "/"; files get a trailing space so the next argument can be typed
+		// without a second Tab.
+		c := candidates[0]
+		if !strings.HasSuffix(c, "/") {
+			c += " "
+		}
+		e.replaceRange(start, e.pos, []rune(c))
+		e.tabActive, e.tabWord = false, ""
+		return
+	}
+
+	prefix := commonPrefix(candidates)
+	if prefix == word {
+		// Already at the common prefix: show the candidates.
+		e.printCandidates(candidates)
+		e.tabActive, e.tabWord = false, ""
+		return
+	}
+	e.replaceRange(start, e.pos, []rune(prefix))
+	e.tabActive, e.tabWord = true, prefix
+}
+
+// printCandidates lists the completion candidates below the prompt, laid out
+// in columns fitted to the terminal width (top-to-bottom, like ls), and
+// redraws the prompt and line above them. The listing stays visible until the
+// next edit, which clears it.
+func (e *lineEditor) printCandidates(candidates []string) {
+	e.refreshWidth()
+
+	// Move to the end of the current line and start the listing on the next
+	// row.
+	total := displayWidth(e.prompt) + displayWidth(string(e.buf))
+	e.moveCursorTo(total)
+	fmt.Fprint(e.out, "\r\n")
+	e.curRow, e.curCol = e.curRow+1, 0
+
+	// Each column is as wide as the longest candidate plus two spaces of
+	// separation.
+	maxw := 0
+	for _, c := range candidates {
+		if w := displayWidth(c); w > maxw {
+			maxw = w
+		}
+	}
+	ncols := 1
+	if maxw > 0 {
+		if c := e.width / (maxw + 2); c > ncols {
+			ncols = c
+		}
+	}
+	if ncols > len(candidates) {
+		ncols = len(candidates)
+	}
+	nrows := (len(candidates) + ncols - 1) / ncols
+	if nrows == 0 {
+		nrows = 1
+	}
+
+	for row := 0; row < nrows; row++ {
+		for col := 0; col < ncols; col++ {
+			idx := col*nrows + row
+			if idx >= len(candidates) {
+				continue
+			}
+			c := candidates[idx]
+			fmt.Fprint(e.out, c)
+			if col < ncols-1 {
+				for i := displayWidth(c); i < maxw+2; i++ {
+					fmt.Fprint(e.out, " ")
+				}
+			}
+		}
+		fmt.Fprint(e.out, "\r\n")
+	}
+	e.curRow += nrows
+	e.curCol = 0
+
+	e.redrawNoClear()
+}
+
+// redrawNoClear redraws the prompt and the line without clearing the rows
+// below them, so completion candidates printed under the prompt stay visible
+// until the next edit.
+func (e *lineEditor) redrawNoClear() {
+	e.refreshWidth()
+	p := displayWidth(e.prompt)
+	total := p + displayWidth(string(e.buf))
+
+	if e.curRow > 0 {
+		fmt.Fprintf(e.out, "\x1b[%dA", e.curRow)
+	}
+	fmt.Fprint(e.out, "\r")
+	fmt.Fprint(e.out, e.prompt)
+	fmt.Fprint(e.out, string(e.buf))
+
+	e.curRow, e.curCol = total/e.width, total%e.width
+	e.moveCursorTo(p + displayWidth(string(e.buf[:e.pos])))
+}
+
+// replaceRange replaces buf[start:end] with repl and positions the cursor at
+// the end of the replacement.
+func (e *lineEditor) replaceRange(start, end int, repl []rune) {
+	buf := make([]rune, 0, len(e.buf)-(end-start)+len(repl))
+	buf = append(buf, e.buf[:start]...)
+	buf = append(buf, repl...)
+	buf = append(buf, e.buf[end:]...)
+	e.buf = buf
+	e.pos = start + len(repl)
+	e.render()
+}
+
+// commonPrefix returns the longest common prefix shared by all of strs.
+func commonPrefix(strs []string) string {
+	if len(strs) == 0 {
+		return ""
+	}
+	prefix := []rune(strs[0])
+	for _, s := range strs[1:] {
+		r := []rune(s)
+		n := 0
+		for n < len(prefix) && n < len(r) && prefix[n] == r[n] {
+			n++
+		}
+		prefix = prefix[:n]
+		if len(prefix) == 0 {
+			break
+		}
+	}
+	return string(prefix)
 }
 
 // displayWidth returns the number of terminal columns s occupies when
