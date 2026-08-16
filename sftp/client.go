@@ -282,6 +282,8 @@ func doLs(channel ssh3.Channel, remoteDir string, parts []string) error {
 // [range]) the source is split into the directory to list and a pattern to
 // filter its entries via globSplit, and each matching entry is downloaded. An
 // un-globbed source is downloaded directly, preserving the previous behavior.
+// The -r flag is honored in both cases: directories (whether matched by the
+// pattern or named directly) are transferred recursively via downloadOne.
 func doGet(channel ssh3.Channel, localDir, remoteDir string, parts []string) error {
 	recursive, remoteSource, localTarget, err := parseTransferArgs(parts, "get")
 	if err != nil {
@@ -350,12 +352,12 @@ func doGet(channel ssh3.Channel, localDir, remoteDir string, parts []string) err
 }
 
 // downloadOne downloads remoteFile to localFile, descending into directories when
-// recursive is set. It reproduces the transfer behavior of a non-glob "get".
+// recursive is set. It reproduces the transfer behavior of a non-glob "get" and
+// is shared by the glob and non-glob paths of doGet so that wildcards work the
+// same way with and without -r.
 func downloadOne(channel ssh3.Channel, remoteFile, localFile string, recursive bool) error {
 	if recursive {
-		if err := downloadRecursive(channel, remoteFile, localFile); err != nil {
-			return err
-		}
+		return downloadRecursive(channel, remoteFile, localFile)
 	}
 	return downloadFile(channel, remoteFile, localFile)
 }
