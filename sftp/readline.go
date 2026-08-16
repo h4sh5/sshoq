@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
 
@@ -37,6 +38,7 @@ func newInteractiveReader() (*interactiveReader, error) {
 		if err != nil {
 			return nil, err
 		}
+		reEnableOutputProcessing(int(r.in.Fd()))
 		r.terminal = true
 		r.state = state
 		r.editor = &lineEditor{
@@ -169,6 +171,7 @@ func (e *lineEditor) read() (string, error) {
 
 		case b == '\x0c': // Ctrl+L: clear the screen
 			fmt.Fprint(e.out, "\x1b[2J\x1b[H")
+			e.curRow, e.curCol = 0, 0
 			e.render()
 
 		default:
@@ -379,11 +382,21 @@ func (e *lineEditor) moveCursor() {
 }
 
 // positionAtEnd moves the cursor to just past the last character of the line,
-// so that a following newline starts output on a fresh row below any wrapped
-// rows.
+// so that the newline printed afterwards starts output on a fresh row below
+// any wrapped rows. When the line exactly fills the terminal width, autowrap
+// already places the cursor on the next row, so the cursor is positioned on
+// the last cell and a bare LF is emitted instead of CRLF to avoid leaving a
+// blank row between the prompt and the command output.
 func (e *lineEditor) positionAtEnd() {
 	e.refreshWidth()
-	e.moveCursorTo(displayWidth(e.prompt) + displayWidth(string(e.buf)))
+	total := displayWidth(e.prompt) + displayWidth(string(e.buf))
+	if total > 0 && total%e.width == 0 {
+		e.moveCursorTo(total - 1)
+		fmt.Fprint(e.out, "\n")
+		return
+	}
+	e.moveCursorTo(total)
+	fmt.Fprint(e.out, "\r\n")
 }
 
 // moveCursorTo positions the cursor at the given display column relative to
@@ -413,6 +426,23 @@ func (e *lineEditor) refreshWidth() {
 	} else if e.width == 0 {
 		e.width = 80
 	}
+}
+
+// reEnableOutputProcessing restores the terminal's newline translation after
+// term.MakeRaw disabled it. MakeRaw clears OPOST, so a bare "\n" would be
+// sent as a line feed that moves the cursor down without returning to column
+// 0: every line of command output (ls listings, transfer messages) would then
+// start at the column where the previous line ended. Re-enabling OPOST with
+// ONLCR converts "\n" to CRLF on output while leaving input in raw mode.
+// Input-mode raw flags (echo off, no canonical buffering) are untouched, so
+// the line editor still receives each keystroke immediately.
+func reEnableOutputProcessing(fd int) {
+	t, err := unix.IoctlGetTermios(fd, unix.TCGETS)
+	if err != nil {
+		return
+	}
+	t.Oflag |= unix.OPOST | unix.ONLCR
+	_ = unix.IoctlSetTermios(fd, unix.TCSETS, t)
 }
 
 func (e *lineEditor) insertRune(r rune) {

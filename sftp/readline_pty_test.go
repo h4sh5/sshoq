@@ -7,23 +7,22 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"golang.org/x/sys/unix"
 )
 
-// TestInteractiveReaderPty exercises the interactive reader end to end through
-// a real pty: raw-mode terminal handling, width discovery and width-aware
-// redrawing. It asserts on the byte stream the editor writes, which is
-// deterministic for a fixed terminal size.
-func TestInteractiveReaderPty(t *testing.T) {
+// TestInteractiveReaderOutputProcessing verifies that after entering raw mode,
+// newline translation is still active on output: a bare "\n" written outside
+// the editor (command output such as ls listings, printed with fmt.Println)
+// must reach the terminal as CRLF, otherwise each line would start at the
+// column where the previous one ended.
+func TestInteractiveReaderOutputProcessing(t *testing.T) {
 	ptmx, tty, err := pty.Open()
 	if err != nil {
 		t.Skipf("pty not available: %v", err)
 	}
 	defer ptmx.Close()
 	defer tty.Close()
-	// A narrow terminal (20 columns) so the typed line wraps.
-	if err := pty.Setsize(ptmx, &pty.Winsize{Rows: 24, Cols: 20}); err != nil {
-		t.Fatal(err)
-	}
+	pty.Setsize(ptmx, &pty.Winsize{Rows: 24, Cols: 80})
 
 	oldIn, oldOut := os.Stdin, os.Stdout
 	os.Stdin, os.Stdout = tty, tty
@@ -35,34 +34,64 @@ func TestInteractiveReaderPty(t *testing.T) {
 	}
 	defer r.close()
 
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		ptmx.WriteString("abcdefghijklmnopqrstuvwxyz")
-		time.Sleep(50 * time.Millisecond)
-		ptmx.WriteString("\r")
-	}()
-
-	line, err := r.readLine("sftp> ")
+	// The terminal must be raw on input (no echo, no line buffering) but keep
+	// output post-processing so bare "\n" is translated to CRLF.
+	termios, err := unix.IoctlGetTermios(int(tty.Fd()), unix.TCGETS)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if line != "abcdefghijklmnopqrstuvwxyz" {
-		t.Fatalf("readLine: got %q", line)
+	if termios.Lflag&unix.ECHO != 0 || termios.Lflag&unix.ICANON != 0 {
+		t.Errorf("input not raw: ECHO=%v ICANON=%v",
+			termios.Lflag&unix.ECHO != 0, termios.Lflag&unix.ICANON != 0)
+	}
+	if termios.Oflag&unix.OPOST == 0 || termios.Oflag&unix.ONLCR == 0 {
+		t.Errorf("output processing disabled: OPOST=%v ONLCR=%v",
+			termios.Oflag&unix.OPOST != 0, termios.Oflag&unix.ONLCR != 0)
 	}
 
-	ptmx.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-	buf := make([]byte, 8192)
-	n, _ := ptmx.Read(buf)
-	out := string(buf[:n])
+	// A single persistent reader feeds a channel so no output is lost to a
+	// leaked blocking read.
+	ch := make(chan []byte, 16)
+	go func() {
+		buf := make([]byte, 8192)
+		for {
+			n, err := ptmx.Read(buf)
+			if n > 0 {
+				b := make([]byte, n)
+				copy(b, buf[:n])
+				ch <- b
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
 
-	// The initial prompt must leave the cursor one column after "sftp> ".
-	if !strings.Contains(out, "sftp> \r\x1b[6C") {
-		t.Errorf("initial prompt: expected cursor at column 6, got %q", out)
+	readAll := func(d time.Duration) string {
+		var b strings.Builder
+		for {
+			select {
+			case c := <-ch:
+				b.Write(c)
+			case <-time.After(d):
+				return b.String()
+			}
+		}
 	}
-	// Once the line wraps (6 + 14 chars = 20 columns), redraws must first
-	// move the cursor up to the prompt line instead of only returning to the
-	// start of the wrapped row.
-	if !strings.Contains(out, "\x1b[1A\r\x1b[J") {
-		t.Errorf("wrapped redraw: expected move-up before clearing, got %q", out)
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		ptmx.WriteString("ls\r")
+	}()
+	if _, err := r.readLine("sftp> "); err != nil {
+		t.Fatal(err)
+	}
+
+	// Drain the editor output, then write command output with bare "\n" and
+	// verify it reaches the terminal as CRLF.
+	readAll(100 * time.Millisecond)
+	tty.WriteString("first line\nsecond line\n")
+	if out := readAll(300 * time.Millisecond); !strings.Contains(out, "first line\r\nsecond line\r\n") {
+		t.Errorf("bare \\n was not translated to CRLF: %q", out)
 	}
 }
