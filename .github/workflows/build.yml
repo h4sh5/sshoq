@@ -80,7 +80,7 @@ jobs:
   build-other-unix:
     strategy:
       matrix:
-        go-version: [ '1.25.x', '1.26.x']]
+        go-version: [ '1.25.x', '1.26.x' ]
         goos: [freebsd]
         goarch: [amd64,arm64]
         exclude:
