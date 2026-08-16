@@ -74,6 +74,42 @@ func TestGetConnectionMaterialFromURL_NoDefaultKeys(t *testing.T) {
 	}
 }
 
+// Unset plugin flags are gathered as nil values in cliOptions (see
+// ClientMain): they must NOT be mistaken for an explicitly specified
+// identity, otherwise default ~/.ssh keys would not be tried.
+func TestGetConnectionMaterialFromURL_NilCLIOptionsDoNotSuppressDefaults(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	sshDir := path.Join(tmpDir, ".ssh")
+	if err := os.MkdirAll(sshDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path.Join(sshDir, "id_ed25519"), []byte("test"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// simulate unset plugin flags: present in the map but with a nil value
+	cliOptions := map[config.OptionName]config.Option{
+		client_pubkey_authentication.PRIVKEY_OPTION_NAME: nil,
+		client_pubkey_authentication.PUBKEY_OPTION_NAME:  nil,
+	}
+
+	hostUrl, err := url.Parse("https://example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, options, err := getConnectionMaterialFromURL(hostUrl, nil, nil, cliOptions, testOptionParsers())
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if len(options.AuthMethods()) != 1 {
+		t.Fatalf("expected 1 default auth method, got %d", len(options.AuthMethods()))
+	}
+	if m, ok := options.AuthMethods()[0].(*ssh3.PrivkeyFileAuthMethod); !ok || m.Filename() != path.Join(sshDir, "id_ed25519") {
+		t.Errorf("expected default key %s to be tried, got %v", path.Join(sshDir, "id_ed25519"), options.AuthMethods()[0])
+	}
+}
+
 // When -i is provided on the command line, it must be the only
 // identity-related auth material: default keys from ~/.ssh are not used,
 // config IdentityFile entries are discarded and config-derived auth methods

@@ -386,7 +386,7 @@ func cliIdentityOptionNames(cliOptions map[client_config.OptionName]client_confi
 		if optionParser.OptionConfigName() != "IdentityFile" {
 			continue
 		}
-		if _, specified := cliOptions[optionName]; specified {
+		if opt, specified := cliOptions[optionName]; specified && opt != nil {
 			identityOptions[optionName] = true
 		}
 	}
@@ -490,9 +490,14 @@ func ClientMain() int {
 	}
 
 	cliOptions := make(map[client_config.OptionName]client_config.Option)
-	// gather the parsed CLI options
+	// gather the parsed CLI options (only options that were actually provided
+	// on the command line; for unset flags, parsedOption is nil and must not
+	// be stored, otherwise it would shadow config-derived options and be
+	// mistaken for an explicitly specified identity)
 	for _, v := range flagValues {
-		cliOptions[v.pluginOptionName] = v.parsedOption
+		if v.parsedOption != nil {
+			cliOptions[v.pluginOptionName] = v.parsedOption
+		}
 	}
 
 	useOIDC := *issuerUrl != ""
