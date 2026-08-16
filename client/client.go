@@ -409,8 +409,18 @@ func Dial(ctx context.Context, config *client_config.Config, qconn quic.EarlyCon
 	}
 	req.Proto = "ssh3"
 
-	// TODO: replace this by a loop actually performing the requests for qeach auth method of each plugin
-	foundSuitableAuthPlugin := false
+	// authAttempt represents a single authentication attempt against the
+	// server. The prepare function must set the necessary headers on the
+	// given request (e.g. Authorization) and return nil on success, or an
+	// error if the method cannot be prepared (e.g. missing key file).
+	type authAttempt struct {
+		prepare func(freshReq *http.Request) error
+		name    string
+	}
+
+	var attempts []authAttempt
+
+	// Collect plugin-based auth methods (used for -i, IdentityFile in config, etc.)
 	plugins := internal.GetClientAuthPlugins()
 	for _, plugin := range plugins {
 		authMethods, err := plugin.PluginFunc(req, sshAgent, config, roundTripper)
@@ -418,126 +428,155 @@ func Dial(ctx context.Context, config *client_config.Config, qconn quic.EarlyCon
 			return nil, err
 		}
 		for _, authMethod := range authMethods {
-			err = authMethod.PrepareRequestForAuth(req, sshAgent, roundTripper, config.Username(), conv)
-			if err != nil {
-				log.Error().Msgf("error when preparing request for auth plugin %T: %s", plugin, err)
-				return nil, err
-			}
-			foundSuitableAuthPlugin = true
-			log.Debug().Msgf("found suitable auth plugin")
+			authMethod := authMethod
+			attempts = append(attempts, authAttempt{
+				prepare: func(freshReq *http.Request) error {
+					return authMethod.PrepareRequestForAuth(freshReq, sshAgent, roundTripper, config.Username(), conv)
+				},
+				name: fmt.Sprintf("plugin/%T", authMethod),
+			})
 		}
 	}
 
-	if !foundSuitableAuthPlugin {
-
-		var identity ssh3.Identity
+	// Collect legacy identity-based auth methods (default ~/.ssh keys, password, OIDC, etc.)
+	if len(attempts) == 0 {
 		for _, method := range config.AuthMethods() {
 			switch m := method.(type) {
 			case *ssh3.PasswordAuthMethod:
-				log.Debug().Msgf("try password-based auth")
-				fmt.Printf("password for %s:", hostUrl.String())
-				password, err := term.ReadPassword(int(syscall.Stdin))
-				fmt.Println()
-				if err != nil {
-					log.Error().Msgf("could not get password: %s", err)
-					return nil, err
-				}
-				identity = m.IntoIdentity(string(password))
-			case *ssh3.PrivkeyFileAuthMethod:
-				log.Debug().Msgf("try file-based pubkey auth using file %s", m.Filename())
-				identity, err = m.IntoIdentityWithoutPassphrase()
-				// could not identify without passphrase, try agent authentication by using the key's public key
-				if passphraseErr, ok := err.(*ssh.PassphraseMissingError); ok {
-					// the pubkey may be contained in the privkey file
-					pubkey := passphraseErr.PublicKey
-					if pubkey == nil {
-						// if it is not the case, try to find a .pub equivalent, like OpenSSH does
-						pubkeyBytes, err := os.ReadFile(fmt.Sprintf("%s.pub", m.Filename()))
-						if err == nil {
-							filePubkey, _, _, _, err := ssh.ParseAuthorizedKey(pubkeyBytes)
-							if err == nil {
-								pubkey = filePubkey
-							}
-						}
-					}
-
-					// now, try to see of the agent manages this key
-					foundAgentKey := false
-					if pubkey != nil {
-						for _, agentKey := range agentKeys {
-							if bytes.Equal(agentKey.Marshal(), pubkey.Marshal()) {
-								log.Debug().Msgf("found key in agent: %s", agentKey)
-								identity = ssh3.NewAgentAuthMethod(pubkey).IntoIdentity(sshAgent)
-								foundAgentKey = true
-								break
-							}
-						}
-					}
-
-					// key not handled by agent, let's try to decrypt it ourselves
-					if !foundAgentKey {
-						fmt.Printf("passphrase for private key stored in %s:", m.Filename())
-						var passphraseBytes []byte
-						passphraseBytes, err = term.ReadPassword(int(syscall.Stdin))
+				attempts = append(attempts, authAttempt{
+					prepare: func(freshReq *http.Request) error {
+						log.Debug().Msgf("try password-based auth")
+						fmt.Printf("password for %s:", hostUrl.String())
+						password, err := term.ReadPassword(int(syscall.Stdin))
 						fmt.Println()
 						if err != nil {
-							log.Error().Msgf("could not get passphrase: %s", err)
-							return nil, err
+							return err
 						}
-						passphrase := string(passphraseBytes)
-						identity, err = m.IntoIdentityPassphrase(passphrase)
+						identity := m.IntoIdentity(string(password))
+						return identity.SetAuthorizationHeader(freshReq, config.Username(), conv)
+					},
+					name: "password",
+				})
+			case *ssh3.PrivkeyFileAuthMethod:
+				attempts = append(attempts, authAttempt{
+					prepare: func(freshReq *http.Request) error {
+						log.Debug().Msgf("try file-based pubkey auth using file %s", m.Filename())
+						fmt.Fprintf(os.Stderr, "Trying private key: %s\n", m.Filename())
+						identity, err := m.IntoIdentityWithoutPassphrase()
 						if err != nil {
-							log.Error().Msgf("could not load private key: %s", err)
-							return nil, err
+							// could not identify without passphrase, try agent authentication
+							if passphraseErr, ok := err.(*ssh.PassphraseMissingError); ok {
+								// the pubkey may be contained in the privkey file
+								pubkey := passphraseErr.PublicKey
+								if pubkey == nil {
+									// if not, try to find a .pub equivalent, like OpenSSH does
+									pubkeyBytes, readErr := os.ReadFile(fmt.Sprintf("%s.pub", m.Filename()))
+									if readErr == nil {
+										filePubkey, _, _, _, parseErr := ssh.ParseAuthorizedKey(pubkeyBytes)
+										if parseErr == nil {
+											pubkey = filePubkey
+										}
+									}
+								}
+
+								// now, try to see if the agent manages this key
+								foundAgentKey := false
+								if pubkey != nil {
+									for _, agentKey := range agentKeys {
+										if bytes.Equal(agentKey.Marshal(), pubkey.Marshal()) {
+											log.Debug().Msgf("found key in agent: %s", agentKey)
+											identity = ssh3.NewAgentAuthMethod(pubkey).IntoIdentity(sshAgent)
+											foundAgentKey = true
+											break
+										}
+									}
+								}
+
+								// key not handled by agent, let's try to decrypt it ourselves
+								if !foundAgentKey {
+									fmt.Printf("passphrase for private key stored in %s:", m.Filename())
+									passphraseBytes, readErr := term.ReadPassword(int(syscall.Stdin))
+									fmt.Println()
+									if readErr != nil {
+										return readErr
+									}
+									identity, err = m.IntoIdentityPassphrase(string(passphraseBytes))
+									if err != nil {
+										return err
+									}
+								}
+							} else {
+								// not a passphrase error, report the original error
+								return err
+							}
 						}
-					}
-				} else if err != nil {
-					log.Warn().Msgf("Could not load private key: %s", err)
-				}
+						if identity == nil {
+							return fmt.Errorf("could not load private key %s", m.Filename())
+						}
+						return identity.SetAuthorizationHeader(freshReq, config.Username(), conv)
+					},
+					name: fmt.Sprintf("privkey:%s", m.Filename()),
+				})
 			case *ssh3.AgentAuthMethod:
-				log.Debug().Msgf("try ssh-agent-based auth")
-				identity = m.IntoIdentity(sshAgent)
+				attempts = append(attempts, authAttempt{
+					prepare: func(freshReq *http.Request) error {
+						log.Debug().Msgf("try ssh-agent-based auth")
+						identity := m.IntoIdentity(sshAgent)
+						return identity.SetAuthorizationHeader(freshReq, config.Username(), conv)
+					},
+					name: "agent",
+				})
 			case *ssh3.OidcAuthMethod:
-				log.Debug().Msgf("try OIDC auth to issuer %s", m.OIDCConfig().IssuerUrl)
-				token, err := oidc.Connect(context.Background(), m.OIDCConfig(), m.OIDCConfig().IssuerUrl, m.DoPKCE())
-				if err != nil {
-					log.Error().Msgf("could not get token: %s", err)
-					return nil, err
-				}
-				identity = m.IntoIdentity(token)
+				attempts = append(attempts, authAttempt{
+					prepare: func(freshReq *http.Request) error {
+						log.Debug().Msgf("try OIDC auth to issuer %s", m.OIDCConfig().IssuerUrl)
+						token, err := oidc.Connect(context.Background(), m.OIDCConfig(), m.OIDCConfig().IssuerUrl, m.DoPKCE())
+						if err != nil {
+							return err
+						}
+						identity := m.IntoIdentity(token)
+						return identity.SetAuthorizationHeader(freshReq, config.Username(), conv)
+					},
+					name: "oidc",
+				})
 			}
-			// currently only tries a single identity (the first one), but the goal is to
-			// try several identities, similarly to OpenSSH
-			log.Debug().Msgf("we only try the first specified auth method for now")
-			break
-		}
-
-		if identity == nil {
-			return nil, NoSuitableIdentity{}
-		}
-
-		log.Debug().Msgf("try the following Identity: %s", identity)
-		err = identity.SetAuthorizationHeader(req, config.Username(), conv)
-		if err != nil {
-			log.Error().Msgf("could not set authorization header in HTTP request: %s", err)
-			return nil, err
 		}
 	}
 
-	log.Debug().Msgf("establish conversation with the server")
-	err = conv.EstablishClientConversation(req, roundTripper, ssh3.AVAILABLE_CLIENT_VERSIONS)
-	if errors.Is(err, util.Unauthorized{}) {
-		log.Error().Msgf("Access denied from the server: unauthorized")
-		return nil, err
-	} else if err != nil {
-		log.Error().Msgf("Could not establish conversation: %+v", err)
+	if len(attempts) == 0 {
+		return nil, NoSuitableIdentity{}
+	}
+
+	// Try each auth attempt in sequence, similarly to OpenSSH: if the server
+	// rejects one (unauthorized), try the next. Only fail if all attempts are
+	// exhausted or a non-auth error occurs.
+	var lastErr error
+	for _, attempt := range attempts {
+		// Fresh request for each attempt; headers must not leak between them
+		freshReq := req.Clone(context.Background())
+		if err := attempt.prepare(freshReq); err != nil {
+			log.Warn().Msgf("could not prepare auth method %s: %s", attempt.name, err)
+			lastErr = err
+			continue
+		}
+		log.Debug().Msgf("establish conversation with the server using %s", attempt.name)
+		err := conv.EstablishClientConversation(freshReq, roundTripper, ssh3.AVAILABLE_CLIENT_VERSIONS)
+		if err == nil {
+			log.Debug().Msgf("successfully authenticated with %s", attempt.name)
+			return &Client{
+				qconn:        qconn,
+				Conversation: conv,
+			}, nil
+		}
+		if errors.Is(err, util.Unauthorized{}) {
+			log.Warn().Msgf("server rejected auth method %s, trying the next one", attempt.name)
+			lastErr = err
+			continue
+		}
 		return nil, err
 	}
 
-	return &Client{
-		qconn:        qconn,
-		Conversation: conv,
-	}, nil
+	return nil, lastErr
 }
 
 //++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++

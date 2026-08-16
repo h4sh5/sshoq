@@ -590,7 +590,7 @@ var _ = Describe("Testing the sshoq cli", func() {
 					Expect(err).ToNot(HaveOccurred())
 					Eventually(session).Should(Exit())
 					Eventually(session).ShouldNot(Exit(0))
-					Eventually(string(session.Wait().Err.Contents())).Should(ContainSubstring("unauthorized"))
+					Eventually(string(session.Wait().Err.Contents())).Should(ContainSubstring("Unauthorized"))
 				})
 			})
 		})

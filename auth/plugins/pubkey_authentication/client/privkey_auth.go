@@ -119,6 +119,7 @@ func (m *PrivkeyFileAuthMethod) getCryptoMaterial() (crypto.Signer, jwt.SigningM
 // PrepareRequestForAuth implements auth.ClientAuthMethod.
 func (m *PrivkeyFileAuthMethod) PrepareRequestForAuth(request *http.Request, sshAgent agent.ExtendedAgent, roundTripper *http3.RoundTripper, username string, conversation *ssh3.Conversation) error {
 	log.Debug().Msgf("try file-based privkey auth using file %s", m.Filename())
+	fmt.Fprintf(os.Stderr, "Trying private key: %s\n", m.Filename())
 	var jwtBearerKey any
 	jwtBearerKey, signingMethod, err := m.getCryptoMaterial()
 	// could not identify without passphrase, try agent authentication by using the key's public key

@@ -309,10 +309,10 @@ func getConfigOptions(hostUrl *url.URL, sshConfig *ssh_config.Config, optionPars
 		if configUrlPath != "" {
 			urlPath = configUrlPath
 		} else {
-			// default path 
+			// default path
 			urlPath = "sshoq-server"
 		}
-		
+
 	}
 	return client_config.NewConfig(username, hostname, port, urlPath, configAuthMethods, pluginOptions)
 }
@@ -345,11 +345,52 @@ func getConnectionMaterialFromURL(hostUrl *url.URL, sshConfig *ssh_config.Config
 		pluginOptionsFromConfig[k] = v
 	}
 
-	options, err := client_config.NewConfig(configOptions.Username(), configOptions.Hostname(), configOptions.Port(), configOptions.UrlPath(), authMethods, configOptions.Options())
+	// If an identity file is explicitly provided on the command line (e.g.
+	// via -i), it takes precedence over everything else and is the only
+	// authentication method that should be used: config-derived IdentityFile
+	// entries and their auth methods are discarded so that they cannot be
+	// used (for instance as an agent-based pubkey auth fallback).
+	if cliIdentityOptions := cliIdentityOptionNames(cliOptions, optionParsers); len(cliIdentityOptions) > 0 {
+		authMethods = cliAuthMethods
+		for optionName, optionParser := range optionParsers {
+			if optionParser.OptionConfigName() != "IdentityFile" {
+				continue
+			}
+			if _, fromCLI := cliIdentityOptions[optionName]; !fromCLI {
+				delete(pluginOptionsFromConfig, optionName)
+			}
+		}
+	} else if len(authMethods) == 0 {
+		// When no identity is explicitly configured (neither via CLI flags
+		// such as -i or -use-password, nor via IdentityFile entries in the
+		// ssh config), try the default private keys from ~/.ssh (e.g.
+		// ~/.ssh/id_rsa, ~/.ssh/id_ed25519, ...) like OpenSSH does.
+		for _, defaultMethod := range ssh3.NewDefaultPrivkeyFileAuthMethods() {
+			authMethods = append(authMethods, defaultMethod)
+		}
+	}
+
+	options, err := client_config.NewConfig(configOptions.Username(), configOptions.Hostname(), configOptions.Port(), configOptions.UrlPath(), authMethods, pluginOptionsFromConfig)
 	if err != nil {
 		return nil, nil, fmt.Errorf("could not instantiate invalid options: %s", err)
 	}
 	return agentClient, options, nil
+}
+
+// cliIdentityOptionNames returns the set of option names whose value was
+// provided on the command line and whose parser is backed by the
+// "IdentityFile" config keyword (e.g. the -i flag for private key files).
+func cliIdentityOptionNames(cliOptions map[client_config.OptionName]client_config.Option, optionParsers map[client_config.OptionName]client_config.OptionParser) map[client_config.OptionName]bool {
+	identityOptions := make(map[client_config.OptionName]bool)
+	for optionName, optionParser := range optionParsers {
+		if optionParser.OptionConfigName() != "IdentityFile" {
+			continue
+		}
+		if opt, specified := cliOptions[optionName]; specified && opt != nil {
+			identityOptions[optionName] = true
+		}
+	}
+	return identityOptions
 }
 
 type FlagValue struct {
@@ -427,7 +468,7 @@ func ClientMain() int {
 	} else {
 		util.ConfigureLogger(os.Getenv("SSH3_LOG_LEVEL"))
 	}
-	
+
 	cliParsers, err := internal.GetPluginsCLIArgs()
 	if err != nil {
 		log.Error().Msgf("error when retrieving plugins-defined CLI args: %s", err)
@@ -449,9 +490,14 @@ func ClientMain() int {
 	}
 
 	cliOptions := make(map[client_config.OptionName]client_config.Option)
-	// gather the parsed CLI options
+	// gather the parsed CLI options (only options that were actually provided
+	// on the command line; for unset flags, parsedOption is nil and must not
+	// be stored, otherwise it would shadow config-derived options and be
+	// mistaken for an explicitly specified identity)
 	for _, v := range flagValues {
-		cliOptions[v.pluginOptionName] = v.parsedOption
+		if v.parsedOption != nil {
+			cliOptions[v.pluginOptionName] = v.parsedOption
+		}
 	}
 
 	useOIDC := *issuerUrl != ""
@@ -713,10 +759,10 @@ func ClientMain() int {
 		}
 		qconn, status := setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, proxyOptions, nil, tty)
 
-		if qconn == nil && status != 0{
+		if qconn == nil && status != 0 {
 			log.Error().Msgf("could not setup transport for proxy client.")
 			return status
-		} else if (qconn == nil && status == 0) {
+		} else if qconn == nil && status == 0 {
 			// reconnect due to likely first time self signed cert error
 			log.Info().Msgf("re-parsing known hosts and reconnecting via jump host now..")
 			knownHosts, _, parsingErr := ssh3.ParseKnownHosts(knownHostsPath)
@@ -727,7 +773,7 @@ func ClientMain() int {
 			qconn, status = setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, proxyOptions, nil, tty)
 		}
 		// reconnect status
-		if qconn == nil{
+		if qconn == nil {
 			log.Error().Msgf("Still could not connect through proxy client.")
 			return status
 		}
@@ -764,16 +810,16 @@ func ClientMain() int {
 	qconn, status := setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, options, proxyAddress, tty)
 
 	if qconn == nil && status != 0 {
-			log.Error().Msgf("could not setup transport for client.")
-			return status
-	} else if (qconn == nil && status == 0) {
+		log.Error().Msgf("could not setup transport for client.")
+		return status
+	} else if qconn == nil && status == 0 {
 		// reconnect
 		log.Info().Msgf("re-parsing known hosts and reconnecting now..")
 		knownHosts, _, parsingErr := ssh3.ParseKnownHosts(knownHostsPath)
-			if parsingErr != nil {
-				log.Error().Msgf("Error parsing known hosts file (%s): %s", knownHostsPath, parsingErr)
-				return -1
-			}
+		if parsingErr != nil {
+			log.Error().Msgf("Error parsing known hosts file (%s): %s", knownHostsPath, parsingErr)
+			return -1
+		}
 		qconn, status = setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, options, proxyAddress, tty)
 	}
 	if qconn == nil {
@@ -782,7 +828,6 @@ func ClientMain() int {
 		}
 		return status
 	}
-
 
 	roundTripper := &http3.RoundTripper{
 		EnableDatagrams: true,

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path"
 	"strconv"
 	"time"
 
@@ -64,6 +65,44 @@ func NewPrivkeyFileAuthMethod(filename string) *PrivkeyFileAuthMethod {
 	return &PrivkeyFileAuthMethod{
 		filename: util.ExpandTildeWithHomeDir(filename),
 	}
+}
+
+// defaultPrivkeyBasenames lists the private key file names (relative to
+// ~/.ssh) that OpenSSH tries by default when no identity file is explicitly
+// configured, following the order of ssh_config(5).
+var defaultPrivkeyBasenames = []string{
+	"id_ed25519",
+	"id_rsa",
+	"id_ecdsa",
+	"id_xmss",
+	"id_ed25519_sk",
+	"id_ecdsa_sk",
+}
+
+// NewDefaultPrivkeyFileAuthMethods returns one PrivkeyFileAuthMethod per
+// default private key that exists in the user's ~/.ssh directory (e.g.
+// ~/.ssh/id_rsa, ~/.ssh/id_ed25519, ...).
+// Similarly to OpenSSH, only keys that actually exist on the filesystem are
+// returned, in the order they are tried by OpenSSH. If no default key is
+// found (or the home directory cannot be determined), an empty slice is
+// returned.
+func NewDefaultPrivkeyFileAuthMethods() []*PrivkeyFileAuthMethod {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		log.Warn().Msgf("could not determine home directory to look for default private keys: %s", err)
+		return nil
+	}
+	sshDir := path.Join(homeDir, ".ssh")
+	var methods []*PrivkeyFileAuthMethod
+	for _, basename := range defaultPrivkeyBasenames {
+		filename := path.Join(sshDir, basename)
+		info, err := os.Stat(filename)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		methods = append(methods, NewPrivkeyFileAuthMethod(filename))
+	}
+	return methods
 }
 
 func (m *PrivkeyFileAuthMethod) Filename() string {
