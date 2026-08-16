@@ -184,6 +184,8 @@ func TestLineEditorRendering(t *testing.T) {
 	e := &lineEditor{
 		reader:  bufio.NewReader(strings.NewReader("abc\x1b[D\x1b[DX\r")),
 		out:     &out,
+		outFd:   -1,
+		width:   80,
 		prompt:  "sftp> ",
 		histPos: -1,
 	}
@@ -191,12 +193,84 @@ func TestLineEditorRendering(t *testing.T) {
 	if err != nil || line != "aXbc" {
 		t.Fatalf("read: got %q, err %v", line, err)
 	}
-	// The rendered output must end by moving the cursor to the editing position.
-	// With prompt "sftp> " (6 chars) and line "aXbc" (4 chars) and cursor at
-	// position 2, the final cursor move is 8 columns left. The trailing "\r\n"
-	// is written when Enter is pressed.
-	rendered := strings.TrimSuffix(out.String(), "\r\n")
-	if !strings.HasSuffix(rendered, "\x1b[8D") {
-		t.Errorf("render: expected final cursor move, got suffix %q", rendered[len(rendered)-8:])
+	// After drawing "sftp> aXbc", the cursor must be placed after "sftp> "
+	// plus the cursor position (2), i.e. 8 columns from the line start -- one
+	// space after the prompt, not at the 's' of "sftp>".
+	rendered := out.String()
+	if !strings.Contains(rendered, "sftp> aXbc\r\x1b[8C") {
+		t.Errorf("render: expected cursor at column 8 after drawing the line, got %q", rendered)
+	}
+}
+
+func TestDisplayWidth(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{"", 0},
+		{"abc", 3},
+		{"sftp> ", 6},
+		{"héllo", 5},
+		{"中文", 4}, // wide chars count as two columns each
+		{"a中b", 4},
+	}
+	for _, c := range cases {
+		if got := displayWidth(c.in); got != c.want {
+			t.Errorf("displayWidth(%q) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
+func TestLineEditorWideCharCursor(t *testing.T) {
+	var out bytes.Buffer
+	e := &lineEditor{
+		reader:  bufio.NewReader(strings.NewReader("a中b\x1b[D\x1b[DX\r")),
+		out:     &out,
+		outFd:   -1,
+		width:   80,
+		prompt:  "sftp> ",
+		histPos: -1,
+	}
+	line, err := e.read()
+	if err != nil || line != "aX中b" {
+		t.Fatalf("read: got %q, err %v", line, err)
+	}
+	// Line "aX中b" is 5 columns; the cursor sits after "aX" (2 columns), so
+	// 6 (prompt) + 2 = column 8.
+	if !strings.Contains(out.String(), "sftp> aX中b\r\x1b[8C") {
+		t.Errorf("wide char cursor: got %q", out.String())
+	}
+}
+
+func TestLineEditorInitialCursorPosition(t *testing.T) {
+	var out bytes.Buffer
+	e := &lineEditor{out: &out, outFd: -1, width: 80, prompt: "sftp> "}
+	e.render()
+	// The cursor must sit one column after the prompt ("sftp> " ends with a
+	// space), i.e. column 6, not at column 0.
+	if got, want := out.String(), "\r\x1b[Jsftp> \r\x1b[6C"; got != want {
+		t.Errorf("initial render: got %q, want %q", got, want)
+	}
+}
+
+func TestLineEditorWrappedLine(t *testing.T) {
+	var out bytes.Buffer
+	e := &lineEditor{
+		reader:  bufio.NewReader(strings.NewReader("abcdefghijklmn\r")),
+		out:     &out,
+		outFd:   -1,
+		width:   10, // prompt (6) + 14 chars = 20 columns -> 2 rows
+		prompt:  "sftp> ",
+		histPos: -1,
+	}
+	line, err := e.read()
+	if err != nil || line != "abcdefghijklmn" {
+		t.Fatalf("read: got %q, err %v", line, err)
+	}
+	// Once the line wraps, every redraw must first move the cursor up to the
+	// prompt line instead of only returning to the start of the wrapped row,
+	// which would leave the first row's characters behind.
+	if !strings.Contains(out.String(), "\x1b[1A\r\x1b[J") {
+		t.Errorf("wrapped redraw: expected move-up before clearing, got %q", out.String())
 	}
 }

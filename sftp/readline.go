@@ -41,6 +41,7 @@ func newInteractiveReader() (*interactiveReader, error) {
 		r.state = state
 		r.editor = &lineEditor{
 			out:     r.out,
+			outFd:   int(r.out.Fd()),
 			reader:  bufio.NewReader(r.in),
 			histPos: -1,
 		}
@@ -78,13 +79,20 @@ func (r *interactiveReader) close() {
 // lineEditor implements a minimal readline-style line editor over a terminal
 // in raw mode: the terminal no longer echoes or line-buffers input, so the
 // editor keeps the line contents and cursor position itself and redraws the
-// prompt on every change.
+// prompt on every change. Redrawing is width-aware: the terminal width is
+// queried on every redraw and wrapped rows are redrawn too, so editing a long
+// line (or resizing the window) does not leave stray characters behind.
 type lineEditor struct {
 	out    io.Writer
 	reader *bufio.Reader // persistent across read() calls
 	prompt string
 	buf    []rune // characters on the current line
-	pos    int    // cursor position within buf
+	pos    int    // cursor position within buf (rune index)
+	// terminal geometry
+	outFd  int // fd used to query the terminal width (-1 when unknown)
+	width  int // terminal width in columns, refreshed before each redraw
+	curRow int // cursor row relative to the start of the prompt line
+	curCol int // cursor column relative to the start of the prompt line
 	// history navigation state
 	history []string
 	histPos int    // index into history while navigating, -1 when editing a fresh line
@@ -92,6 +100,10 @@ type lineEditor struct {
 }
 
 func (e *lineEditor) read() (string, error) {
+	// The physical cursor sits at the start of a fresh line (the previous
+	// command's output ended with a newline), so the prompt line starts at
+	// relative row 0, column 0.
+	e.curRow, e.curCol = 0, 0
 	e.render()
 
 	for {
@@ -102,6 +114,7 @@ func (e *lineEditor) read() (string, error) {
 
 		switch {
 		case b == '\r' || b == '\n': // Enter
+			e.positionAtEnd()
 			fmt.Fprint(e.out, "\r\n")
 			line := string(e.buf)
 			e.buf = e.buf[:0]
@@ -118,11 +131,13 @@ func (e *lineEditor) read() (string, error) {
 			}
 
 		case b == '\x03': // Ctrl+C: abort the current line
+			e.positionAtEnd()
 			fmt.Fprint(e.out, "^C\r\n")
 			e.buf = e.buf[:0]
 			e.pos = 0
 			e.histPos = -1
 			e.stash = ""
+			e.curRow, e.curCol = 0, 0
 			e.render()
 
 		case b == '\x04': // Ctrl+D: EOF on an empty line, Delete otherwise
@@ -331,17 +346,72 @@ func (e *lineEditor) addHistory(line string) {
 }
 
 // render redraws the prompt and the current line, then restores the cursor to
-// its editing position.
+// its editing position. Rendering is width-aware: when the prompt plus the
+// line contents exceed the terminal width the line wraps, so redrawing starts
+// by moving the cursor back up to the start of the prompt line and clearing
+// everything below it before drawing again.
 func (e *lineEditor) render() {
-	fmt.Fprintf(e.out, "\r%s%s\x1b[K", e.prompt, string(e.buf))
-	e.moveCursor()
+	e.refreshWidth()
+	p := displayWidth(e.prompt)
+	total := p + displayWidth(string(e.buf))
+
+	// Move from the current cursor position back to the start of the prompt
+	// line, clear everything on and below it, then draw the prompt and the
+	// line contents.
+	if e.curRow > 0 {
+		fmt.Fprintf(e.out, "\x1b[%dA", e.curRow)
+	}
+	fmt.Fprint(e.out, "\r\x1b[J")
+	fmt.Fprint(e.out, e.prompt)
+	fmt.Fprint(e.out, string(e.buf))
+
+	// The cursor now sits just past the last character of the drawn line;
+	// move it to the editing position.
+	e.curRow, e.curCol = total/e.width, total%e.width
+	e.moveCursorTo(p + displayWidth(string(e.buf[:e.pos])))
 }
 
-// moveCursor moves the cursor from the end of the rendered line back to the
-// current editing position.
+// moveCursor moves the cursor to the current editing position without
+// redrawing the line contents.
 func (e *lineEditor) moveCursor() {
-	if back := len(e.prompt) + len(e.buf) - e.pos; back > 0 {
-		fmt.Fprintf(e.out, "\x1b[%dD", back)
+	e.refreshWidth()
+	e.moveCursorTo(displayWidth(e.prompt) + displayWidth(string(e.buf[:e.pos])))
+}
+
+// positionAtEnd moves the cursor to just past the last character of the line,
+// so that a following newline starts output on a fresh row below any wrapped
+// rows.
+func (e *lineEditor) positionAtEnd() {
+	e.refreshWidth()
+	e.moveCursorTo(displayWidth(e.prompt) + displayWidth(string(e.buf)))
+}
+
+// moveCursorTo positions the cursor at the given display column relative to
+// the start of the prompt line and updates the tracked cursor position. The
+// tracked position is the authoritative location of the physical cursor, so
+// column moves across wrapped rows work without knowing the absolute screen
+// coordinates.
+func (e *lineEditor) moveCursorTo(target int) {
+	row, col := target/e.width, target%e.width
+	if rows := e.curRow - row; rows > 0 {
+		fmt.Fprintf(e.out, "\x1b[%dA", rows)
+	} else if rows := row - e.curRow; rows > 0 {
+		fmt.Fprintf(e.out, "\x1b[%dB", rows)
+	}
+	fmt.Fprint(e.out, "\r")
+	if col > 0 {
+		fmt.Fprintf(e.out, "\x1b[%dC", col)
+	}
+	e.curRow, e.curCol = row, col
+}
+
+// refreshWidth queries the terminal width before a redraw, falling back to 80
+// columns when the terminal size cannot be determined (e.g. in tests).
+func (e *lineEditor) refreshWidth() {
+	if w, _, err := term.GetSize(e.outFd); err == nil && w > 0 {
+		e.width = w
+	} else if e.width == 0 {
+		e.width = 80
 	}
 }
 
@@ -390,6 +460,46 @@ func (e *lineEditor) deleteWordBeforeCursor() {
 
 func isWordSep(r rune) bool {
 	return r == ' ' || r == '\t'
+}
+
+// displayWidth returns the number of terminal columns s occupies when
+// rendered, counting East Asian wide characters and emoji as two columns so
+// cursor positioning and wrapping stay correct on terminals that render them
+// wide.
+func displayWidth(s string) int {
+	w := 0
+	for _, r := range s {
+		w += runeWidth(r)
+	}
+	return w
+}
+
+// runeWidth returns the display width of a single rune in terminal columns.
+// Control characters (which never appear in the line buffer) have width 0.
+func runeWidth(r rune) int {
+	switch {
+	case r < 0x20 || r == 0x7f:
+		return 0
+	case r < 0x7f:
+		return 1
+	// East Asian Wide / Fullwidth ranges (approximate, matching the common
+	// wcwidth tables).
+	case r >= 0x1100 && r <= 0x115f, // Hangul Jamo
+		r >= 0x2e80 && r <= 0x303e,   // CJK Radicals .. CJK Symbols and Punctuation
+		r >= 0x3041 && r <= 0x33ff,   // Hiragana .. CJK Compatibility
+		r >= 0x3400 && r <= 0x4dbf,   // CJK Unified Ideographs Extension A
+		r >= 0x4e00 && r <= 0x9fff,   // CJK Unified Ideographs
+		r >= 0xa000 && r <= 0xa4cf,   // Yi Syllables .. Yi Radicals
+		r >= 0xac00 && r <= 0xd7a3,   // Hangul Syllables
+		r >= 0xf900 && r <= 0xfaff,   // CJK Compatibility Ideographs
+		r >= 0xfe30 && r <= 0xfe4f,   // CJK Compatibility Forms
+		r >= 0xff00 && r <= 0xff60,   // Fullwidth Forms
+		r >= 0xffe0 && r <= 0xffe6,   // Fullwidth Signs
+		r >= 0x1f300 && r <= 0x1f64f, // Miscellaneous Symbols and Pictographs
+		r >= 0x1f900 && r <= 0x1f9ff: // Supplemental Symbols and Pictographs
+		return 2
+	}
+	return 1
 }
 
 // readRune reassembles a multibyte UTF-8 rune whose first byte has already
