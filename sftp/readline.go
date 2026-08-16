@@ -437,12 +437,12 @@ func (e *lineEditor) refreshWidth() {
 // Input-mode raw flags (echo off, no canonical buffering) are untouched, so
 // the line editor still receives each keystroke immediately.
 func reEnableOutputProcessing(fd int) {
-	t, err := unix.IoctlGetTermios(fd, unix.TCGETS)
+	t, err := unix.IoctlGetTermios(fd, ioctlReadTermios)
 	if err != nil {
 		return
 	}
 	t.Oflag |= unix.OPOST | unix.ONLCR
-	_ = unix.IoctlSetTermios(fd, unix.TCSETS, t)
+	_ = unix.IoctlSetTermios(fd, ioctlWriteTermios, t)
 }
 
 func (e *lineEditor) insertRune(r rune) {

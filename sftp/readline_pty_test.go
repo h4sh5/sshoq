@@ -36,7 +36,7 @@ func TestInteractiveReaderOutputProcessing(t *testing.T) {
 
 	// The terminal must be raw on input (no echo, no line buffering) but keep
 	// output post-processing so bare "\n" is translated to CRLF.
-	termios, err := unix.IoctlGetTermios(int(tty.Fd()), unix.TCGETS)
+	termios, err := unix.IoctlGetTermios(int(tty.Fd()), ioctlReadTermios)
 	if err != nil {
 		t.Fatal(err)
 	}
