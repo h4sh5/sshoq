@@ -176,6 +176,11 @@ func (m *PrivkeyFileAuthMethod) PrepareRequestForAuth(request *http.Request, ssh
 		}
 	} else if err != nil {
 		log.Warn().Msgf("Could not load private key: %s", err)
+		return err
+	}
+
+	if signingMethod == nil || jwtBearerKey == nil {
+		return fmt.Errorf("could not obtain signing material for private key: %s", m.Filename())
 	}
 
 	bearerToken, err := ssh3.BuildJWTBearerToken(signingMethod, jwtBearerKey, username, conversation)
