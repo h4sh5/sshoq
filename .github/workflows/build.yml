@@ -11,7 +11,7 @@ jobs:
   build-linux:
     strategy:
         matrix:
-          go-version: [ '1.21.x' ]
+          go-version: [ '1.25.x', '1.26.x' ]
           goos: [linux]
           ecdsatestuser: [ssh3-ecdsa-testuser]
           testuser: [ssh3-testuser]
@@ -54,7 +54,7 @@ jobs:
   build-macos:
     strategy:
       matrix:
-        go-version: [ '1.21.x' ]
+        go-version: [ '1.25.x', '1.26.x' ]
         goos: [darwin]
         goarch: [amd64]
     runs-on: macos-latest
@@ -80,7 +80,7 @@ jobs:
   build-other-unix:
     strategy:
       matrix:
-        go-version: [ '1.21.x']
+        go-version: [ '1.25.x', '1.26.x']]
         goos: [freebsd]
         goarch: [amd64,arm64]
         exclude:
