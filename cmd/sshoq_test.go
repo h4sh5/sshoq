@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"net"
 	"net/url"
 	"os"
 	"path"
+	"strings"
 	"testing"
 
 	"github.com/h4sh5/sshoq"
@@ -274,4 +276,87 @@ func TestParseScpArgsRemotePathContainsPercent(t *testing.T) {
 	if urlParam != "user@remote:443/sshoq-server" {
 		t.Errorf("expected urlParam user@remote:443/sshoq-server, got %s", urlParam)
 	}
+}
+
+func TestParseAddrPort(t *testing.T) {
+	const syntaxError = "Use [bindip:]localport@remoteip@remoteport (bindip is optional), same as openssh but with @ instead of :"
+
+	t.Run("valid 3-part syntax without bind IP", func(t *testing.T) {
+		localIP, localPort, remoteIP, remotePort, err := parseAddrPort("8080@127.0.0.1@9090")
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+		if !localIP.Equal(net.ParseIP("127.0.0.1")) {
+			t.Errorf("expected local IP 127.0.0.1, got %s", localIP)
+		}
+		if localPort != 8080 {
+			t.Errorf("expected local port 8080, got %d", localPort)
+		}
+		if !remoteIP.Equal(net.ParseIP("127.0.0.1")) {
+			t.Errorf("expected remote IP 127.0.0.1, got %s", remoteIP)
+		}
+		if remotePort != 9090 {
+			t.Errorf("expected remote port 9090, got %d", remotePort)
+		}
+	})
+
+	t.Run("valid 4-part syntax with bind IP", func(t *testing.T) {
+		localIP, localPort, remoteIP, remotePort, err := parseAddrPort("0.0.0.0@8080@::1@9090")
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+		if !localIP.Equal(net.ParseIP("0.0.0.0")) {
+			t.Errorf("expected local IP 0.0.0.0, got %s", localIP)
+		}
+		if localPort != 8080 {
+			t.Errorf("expected local port 8080, got %d", localPort)
+		}
+		if !remoteIP.Equal(net.ParseIP("::1")) {
+			t.Errorf("expected remote IP ::1, got %s", remoteIP)
+		}
+		if remotePort != 9090 {
+			t.Errorf("expected remote port 9090, got %d", remotePort)
+		}
+	})
+
+	t.Run("rejects too few parts with syntax error", func(t *testing.T) {
+		_, _, _, _, err := parseAddrPort("8080@127.0.0.1")
+		if err == nil {
+			t.Fatal("expected an error, got nil")
+		}
+		if !strings.Contains(err.Error(), syntaxError) {
+			t.Errorf("error message should mention the correct @ syntax, got: %s", err)
+		}
+	})
+
+	t.Run("rejects too many parts with syntax error", func(t *testing.T) {
+		_, _, _, _, err := parseAddrPort("0.0.0.0@8080@127.0.0.1@9090@extra")
+		if err == nil {
+			t.Fatal("expected an error, got nil")
+		}
+		if !strings.Contains(err.Error(), syntaxError) {
+			t.Errorf("error message should mention the correct @ syntax, got: %s", err)
+		}
+	})
+
+	t.Run("rejects invalid IP", func(t *testing.T) {
+		_, _, _, _, err := parseAddrPort("8080@not-an-ip@9090")
+		if err == nil {
+			t.Fatal("expected an error, got nil")
+		}
+	})
+
+	t.Run("rejects invalid port", func(t *testing.T) {
+		_, _, _, _, err := parseAddrPort("notaport@127.0.0.1@9090")
+		if err == nil {
+			t.Fatal("expected an error, got nil")
+		}
+	})
+
+	t.Run("rejects port too large", func(t *testing.T) {
+		_, _, _, _, err := parseAddrPort("70000@127.0.0.1@9090")
+		if err == nil {
+			t.Fatal("expected an error, got nil")
+		}
+	})
 }

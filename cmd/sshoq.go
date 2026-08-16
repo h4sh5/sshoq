@@ -212,8 +212,8 @@ func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog 
 func parseAddrPort(addrPort string) (localIP net.IP, localPort int, remoteIP net.IP, remotePort int, err error) {
 	array := strings.Split(addrPort, "@")
 
-	if len(array) < 3 {
-		return nil, 0, nil, 0, fmt.Errorf("Syntax incorrect for port forwarding. Use [bindip]:port:ip:port (bindip is optional), same as openssh")
+	if len(array) < 3 || len(array) > 4 {
+		return nil, 0, nil, 0, fmt.Errorf("Syntax incorrect for port forwarding. Use [bindip:]localport@remoteip@remoteport (bindip is optional), same as openssh but with @ instead of :")
 	}
 	localIPStr := "127.0.0.1" // always default to localhost if not specified
 	remoteIPStr := "127.0.0.1"
