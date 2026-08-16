@@ -1361,6 +1361,11 @@ func ServerMain() int {
 	err = server.ListenAndServe()
 
 	if err != nil {
+		// print to stderr as well as the log file: the "Server started" message
+		// has already been displayed, and users should not have to inspect the
+		// log file to understand why the server failed to start (e.g. another
+		// server is already listening on the same address)
+		fmt.Fprintf(os.Stderr, "error while serving HTTP connection: %s\n", err)
 		log.Error().Msgf("error while serving HTTP connection: %s", err)
 		return -1
 	}
