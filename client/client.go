@@ -506,10 +506,14 @@ func Dial(ctx context.Context, config *client_config.Config, qconn quic.EarlyCon
 				}
 				identity = m.IntoIdentity(token)
 			}
-			// currently only tries a single identity (the first one), but the goal is to
-			// try several identities, similarly to OpenSSH
-			log.Debug().Msgf("we only try the first specified auth method for now")
-			break
+			// try several identities, similarly to OpenSSH: if the current method
+			// could not produce an identity (e.g. the private key file does not
+			// exist), try the next one instead of aborting
+			if identity != nil {
+				log.Debug().Msgf("found a suitable identity: %s", identity)
+				break
+			}
+			log.Debug().Msgf("auth method %T could not provide an identity, trying the next one", method)
 		}
 
 		if identity == nil {
