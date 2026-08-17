@@ -730,6 +730,7 @@ func downloadFileContents(channel ssh3.Channel, remotePath, localPath string, to
 		prog.add(int64(n))
 	}
 	prog.finish()
+	fmt.Printf("Downloaded %s to %s (%d bytes)\n", remotePath, localPath, offset)
 	done = true
 	return nil
 }
@@ -973,6 +974,7 @@ func uploadFile(channel ssh3.Channel, localPath, remotePath string) error {
 		}
 	}
 	prog.finish()
+	fmt.Printf("Uploaded %s to %s (%d bytes)\n", localPath, remotePath, offset)
 	done = true
 	return nil
 }
