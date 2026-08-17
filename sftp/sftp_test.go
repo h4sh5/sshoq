@@ -1645,3 +1645,42 @@ func TestClientDoGetRecursiveWildcardNoMatch(t *testing.T) {
 		t.Errorf("expected no downloads for non-matching recursive glob, got %d files", len(entries))
 	}
 }
+
+func TestResolveCDTarget(t *testing.T) {
+	const (
+		remoteDir = "/home/alice/work"
+		homeDir   = "/home/alice"
+		prevDir   = "/home/alice/projects"
+	)
+
+	tests := []struct {
+		name       string
+		arg        string
+		hasPrevDir bool
+		want       string
+		wantOK     bool
+	}{
+		{name: "no argument goes to home", arg: "", want: homeDir, wantOK: true},
+		{name: "tilde goes to home", arg: "~", want: homeDir, wantOK: true},
+		{name: "tilde slash subdir", arg: "~/docs", want: homeDir + "/docs", wantOK: true},
+		{name: "tilde slash nested", arg: "~/a/b/c", want: homeDir + "/a/b/c", wantOK: true},
+		{name: "bare tilde slash", arg: "~/", want: homeDir, wantOK: true},
+		{name: "dash goes to previous dir", arg: "-", hasPrevDir: true, want: prevDir, wantOK: true},
+		{name: "dash without previous dir fails", arg: "-", wantOK: false},
+		{name: "absolute path used as-is", arg: "/tmp", want: "/tmp", wantOK: true},
+		{name: "relative path joined to remote dir", arg: "sub", want: remoteDir + "/sub", wantOK: true},
+		{name: "relative dot", arg: ".", want: remoteDir, wantOK: true},
+		{name: "relative parent", arg: "..", want: homeDir, wantOK: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := resolveCDTarget(tt.arg, remoteDir, homeDir, prevDir, tt.hasPrevDir)
+			if ok != tt.wantOK {
+				t.Fatalf("resolveCDTarget(%q) ok = %v, want %v", tt.arg, ok, tt.wantOK)
+			}
+			if got != tt.want {
+				t.Fatalf("resolveCDTarget(%q) = %q, want %q", tt.arg, got, tt.want)
+			}
+		})
+	}
+}
