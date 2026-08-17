@@ -61,9 +61,9 @@ func scpUpload(channel ssh3.Channel, recursive bool, localPath, remotePath strin
 	}
 
 	if recursive {
-		return uploadRecursive(channel, localPath, remotePath, cancel)
+		return uploadRecursive(channel, localPath, remotePath, true, cancel)
 	}
-	return uploadFile(channel, localPath, remotePath, cancel)
+	return uploadFile(channel, localPath, remotePath, true, cancel)
 }
 
 // scpDownload copies a remote file or directory to the local machine.
@@ -79,9 +79,9 @@ func scpDownload(channel ssh3.Channel, recursive bool, remotePath, localPath str
 	}
 
 	if recursive {
-		return downloadRecursive(channel, remotePath, localPath, cancel)
+		return downloadRecursive(channel, remotePath, localPath, true, cancel)
 	}
-	return downloadFile(channel, remotePath, localPath, cancel)
+	return downloadFile(channel, remotePath, localPath, true, cancel)
 }
 
 // isRemoteDir reports whether the remote path refers to an existing

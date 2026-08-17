@@ -629,6 +629,7 @@ func ClientMain() int {
 	flag.Var(&reverseTCP, "R", "alias for -reverse-tcp (may be specified multiple times)")
 	proxyJump := flag.String("proxy-jump", "", "if set, performs a proxy jump using the specified remote host as proxy (requires server with version >= 0.1.5)")
 	sftpMode := flag.Bool("sftp", false, "if set, start an interactive SFTP session")
+	noFollowSymlinks := flag.Bool("no-follow-symlinks", false, "if set with -sftp, do not follow symbolic links on the client (put source and get source, resolved client-side)")
 	scpMode := flag.Bool("scp", false, "if set, copy files to or from the remote host non-interactively, like scp")
 	scpRecursive := flag.Bool("r", false, "if set with -scp, recursively copy directories")
 
@@ -954,7 +955,7 @@ func ClientMain() int {
 	}
 
 	if *sftpMode {
-		err = sshoqsftp.RunInteractiveClient(c)
+		err = sshoqsftp.RunInteractiveClient(c, !*noFollowSymlinks)
 	} else if *scpMode {
 		err = sshoqsftp.RunScpClient(c, scpUpload, *scpRecursive, scpLocalPath, scpRemotePath)
 	} else {

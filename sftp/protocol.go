@@ -29,15 +29,17 @@ type Request struct {
 }
 
 type FileInfo struct {
-	Name      string `json:"name"`
-	Size      int64  `json:"size"`
-	Mode      uint32 `json:"mode"`
-	IsDir     bool   `json:"is_dir"`
-	ModTime   int64  `json:"mod_time"`
-	UID       uint32 `json:"uid"`
-	GID       uint32 `json:"gid"`
-	UserName  string `json:"user_name,omitempty"`
-	GroupName string `json:"group_name,omitempty"`
+	Name       string `json:"name"`
+	Size       int64  `json:"size"`
+	Mode       uint32 `json:"mode"`
+	IsDir      bool   `json:"is_dir"`
+	IsSymlink  bool   `json:"is_symlink,omitempty"`
+	LinkTarget string `json:"link_target,omitempty"`
+	ModTime    int64  `json:"mod_time"`
+	UID        uint32 `json:"uid"`
+	GID        uint32 `json:"gid"`
+	UserName   string `json:"user_name,omitempty"`
+	GroupName  string `json:"group_name,omitempty"`
 }
 
 type Response struct {
