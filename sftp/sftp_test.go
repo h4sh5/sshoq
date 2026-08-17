@@ -1907,23 +1907,45 @@ func TestClientDoGetRecursiveDir(t *testing.T) {
 }
 
 // TestClientDoGetRecursivePermissionDenied exercises get -r on a directory
-// containing a file the server refuses to read: the denied file is reported
-// and skipped, and the remaining files in the directory are still downloaded.
+// containing a mix of readable files and files the server refuses to read
+// (permission denied): each denied file is reported and skipped, and every
+// readable file is still downloaded. secret1.bin is larger than one chunk so
+// its read window has several in-flight requests, all of which the server
+// denies: the client must drain them so they are not mistaken for the next
+// file's responses.
 func TestClientDoGetRecursivePermissionDenied(t *testing.T) {
 	localDir := t.TempDir()
+
+	// A large denied file spans three chunks: three read requests go out and
+	// the server denies all three.
+	bigSize := int64(2*ChunkSize + 10)
 
 	ch := newMockChannel(
 		// stat of the top-level directory.
 		makeResponseMsg(&Response{OK: true, Info: &FileInfo{Name: "d", IsDir: true}}),
-		// ls of the directory: "secret.txt" cannot be read, "ok.txt" can.
+		// ls of the directory, mixing readable and unreadable files.
 		makeResponseMsg(&Response{OK: true, Entries: []FileInfo{
-			{Name: "secret.txt", Size: 6, Mode: 0000},
-			{Name: "ok.txt", Size: 2, Mode: 0644},
+			{Name: "ok1.txt", Size: 2, Mode: 0644},
+			{Name: "secret1.bin", Size: bigSize, Mode: 0000},
+			{Name: "ok2.txt", Size: 3, Mode: 0644},
+			{Name: "secret2.txt", Size: 1, Mode: 0000},
+			{Name: "ok3.txt", Size: 3, Mode: 0644},
 		}}),
-		// The server refuses the read of secret.txt.
-		makeResponseMsg(&Response{OK: false, Error: "secret.txt: permission denied"}),
-		// The download of ok.txt succeeds (its size comes from the ls entry).
-		makeResponseMsg(&Response{OK: true, Data: []byte("ok")}),
+		// The download of ok1.txt succeeds.
+		makeResponseMsg(&Response{OK: true, Data: []byte("O1")}),
+		makeResponseMsg(&Response{OK: true, Data: []byte{}}),
+		// The server denies all three reads of secret1.bin.
+		makeResponseMsg(&Response{OK: false, Error: "secret1.bin: permission denied"}),
+		makeResponseMsg(&Response{OK: false, Error: "secret1.bin: permission denied"}),
+		makeResponseMsg(&Response{OK: false, Error: "secret1.bin: permission denied"}),
+		// The download of ok2.txt succeeds, proving the drained responses of
+		// secret1.bin were not mistaken for its own.
+		makeResponseMsg(&Response{OK: true, Data: []byte("OK2")}),
+		makeResponseMsg(&Response{OK: true, Data: []byte{}}),
+		// The server refuses the single read of secret2.txt.
+		makeResponseMsg(&Response{OK: false, Error: "secret2.txt: permission denied"}),
+		// The download of ok3.txt succeeds.
+		makeResponseMsg(&Response{OK: true, Data: []byte("OK3")}),
 		makeResponseMsg(&Response{OK: true, Data: []byte{}}),
 	)
 
@@ -1931,20 +1953,22 @@ func TestClientDoGetRecursivePermissionDenied(t *testing.T) {
 		t.Fatalf("doGet -r error: %v", err)
 	}
 
-	// The denied file leaves a zero-length placeholder behind (a failed
-	// download is not cleaned up) and must not abort the transfer.
-	if info, err := os.Stat(filepath.Join(localDir, "d", "secret.txt")); err != nil {
-		t.Fatalf("expected zero-length placeholder for denied file: %v", err)
-	} else if info.Size() != 0 {
-		t.Fatalf("expected zero-length placeholder, got %d bytes", info.Size())
+	// Every readable file must be downloaded with its own content.
+	want := map[string]string{
+		"ok1.txt":     "O1",
+		"ok2.txt":     "OK2",
+		"ok3.txt":     "OK3",
+		"secret1.bin": "",
+		"secret2.txt": "",
 	}
-
-	content, err := os.ReadFile(filepath.Join(localDir, "d", "ok.txt"))
-	if err != nil {
-		t.Fatalf("read downloaded file: %v", err)
-	}
-	if string(content) != "ok" {
-		t.Fatalf("unexpected content: %q", content)
+	for name, content := range want {
+		got, err := os.ReadFile(filepath.Join(localDir, "d", name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if string(got) != content {
+			t.Fatalf("%s: unexpected content %q, want %q", name, got, content)
+		}
 	}
 }
 

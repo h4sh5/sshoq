@@ -977,6 +977,19 @@ func downloadFileContents(channel ssh3.Channel, remotePath, localPath string, to
 
 	// Consume the responses in order, writing each chunk to the file, and keep
 	// the window full by sending the next request as each response arrives.
+	// drain consumes the responses still in flight for this transfer; it is
+	// called on every error path below. The server answers strictly in request
+	// order, so every response drained belongs to a request sent for
+	// remotePath: without the drain the next transfer would mistake them for
+	// its own responses (a denied file would wrongly deny the file after it).
+	drain := func() {
+		for pending > 0 {
+			pending--
+			if _, err := ReceiveResponse(channel); err != nil {
+				break
+			}
+		}
+	}
 	var offset int64
 	eof := false
 	for pending > 0 {
@@ -988,10 +1001,15 @@ func downloadFileContents(channel ssh3.Channel, remotePath, localPath string, to
 		if err != nil {
 			return err
 		}
-		if !resp.OK {
-			return serverError(remotePath, resp.Error)
-		}
 		pending--
+		if !resp.OK {
+			// The server denied this read (e.g. permission denied). Every
+			// request in the window is denied too: drain them so the rest of
+			// the directory is still transferred cleanly.
+			err := serverError(remotePath, resp.Error)
+			drain()
+			return err
+		}
 		if len(resp.Data) == 0 {
 			// End of file: stop refilling the window and drain the responses
 			// already in flight (they are all empty as well).
@@ -1004,6 +1022,7 @@ func downloadFileContents(channel ssh3.Channel, remotePath, localPath string, to
 		}
 		n, err := f.Write(resp.Data)
 		if err != nil {
+			drain()
 			return err
 		}
 		offset += int64(n)
@@ -1011,6 +1030,7 @@ func downloadFileContents(channel ssh3.Channel, remotePath, localPath string, to
 		// The response for the oldest request just arrived; send the next
 		// request to keep the window full.
 		if err := SendRequest(channel, &Request{Cmd: "get", Path: remotePath, Offset: int64(sent) * ChunkSize, Limit: ChunkSize}); err != nil {
+			drain()
 			return err
 		}
 		sent++
