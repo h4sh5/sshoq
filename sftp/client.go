@@ -672,17 +672,26 @@ func downloadRecursive(channel ssh3.Channel, remotePath, localPath string) error
 				if err := downloadRecursive(channel, childRemote, childLocal); err != nil {
 					return err
 				}
-			} else if err := downloadFileContents(channel, childRemote, childLocal, nil); err != nil {
+			} else if err := downloadFileContents(channel, childRemote, childLocal, entry.Size); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
 
-	return downloadFileContents(channel, remotePath, localPath, statResp.Info)
+	var total int64
+	if statResp.Info != nil {
+		total = statResp.Info.Size
+	}
+	return downloadFileContents(channel, remotePath, localPath, total)
 }
 
-func downloadFileContents(channel ssh3.Channel, remotePath, localPath string, info *FileInfo) error {
+// downloadFileContents downloads remotePath into localPath, displaying a
+// per-file progress line (percentage and speed) as the transfer proceeds.
+// total is the remote file size in bytes; 0 when it is unknown, in which case
+// the progress line shows the transferred bytes and speed without a
+// percentage.
+func downloadFileContents(channel ssh3.Channel, remotePath, localPath string, total int64) error {
 	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
 		return err
 	}
@@ -692,6 +701,14 @@ func downloadFileContents(channel ssh3.Channel, remotePath, localPath string, in
 		return err
 	}
 	defer f.Close()
+
+	prog := newProgress(filepath.Base(remotePath), total, os.Stdout)
+	done := false
+	defer func() {
+		if !done {
+			prog.abort()
+		}
+	}()
 
 	var offset int64
 	for {
@@ -710,8 +727,11 @@ func downloadFileContents(channel ssh3.Channel, remotePath, localPath string, in
 			return err
 		}
 		offset += int64(n)
+		prog.add(int64(n))
 	}
+	prog.finish()
 	fmt.Printf("Downloaded %s to %s (%d bytes)\n", remotePath, localPath, offset)
+	done = true
 	return nil
 }
 
@@ -901,7 +921,11 @@ func downloadFile(channel ssh3.Channel, remotePath, localPath string) error {
 		return fmt.Errorf("cannot download a directory")
 	}
 
-	return downloadFileContents(channel, remotePath, localPath, statResp.Info)
+	var total int64
+	if statResp.Info != nil {
+		total = statResp.Info.Size
+	}
+	return downloadFileContents(channel, remotePath, localPath, total)
 }
 
 func uploadFile(channel ssh3.Channel, localPath, remotePath string) error {
@@ -919,6 +943,14 @@ func uploadFile(channel ssh3.Channel, localPath, remotePath string) error {
 		return fmt.Errorf("cannot upload a directory")
 	}
 
+	prog := newProgress(filepath.Base(localPath), info.Size(), os.Stdout)
+	done := false
+	defer func() {
+		if !done {
+			prog.abort()
+		}
+	}()
+
 	var offset int64
 	buf := make([]byte, ChunkSize)
 	for {
@@ -935,11 +967,14 @@ func uploadFile(channel ssh3.Channel, localPath, remotePath string) error {
 				return fmt.Errorf("%s", resp.Error)
 			}
 			offset += int64(n)
+			prog.add(int64(n))
 		}
 		if err == io.EOF {
 			break
 		}
 	}
+	prog.finish()
 	fmt.Printf("Uploaded %s to %s (%d bytes)\n", localPath, remotePath, offset)
+	done = true
 	return nil
 }
