@@ -636,6 +636,12 @@ func doGet(channel ssh3.Channel, localDir, remoteDir string, parts []string, fol
 				localFile = destDir
 			}
 			if err := downloadOne(channel, remoteFile, localFile, recursive, follow, cancel); err != nil {
+				// With -r a permission-denied match is reported and skipped so
+				// the remaining matches are still transferred.
+				if recursive && isPermissionError(err) {
+					fmt.Fprintf(os.Stderr, "get: %s\n", err)
+					continue
+				}
 				return err
 			}
 		}
@@ -871,23 +877,29 @@ func downloadRecursive(channel ssh3.Channel, remotePath, localPath string, follo
 		for _, entry := range resp.Entries {
 			childRemote := path.Join(resolved, entry.Name)
 			childLocal := filepath.Join(localPath, entry.Name)
+			var err error
 			switch {
 			case entry.IsDir:
-				if err := downloadRecursive(channel, childRemote, childLocal, follow, cancel); err != nil {
-					return err
-				}
+				// Recurse so the directory is walked and its files
+				// downloaded.
+				err = downloadRecursive(channel, childRemote, childLocal, follow, cancel)
 			case entry.IsSymlink && !follow:
 				return fmt.Errorf("Cannot download %s: symbolic link", childRemote)
 			case entry.IsSymlink:
 				// Recurse so the symlink is resolved (and followed if it points
 				// to a directory, downloaded if it points to a file).
-				if err := downloadRecursive(channel, childRemote, childLocal, follow, cancel); err != nil {
-					return err
-				}
+				err = downloadRecursive(channel, childRemote, childLocal, follow, cancel)
 			default:
-				if err := downloadFileContents(channel, childRemote, childLocal, entry.Size, cancel); err != nil {
-					return err
+				err = downloadFileContents(channel, childRemote, childLocal, entry.Size, cancel)
+			}
+			if err != nil {
+				// A permission-denied entry is reported and skipped so the
+				// rest of the directory is still transferred.
+				if isPermissionError(err) {
+					fmt.Fprintf(os.Stderr, "get: %s\n", err)
+					continue
 				}
+				return err
 			}
 		}
 		return nil
@@ -965,6 +977,19 @@ func downloadFileContents(channel ssh3.Channel, remotePath, localPath string, to
 
 	// Consume the responses in order, writing each chunk to the file, and keep
 	// the window full by sending the next request as each response arrives.
+	// drain consumes the responses still in flight for this transfer; it is
+	// called on every error path below. The server answers strictly in request
+	// order, so every response drained belongs to a request sent for
+	// remotePath: without the drain the next transfer would mistake them for
+	// its own responses (a denied file would wrongly deny the file after it).
+	drain := func() {
+		for pending > 0 {
+			pending--
+			if _, err := ReceiveResponse(channel); err != nil {
+				break
+			}
+		}
+	}
 	var offset int64
 	eof := false
 	for pending > 0 {
@@ -976,10 +1001,15 @@ func downloadFileContents(channel ssh3.Channel, remotePath, localPath string, to
 		if err != nil {
 			return err
 		}
-		if !resp.OK {
-			return serverError(remotePath, resp.Error)
-		}
 		pending--
+		if !resp.OK {
+			// The server denied this read (e.g. permission denied). Every
+			// request in the window is denied too: drain them so the rest of
+			// the directory is still transferred cleanly.
+			err := serverError(remotePath, resp.Error)
+			drain()
+			return err
+		}
 		if len(resp.Data) == 0 {
 			// End of file: stop refilling the window and drain the responses
 			// already in flight (they are all empty as well).
@@ -992,6 +1022,7 @@ func downloadFileContents(channel ssh3.Channel, remotePath, localPath string, to
 		}
 		n, err := f.Write(resp.Data)
 		if err != nil {
+			drain()
 			return err
 		}
 		offset += int64(n)
@@ -999,6 +1030,7 @@ func downloadFileContents(channel ssh3.Channel, remotePath, localPath string, to
 		// The response for the oldest request just arrived; send the next
 		// request to keep the window full.
 		if err := SendRequest(channel, &Request{Cmd: "get", Path: remotePath, Offset: int64(sent) * ChunkSize, Limit: ChunkSize}); err != nil {
+			drain()
 			return err
 		}
 		sent++
@@ -1239,6 +1271,24 @@ func serverError(path, msg string) error {
 		return errors.New(msg)
 	}
 	return fmt.Errorf("%s: %s", path, msg)
+}
+
+// isPermissionError reports whether err is a permission failure: the read or
+// listing of a file the user may not access, reported by the server, or a
+// local permission error while creating the destination. The recursive
+// download skips such entries and continues with the rest of the directory.
+func isPermissionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrPermission) {
+		return true
+	}
+	// Server responses arrive as plain error strings (see serverError), so the
+	// underlying syscall error is not available: match the message text that
+	// EACCES and EPERM render as.
+	msg := err.Error()
+	return strings.Contains(msg, "permission denied") || strings.Contains(msg, "operation not permitted")
 }
 
 // downloadFile downloads remoteFile to localFile, resolving any server-side
