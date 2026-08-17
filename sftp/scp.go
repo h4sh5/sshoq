@@ -16,6 +16,9 @@ import (
 // protocol (the same channel the interactive -sftp mode uses). upload selects
 // the direction: when true, localPath is copied to remotePath; when false,
 // remotePath is copied to localPath. recursive enables directory transfers.
+// While the copy runs, SIGINT (Ctrl+C) and SIGTERM cancel it: the transfer
+// stops at the next chunk boundary, partial local files are removed, and
+// ErrCancelled is returned.
 func RunScpClient(c *client.Client, upload bool, recursive bool, localPath, remotePath string) error {
 	channel, err := c.OpenChannel("sftp", 30000, 0)
 	if err != nil {
@@ -26,17 +29,23 @@ func RunScpClient(c *client.Client, upload bool, recursive bool, localPath, remo
 		return fmt.Errorf("could not open sftp channel: %w", err)
 	}
 
+	// Scp mode runs with a normal terminal, so Ctrl+C is delivered as SIGINT
+	// and cancels the transfer instead of killing the process mid-copy.
+	cancel := &transferCancel{}
+	stop := watchSignals(cancel)
+	defer stop()
+
 	if upload {
-		return scpUpload(channel, recursive, localPath, remotePath)
+		return scpUpload(channel, recursive, localPath, remotePath, cancel)
 	}
-	return scpDownload(channel, recursive, remotePath, localPath)
+	return scpDownload(channel, recursive, remotePath, localPath, cancel)
 }
 
 // scpUpload copies a local file or directory to the remote host. Mirroring
 // scp semantics, when the remote target is an existing directory or ends with
 // a path separator, the source is copied into it under its own basename
 // (e.g. `scp -r ./dir host:/tmp/` copies to /tmp/dir).
-func scpUpload(channel ssh3.Channel, recursive bool, localPath, remotePath string) error {
+func scpUpload(channel ssh3.Channel, recursive bool, localPath, remotePath string, cancel *transferCancel) error {
 	info, err := os.Stat(localPath)
 	if err != nil {
 		return fmt.Errorf("cannot stat local path %s: %w", localPath, err)
@@ -52,16 +61,16 @@ func scpUpload(channel ssh3.Channel, recursive bool, localPath, remotePath strin
 	}
 
 	if recursive {
-		return uploadRecursive(channel, localPath, remotePath)
+		return uploadRecursive(channel, localPath, remotePath, cancel)
 	}
-	return uploadFile(channel, localPath, remotePath)
+	return uploadFile(channel, localPath, remotePath, cancel)
 }
 
 // scpDownload copies a remote file or directory to the local machine.
 // Mirroring scp semantics, when the local target is an existing directory or
 // ends with a path separator, the remote source is copied into it under its
 // own basename (e.g. `scp -r host:/etc/nginx .` copies to ./nginx).
-func scpDownload(channel ssh3.Channel, recursive bool, remotePath, localPath string) error {
+func scpDownload(channel ssh3.Channel, recursive bool, remotePath, localPath string, cancel *transferCancel) error {
 	info, err := os.Stat(localPath)
 	if err == nil && info.IsDir() {
 		localPath = filepath.Join(localPath, filepath.Base(remotePath))
@@ -70,9 +79,9 @@ func scpDownload(channel ssh3.Channel, recursive bool, remotePath, localPath str
 	}
 
 	if recursive {
-		return downloadRecursive(channel, remotePath, localPath)
+		return downloadRecursive(channel, remotePath, localPath, cancel)
 	}
-	return downloadFile(channel, remotePath, localPath)
+	return downloadFile(channel, remotePath, localPath, cancel)
 }
 
 // isRemoteDir reports whether the remote path refers to an existing

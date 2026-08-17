@@ -2,10 +2,12 @@ package sftp
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
@@ -34,6 +36,7 @@ type interactiveReader struct {
 	state    *term.State
 	scanner  *bufio.Scanner
 	editor   *lineEditor
+	watchWg  sync.WaitGroup // tracks the stdin watcher goroutine of the current transfer
 }
 
 func newInteractiveReader() (*interactiveReader, error) {
@@ -109,6 +112,11 @@ type lineEditor struct {
 	completer completeFunc
 	tabWord   string // word completed by the last Tab press
 	tabActive bool   // whether the next Tab on the same word lists the candidates
+	// bytes typed during a transfer, buffered by the stdin watcher so they
+	// appear at the next prompt instead of being lost; pendingMu guards them
+	// against concurrent appends while the editor drains them
+	pendingMu sync.Mutex
+	pending   []byte
 }
 
 func (e *lineEditor) read() (string, error) {
@@ -119,7 +127,7 @@ func (e *lineEditor) read() (string, error) {
 	e.render()
 
 	for {
-		b, err := e.reader.ReadByte()
+		b, err := e.nextByte()
 		if err != nil {
 			return "", err
 		}
@@ -197,7 +205,7 @@ func (e *lineEditor) read() (string, error) {
 				if b < 0x80 {
 					e.insertRune(rune(b))
 				} else {
-					r, err := readRune(e.reader, b)
+					r, err := e.readRune(b)
 					if err != nil {
 						return "", err
 					}
@@ -206,6 +214,22 @@ func (e *lineEditor) read() (string, error) {
 			}
 		}
 	}
+}
+
+// nextByte returns the next input byte, draining the bytes buffered by the
+// transfer watcher before reading from the terminal. Bytes typed while a
+// transfer was running must be consumed before the terminal is read again, so
+// no input is lost (or reordered) around a transfer.
+func (e *lineEditor) nextByte() (byte, error) {
+	e.pendingMu.Lock()
+	if len(e.pending) > 0 {
+		b := e.pending[0]
+		e.pending = e.pending[1:]
+		e.pendingMu.Unlock()
+		return b, nil
+	}
+	e.pendingMu.Unlock()
+	return e.reader.ReadByte()
 }
 
 // handleEscape processes the byte following ESC, decoding the terminal escape
@@ -712,8 +736,9 @@ func runeWidth(r rune) int {
 }
 
 // readRune reassembles a multibyte UTF-8 rune whose first byte has already
-// been consumed from r.
-func readRune(r *bufio.Reader, first byte) (rune, error) {
+// been consumed, reading the continuation bytes through nextByte so bytes
+// buffered by the transfer watcher are honored.
+func (e *lineEditor) readRune(first byte) (rune, error) {
 	n := 1
 	switch {
 	case first&0xE0 == 0xC0:
@@ -725,9 +750,61 @@ func readRune(r *bufio.Reader, first byte) (rune, error) {
 	}
 	seq := make([]byte, n)
 	seq[0] = first
-	if _, err := io.ReadFull(r, seq[1:]); err != nil {
-		return 0, err
+	for i := 1; i < n; i++ {
+		b, err := e.nextByte()
+		if err != nil {
+			return 0, err
+		}
+		seq[i] = b
 	}
 	rn, _ := utf8.DecodeRune(seq)
 	return rn, nil
+}
+
+// watchCancel watches stdin for Ctrl+C while a transfer is running. In raw
+// mode the terminal delivers Ctrl+C as byte 0x03 instead of raising SIGINT
+// (ISIG is disabled by term.MakeRaw), so the transfer loop cannot be
+// interrupted by a signal and must be told to stop. Any other bytes typed
+// during the transfer are buffered in the editor's pending buffer so they
+// appear at the next prompt instead of being lost. It exits when ctx is done
+// (the transfer has finished) or when stdin is gone.
+func (r *interactiveReader) watchCancel(ctx context.Context, cancel *transferCancel) {
+	defer r.watchWg.Done()
+	fd := int(r.in.Fd())
+	buf := make([]byte, 256)
+	var fds [1]unix.PollFd
+	fds[0].Fd = int32(fd)
+	fds[0].Events = unix.POLLIN
+	for {
+		// Poll with a timeout so the watcher notices ctx being done even when
+		// no input arrives; a bare blocking read could never be interrupted.
+		n, err := unix.Poll(fds[:], 100)
+		if err != nil {
+			if err == unix.EINTR {
+				continue
+			}
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		if n == 0 {
+			continue
+		}
+		nr, err := unix.Read(fd, buf)
+		if err != nil || nr <= 0 {
+			return
+		}
+		for _, b := range buf[:nr] {
+			if b == 0x03 {
+				cancel.cancel()
+			} else {
+				r.editor.pendingMu.Lock()
+				r.editor.pending = append(r.editor.pending, b)
+				r.editor.pendingMu.Unlock()
+			}
+		}
+	}
 }

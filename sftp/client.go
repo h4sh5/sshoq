@@ -1,6 +1,8 @@
 package sftp
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -141,8 +143,16 @@ func RunInteractiveClient(c *client.Client) error {
 			}
 
 		case "get":
-			if err := doGet(channel, localDir, remoteDir, parts); err != nil {
-				fmt.Fprintf(os.Stderr, "get: %s\n", err)
+			cancel := &transferCancel{}
+			err := input.runTransfer(cancel, func() error {
+				return doGet(channel, localDir, remoteDir, parts, cancel)
+			})
+			if err != nil {
+				if errors.Is(err, ErrCancelled) {
+					fmt.Println("Cancelled")
+				} else {
+					fmt.Fprintf(os.Stderr, "get: %s\n", err)
+				}
 				continue
 			}
 
@@ -166,12 +176,19 @@ func RunInteractiveClient(c *client.Client) error {
 				remoteFile = path.Join(remoteDir, remoteFile)
 			}
 
-			if recursive {
-				if err := uploadRecursive(channel, localFile, remoteFile); err != nil {
+			cancel := &transferCancel{}
+			err = input.runTransfer(cancel, func() error {
+				if recursive {
+					return uploadRecursive(channel, localFile, remoteFile, cancel)
+				}
+				return uploadFile(channel, localFile, remoteFile, cancel)
+			})
+			if err != nil {
+				if errors.Is(err, ErrCancelled) {
+					fmt.Println("Cancelled")
+				} else {
 					fmt.Fprintf(os.Stderr, "put: %s\n", err)
 				}
-			} else if err := uploadFile(channel, localFile, remoteFile); err != nil {
-				fmt.Fprintf(os.Stderr, "put: %s\n", err)
 			}
 
 		case "mkdir":
@@ -490,6 +507,27 @@ func doLs(channel ssh3.Channel, remoteDir string, parts []string) error {
 	return nil
 }
 
+// runTransfer runs fn while making Ctrl+C cancel it. In terminal mode the
+// session's terminal is raw, so Ctrl+C arrives as byte 0x03 on stdin instead
+// of as SIGINT: a watcher goroutine consumes it (buffering any other typed
+// bytes for the next prompt) and sets cancel, which fn's transfer loops check
+// between chunks. With piped input the terminal is not raw, so Ctrl+C is
+// delivered as a signal and a signal handler cancels instead.
+func (r *interactiveReader) runTransfer(cancel *transferCancel, fn func() error) error {
+	if r.editor == nil {
+		stop := watchSignals(cancel)
+		defer stop()
+		return fn()
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	r.watchWg.Add(1)
+	go r.watchCancel(ctx, cancel)
+	err := fn()
+	stop()
+	r.watchWg.Wait()
+	return err
+}
+
 // doGet downloads a remote file or directory, or every entry in the resolved
 // source directory whose name matches a glob pattern. It mirrors doLs: when the
 // remote source contains glob metacharacters in its final path component (*, ?,
@@ -498,7 +536,7 @@ func doLs(channel ssh3.Channel, remoteDir string, parts []string) error {
 // un-globbed source is downloaded directly, preserving the previous behavior.
 // The -r flag is honored in both cases: directories (whether matched by the
 // pattern or named directly) are transferred recursively via downloadOne.
-func doGet(channel ssh3.Channel, localDir, remoteDir string, parts []string) error {
+func doGet(channel ssh3.Channel, localDir, remoteDir string, parts []string, cancel *transferCancel) error {
 	recursive, remoteSource, localTarget, err := parseTransferArgs(parts, "get")
 	if err != nil {
 		return err
@@ -551,7 +589,7 @@ func doGet(channel ssh3.Channel, localDir, remoteDir string, parts []string) err
 			}
 			remoteFile := path.Join(sourceDir, e.Name)
 			localFile := filepath.Join(localDir, filepath.Base(filepath.Clean(remoteFile)))
-			if err := downloadOne(channel, remoteFile, localFile, recursive); err != nil {
+			if err := downloadOne(channel, remoteFile, localFile, recursive, cancel); err != nil {
 				return err
 			}
 		}
@@ -567,18 +605,18 @@ func doGet(channel ssh3.Channel, localDir, remoteDir string, parts []string) err
 		localFile = filepath.Base(filepath.Clean(remoteFile))
 	}
 	localFile = filepath.Join(localDir, localFile)
-	return downloadOne(channel, remoteFile, localFile, recursive)
+	return downloadOne(channel, remoteFile, localFile, recursive, cancel)
 }
 
 // downloadOne downloads remoteFile to localFile, descending into directories when
 // recursive is set. It reproduces the transfer behavior of a non-glob "get" and
 // is shared by the glob and non-glob paths of doGet so that wildcards work the
 // same way with and without -r.
-func downloadOne(channel ssh3.Channel, remoteFile, localFile string, recursive bool) error {
+func downloadOne(channel ssh3.Channel, remoteFile, localFile string, recursive bool, cancel *transferCancel) error {
 	if recursive {
-		return downloadRecursive(channel, remoteFile, localFile)
+		return downloadRecursive(channel, remoteFile, localFile, cancel)
 	}
-	return downloadFile(channel, remoteFile, localFile)
+	return downloadFile(channel, remoteFile, localFile, cancel)
 }
 
 // globSplit reports whether arg contains unescaped glob metacharacters in its
@@ -646,7 +684,10 @@ func parseTransferArgs(parts []string, cmd string) (recursive bool, source strin
 	return recursive, source, target, nil
 }
 
-func downloadRecursive(channel ssh3.Channel, remotePath, localPath string) error {
+func downloadRecursive(channel ssh3.Channel, remotePath, localPath string, cancel *transferCancel) error {
+	if cancel.cancelled() {
+		return ErrCancelled
+	}
 	statResp, err := doRequest(channel, &Request{Cmd: "stat", Path: remotePath})
 	if err != nil {
 		return err
@@ -669,10 +710,10 @@ func downloadRecursive(channel ssh3.Channel, remotePath, localPath string) error
 			childRemote := path.Join(remotePath, entry.Name)
 			childLocal := filepath.Join(localPath, entry.Name)
 			if entry.IsDir {
-				if err := downloadRecursive(channel, childRemote, childLocal); err != nil {
+				if err := downloadRecursive(channel, childRemote, childLocal, cancel); err != nil {
 					return err
 				}
-			} else if err := downloadFileContents(channel, childRemote, childLocal, entry.Size); err != nil {
+			} else if err := downloadFileContents(channel, childRemote, childLocal, entry.Size, cancel); err != nil {
 				return err
 			}
 		}
@@ -683,7 +724,7 @@ func downloadRecursive(channel ssh3.Channel, remotePath, localPath string) error
 	if statResp.Info != nil {
 		total = statResp.Info.Size
 	}
-	return downloadFileContents(channel, remotePath, localPath, total)
+	return downloadFileContents(channel, remotePath, localPath, total, cancel)
 }
 
 // downloadFileContents downloads remotePath into localPath, displaying a
@@ -691,7 +732,7 @@ func downloadRecursive(channel ssh3.Channel, remotePath, localPath string) error
 // total is the remote file size in bytes; 0 when it is unknown, in which case
 // the progress line shows the transferred bytes and speed without a
 // percentage.
-func downloadFileContents(channel ssh3.Channel, remotePath, localPath string, total int64) error {
+func downloadFileContents(channel ssh3.Channel, remotePath, localPath string, total int64, cancel *transferCancel) error {
 	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
 		return err
 	}
@@ -702,7 +743,7 @@ func downloadFileContents(channel ssh3.Channel, remotePath, localPath string, to
 	}
 	defer f.Close()
 
-	prog := newProgress(filepath.Base(remotePath), total, os.Stdout)
+	prog := newProgress(filepath.Base(remotePath), total, os.Stdout, cancel)
 	done := false
 	defer func() {
 		if !done {
@@ -712,6 +753,12 @@ func downloadFileContents(channel ssh3.Channel, remotePath, localPath string, to
 
 	var offset int64
 	for {
+		if prog.cancelled() {
+			// Remove the partially downloaded file so it is not mistaken for
+			// a complete download.
+			os.Remove(localPath)
+			return ErrCancelled
+		}
 		resp, err := doRequest(channel, &Request{Cmd: "get", Path: remotePath, Offset: offset, Limit: ChunkSize})
 		if err != nil {
 			return err
@@ -735,13 +782,16 @@ func downloadFileContents(channel ssh3.Channel, remotePath, localPath string, to
 	return nil
 }
 
-func uploadRecursive(channel ssh3.Channel, localPath, remotePath string) error {
+func uploadRecursive(channel ssh3.Channel, localPath, remotePath string, cancel *transferCancel) error {
+	if cancel.cancelled() {
+		return ErrCancelled
+	}
 	info, err := os.Stat(localPath)
 	if err != nil {
 		return err
 	}
 	if !info.IsDir() {
-		return uploadFile(channel, localPath, remotePath)
+		return uploadFile(channel, localPath, remotePath, cancel)
 	}
 	if err := ensureRemoteDir(channel, remotePath); err != nil {
 		return err
@@ -759,10 +809,10 @@ func uploadRecursive(channel ssh3.Channel, localPath, remotePath string) error {
 			return err
 		}
 		if childInfo.IsDir() {
-			if err := uploadRecursive(channel, childLocal, childRemote); err != nil {
+			if err := uploadRecursive(channel, childLocal, childRemote, cancel); err != nil {
 				return err
 			}
-		} else if err := uploadFile(channel, childLocal, childRemote); err != nil {
+		} else if err := uploadFile(channel, childLocal, childRemote, cancel); err != nil {
 			return err
 		}
 	}
@@ -816,6 +866,8 @@ func printHelp() {
   lls [path]      list local directory
   lpwd            print local working directory
   exit/quit       exit
+
+Ctrl+C during a get/put cancels the transfer and returns to the prompt.
 
 Paths are parsed like OpenSSH sftp: single quotes ('...') and double quotes
 ("...") protect spaces and metacharacters, and a backslash escapes the next
@@ -909,7 +961,7 @@ func doRequest(channel ssh3.Channel, req *Request) (*Response, error) {
 	return ReceiveResponse(channel)
 }
 
-func downloadFile(channel ssh3.Channel, remotePath, localPath string) error {
+func downloadFile(channel ssh3.Channel, remotePath, localPath string, cancel *transferCancel) error {
 	statResp, err := doRequest(channel, &Request{Cmd: "stat", Path: remotePath})
 	if err != nil {
 		return err
@@ -925,10 +977,10 @@ func downloadFile(channel ssh3.Channel, remotePath, localPath string) error {
 	if statResp.Info != nil {
 		total = statResp.Info.Size
 	}
-	return downloadFileContents(channel, remotePath, localPath, total)
+	return downloadFileContents(channel, remotePath, localPath, total, cancel)
 }
 
-func uploadFile(channel ssh3.Channel, localPath, remotePath string) error {
+func uploadFile(channel ssh3.Channel, localPath, remotePath string, cancel *transferCancel) error {
 	f, err := os.Open(localPath)
 	if err != nil {
 		return err
@@ -943,7 +995,7 @@ func uploadFile(channel ssh3.Channel, localPath, remotePath string) error {
 		return fmt.Errorf("cannot upload a directory")
 	}
 
-	prog := newProgress(filepath.Base(localPath), info.Size(), os.Stdout)
+	prog := newProgress(filepath.Base(localPath), info.Size(), os.Stdout, cancel)
 	done := false
 	defer func() {
 		if !done {
@@ -954,6 +1006,9 @@ func uploadFile(channel ssh3.Channel, localPath, remotePath string) error {
 	var offset int64
 	buf := make([]byte, ChunkSize)
 	for {
+		if prog.cancelled() {
+			return ErrCancelled
+		}
 		n, err := f.Read(buf)
 		if err != nil && err != io.EOF {
 			return err
