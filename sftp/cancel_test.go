@@ -59,7 +59,7 @@ func TestUploadFileCancelled(t *testing.T) {
 
 	cancel := &transferCancel{}
 	ch := &cancellingChannel{
-		MockChannel: newMockChannel(makeJSONDataMsg(&Response{ID: 1, OK: true})),
+		MockChannel: newMockChannel(makeResponseMsg(&Response{ID: 1, OK: true})),
 		cancel:      cancel,
 		cancelAt:    1, // interrupt as soon as the first chunk is sent
 	}
@@ -104,8 +104,8 @@ func TestDownloadFileCancelled(t *testing.T) {
 	cancel := &transferCancel{}
 	ch := &cancellingChannel{
 		MockChannel: newMockChannel(
-			makeJSONDataMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "remote.bin", Size: int64(ChunkSize * 4)}}),
-			makeJSONDataMsg(&Response{ID: 2, OK: true, Data: chunk}),
+			makeResponseMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "remote.bin", Size: int64(ChunkSize * 4)}}),
+			makeResponseMsg(&Response{ID: 2, OK: true, Data: chunk}),
 		),
 		cancel:   cancel,
 		cancelAt: 2, // interrupt as soon as the first get request is sent
