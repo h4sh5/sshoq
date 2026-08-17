@@ -19,9 +19,9 @@ const ChunkSize = 128 * 1024
 // TransferWindow is the number of in-flight read/write requests the pipelined
 // transfer loops keep queued. On links with non-trivial round-trip time this
 // masks the per-chunk serialisation latency and dramatically improves
-// throughput, especially for small chunks. A value of 8 is a good default;
+// throughput, especially for small chunks. A value of 32 is a good default;
 // very high-latency links can benefit from larger values.
-const TransferWindow = 8
+const TransferWindow = 32
 
 // maxFrameSize caps the size of a single protocol frame. The protocol is
 // length-prefixed so a corrupt or hostile stream could otherwise claim a
