@@ -32,12 +32,15 @@ type progress struct {
 	drawn    bool
 	out      io.Writer
 	inplace  bool
+	cancel   *transferCancel
 }
 
 // newProgress creates a progress reporter for the transfer of name whose
 // total size is total bytes (0 when unknown). Output is written to out and,
-// when out is a terminal, updated in place with carriage returns.
-func newProgress(name string, total int64, out io.Writer) *progress {
+// when out is a terminal, updated in place with carriage returns. cancel is
+// the cancellation flag of the enclosing transfer (nil when the transfer is
+// not cancellable).
+func newProgress(name string, total int64, out io.Writer, cancel *transferCancel) *progress {
 	inplace := false
 	if f, ok := out.(*os.File); ok {
 		inplace = term.IsTerminal(int(f.Fd()))
@@ -48,7 +51,15 @@ func newProgress(name string, total int64, out io.Writer) *progress {
 		start:   time.Now(),
 		out:     out,
 		inplace: inplace,
+		cancel:  cancel,
 	}
+}
+
+// cancelled reports whether the transfer has been cancelled by the user
+// (Ctrl+C in interactive mode, SIGINT in scp mode). Transfer loops check it
+// between chunks and stop as soon as it is set.
+func (p *progress) cancelled() bool {
+	return p.cancel.cancelled()
 }
 
 // add records that n more bytes have been transferred. For terminal output

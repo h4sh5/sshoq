@@ -612,7 +612,7 @@ func TestDownloadFile(t *testing.T) {
 		makeJSONDataMsg(done),
 	)
 
-	if err := downloadFile(ch, "remote.txt", localPath); err != nil {
+	if err := downloadFile(ch, "remote.txt", localPath, nil); err != nil {
 		t.Fatalf("downloadFile error: %v", err)
 	}
 	got, err := os.ReadFile(localPath)
@@ -626,7 +626,7 @@ func TestDownloadFile(t *testing.T) {
 
 func TestDownloadFile_StatFail(t *testing.T) {
 	ch := newMockChannel(makeJSONDataMsg(&Response{ID: 1, OK: false, Error: "no such file"}))
-	err := downloadFile(ch, "missing", filepath.Join(t.TempDir(), "out"))
+	err := downloadFile(ch, "missing", filepath.Join(t.TempDir(), "out"), nil)
 	if err == nil {
 		t.Fatal("expected error for stat failure")
 	}
@@ -644,7 +644,7 @@ func TestUploadFile(t *testing.T) {
 
 	// Verify that uploadFile sends the data through the channel without error.
 	// The remote side would write the file; our mock just acknowledges.
-	if err := uploadFile(ch, localPath, "remote.txt"); err != nil {
+	if err := uploadFile(ch, localPath, "remote.txt", nil); err != nil {
 		t.Fatalf("uploadFile error: %v", err)
 	}
 	// One chunk was sent because the content is smaller than ChunkSize.
@@ -668,7 +668,7 @@ func TestDownloadRecursive(t *testing.T) {
 		makeJSONDataMsg(&Response{ID: 8, OK: true, Data: []byte{}}),
 	)
 
-	if err := downloadRecursive(ch, "remote-dir", localRoot); err != nil {
+	if err := downloadRecursive(ch, "remote-dir", localRoot, nil); err != nil {
 		t.Fatalf("downloadRecursive error: %v", err)
 	}
 
@@ -704,7 +704,7 @@ func TestUploadRecursive(t *testing.T) {
 		makeJSONDataMsg(&Response{ID: 5, OK: true}),
 	)
 
-	if err := uploadRecursive(ch, localRoot, "remote-dir"); err != nil {
+	if err := uploadRecursive(ch, localRoot, "remote-dir", nil); err != nil {
 		t.Fatalf("uploadRecursive error: %v", err)
 	}
 	if len(ch.Writes) != 5 {
@@ -718,7 +718,7 @@ func TestUploadFile_DirectoryError(t *testing.T) {
 	os.Mkdir(dirPath, 0755)
 
 	ch := newMockChannel()
-	err := uploadFile(ch, dirPath, "/remote/file")
+	err := uploadFile(ch, dirPath, "/remote/file", nil)
 	if err == nil || err.Error() != "cannot upload a directory" {
 		t.Fatalf("expected directory upload error, got: %v", err)
 	}
@@ -1437,7 +1437,7 @@ func TestClientDoGetNoGlob(t *testing.T) {
 		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
 	)
 
-	if err := doGet(ch, localDir, "/remote", []string{"get", "remote.txt"}); err != nil {
+	if err := doGet(ch, localDir, "/remote", []string{"get", "remote.txt"}, nil); err != nil {
 		t.Fatalf("doGet error: %v", err)
 	}
 
@@ -1473,7 +1473,7 @@ func TestClientDoGetWildcard(t *testing.T) {
 		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
 	)
 
-	if err := doGet(ch, localDir, "/remote/path", []string{"get", "test*"}); err != nil {
+	if err := doGet(ch, localDir, "/remote/path", []string{"get", "test*"}, nil); err != nil {
 		t.Fatalf("doGet error: %v", err)
 	}
 
@@ -1512,7 +1512,7 @@ func TestClientDoGetNoMatch(t *testing.T) {
 		Entries: lsEntries("one", "two"),
 	}))
 
-	if err := doGet(ch, localDir, "/remote", []string{"get", "zzz*"}); err != nil {
+	if err := doGet(ch, localDir, "/remote", []string{"get", "zzz*"}, nil); err != nil {
 		t.Fatalf("doGet error: %v", err)
 	}
 	if len(ch.Writes) != 1 {
@@ -1529,7 +1529,7 @@ func TestClientDoGetNoMatch(t *testing.T) {
 
 func TestClientDoGetInvalidPattern(t *testing.T) {
 	ch := newMockChannel(makeJSONDataMsg(&Response{OK: true, Entries: lsEntries("a")}))
-	err := doGet(ch, t.TempDir(), "/remote", []string{"get", "["})
+	err := doGet(ch, t.TempDir(), "/remote", []string{"get", "["}, nil)
 	if err == nil {
 		t.Fatal("expected error for invalid glob pattern")
 	}
@@ -1545,7 +1545,7 @@ func TestClientDoGetRecursiveDir(t *testing.T) {
 		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
 	)
 
-	if err := doGet(ch, localDir, "/remote", []string{"get", "-r", "d"}); err != nil {
+	if err := doGet(ch, localDir, "/remote", []string{"get", "-r", "d"}, nil); err != nil {
 		t.Fatalf("doGet -r dir error: %v", err)
 	}
 
@@ -1584,7 +1584,7 @@ func TestClientDoGetRecursiveWildcard(t *testing.T) {
 		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
 	)
 
-	if err := doGet(ch, localDir, "/remote/path", []string{"get", "-r", "test*"}); err != nil {
+	if err := doGet(ch, localDir, "/remote/path", []string{"get", "-r", "test*"}, nil); err != nil {
 		t.Fatalf("doGet -r wildcard error: %v", err)
 	}
 
@@ -1631,7 +1631,7 @@ func TestClientDoGetRecursiveWildcardNoMatch(t *testing.T) {
 		Entries: lsEntries("one", "two"),
 	}))
 
-	if err := doGet(ch, localDir, "/remote", []string{"get", "-r", "zzz*"}); err != nil {
+	if err := doGet(ch, localDir, "/remote", []string{"get", "-r", "zzz*"}, nil); err != nil {
 		t.Fatalf("doGet error: %v", err)
 	}
 	if len(ch.Writes) != 1 {

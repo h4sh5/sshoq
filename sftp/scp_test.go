@@ -19,7 +19,7 @@ func TestScpUploadFileToTrailingSlashTarget(t *testing.T) {
 		makeJSONDataMsg(&Response{ID: 1, OK: true}),
 	)
 
-	if err := scpUpload(ch, false, localPath, "/tmp/"); err != nil {
+	if err := scpUpload(ch, false, localPath, "/tmp/", nil); err != nil {
 		t.Fatalf("scpUpload error: %v", err)
 	}
 
@@ -48,7 +48,7 @@ func TestScpUploadFileToExistingRemoteDir(t *testing.T) {
 		makeJSONDataMsg(&Response{ID: 2, OK: true}),
 	)
 
-	if err := scpUpload(ch, false, localPath, "/tmp/remotedir"); err != nil {
+	if err := scpUpload(ch, false, localPath, "/tmp/remotedir", nil); err != nil {
 		t.Fatalf("scpUpload error: %v", err)
 	}
 
@@ -83,7 +83,7 @@ func TestScpUploadFileToNewRemoteName(t *testing.T) {
 		makeJSONDataMsg(&Response{ID: 2, OK: true}),
 	)
 
-	if err := scpUpload(ch, false, localPath, "/tmp/remotefile"); err != nil {
+	if err := scpUpload(ch, false, localPath, "/tmp/remotefile", nil); err != nil {
 		t.Fatalf("scpUpload error: %v", err)
 	}
 
@@ -107,7 +107,7 @@ func TestScpUploadDirectoryWithoutRecursive(t *testing.T) {
 	os.Mkdir(localDir, 0755)
 
 	ch := newMockChannel()
-	err := scpUpload(ch, false, localDir, "/tmp/")
+	err := scpUpload(ch, false, localDir, "/tmp/", nil)
 	if err == nil {
 		t.Fatal("expected error for directory upload without -r")
 	}
@@ -149,7 +149,7 @@ func TestScpUploadRecursiveDirectoryToTrailingSlashTarget(t *testing.T) {
 		makeJSONDataMsg(&Response{ID: 8, OK: true}),
 	)
 
-	if err := scpUpload(ch, true, localDir, "/tmp/"); err != nil {
+	if err := scpUpload(ch, true, localDir, "/tmp/", nil); err != nil {
 		t.Fatalf("scpUpload -r error: %v", err)
 	}
 
@@ -179,7 +179,7 @@ func TestScpDownloadToExistingLocalDir(t *testing.T) {
 		makeJSONDataMsg(&Response{ID: 3, OK: true, Data: []byte{}}),
 	)
 
-	if err := scpDownload(ch, false, "/etc/remote.txt", tmp); err != nil {
+	if err := scpDownload(ch, false, "/etc/remote.txt", tmp, nil); err != nil {
 		t.Fatalf("scpDownload error: %v", err)
 	}
 
@@ -217,7 +217,7 @@ func TestScpDownloadToTrailingSlashLocalTarget(t *testing.T) {
 	)
 
 	target := filepath.Join(tmp, "out") + string(filepath.Separator)
-	if err := scpDownload(ch, false, "/etc/remote.txt", target); err != nil {
+	if err := scpDownload(ch, false, "/etc/remote.txt", target, nil); err != nil {
 		t.Fatalf("scpDownload error: %v", err)
 	}
 
@@ -244,7 +244,7 @@ func TestScpDownloadToNewLocalName(t *testing.T) {
 	)
 
 	newName := filepath.Join(tmp, "newname")
-	if err := scpDownload(ch, false, "/etc/remote.txt", newName); err != nil {
+	if err := scpDownload(ch, false, "/etc/remote.txt", newName, nil); err != nil {
 		t.Fatalf("scpDownload error: %v", err)
 	}
 
@@ -271,7 +271,7 @@ func TestScpDownloadRecursiveToExistingLocalDir(t *testing.T) {
 		makeJSONDataMsg(&Response{ID: 4, OK: true, Data: []byte{}}),
 	)
 
-	if err := scpDownload(ch, true, "/etc/nginx", tmp); err != nil {
+	if err := scpDownload(ch, true, "/etc/nginx", tmp, nil); err != nil {
 		t.Fatalf("scpDownload -r error: %v", err)
 	}
 
@@ -288,7 +288,7 @@ func TestScpDownloadRecursiveToExistingLocalDir(t *testing.T) {
 // path fails cleanly.
 func TestScpUploadMissingLocalFile(t *testing.T) {
 	ch := newMockChannel()
-	err := scpUpload(ch, false, "/nonexistent/file.txt", "/tmp/")
+	err := scpUpload(ch, false, "/nonexistent/file.txt", "/tmp/", nil)
 	if err == nil {
 		t.Fatal("expected error for missing local file")
 	}

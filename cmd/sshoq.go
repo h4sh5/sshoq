@@ -968,6 +968,11 @@ func ClientMain() int {
 		log.Error().Msgf("the process exited with signal %s: %s", sessionError.Signal, sessionError.ErrorMessageUTF8)
 		return -1
 	default:
+		if errors.Is(err, sshoqsftp.ErrCancelled) {
+			// The transfer was interrupted by Ctrl+C: exit like a process
+			// killed by SIGINT (128 + 2) instead of reporting an error.
+			return 130
+		}
 		if err != nil {
 			log.Error().Msgf("an error was encountered when running the session: %s", sessionError)
 			return -1

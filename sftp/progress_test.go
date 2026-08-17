@@ -62,7 +62,7 @@ func nanValue() float64 {
 
 func TestProgressNonTerminalPrintsFinalLineOnly(t *testing.T) {
 	var buf bytes.Buffer
-	p := newProgress("file.txt", 1000, &buf)
+	p := newProgress("file.txt", 1000, &buf, nil)
 	p.add(420)
 	// Non-terminal output: nothing is drawn until finish.
 	if buf.Len() != 0 {
@@ -79,7 +79,7 @@ func TestProgressNonTerminalPrintsFinalLineOnly(t *testing.T) {
 
 func TestProgressUnknownTotalOmitsPercentage(t *testing.T) {
 	var buf bytes.Buffer
-	p := newProgress("unknown.bin", 0, &buf)
+	p := newProgress("unknown.bin", 0, &buf, nil)
 	p.add(2048)
 	p.finish()
 	got := buf.String()
