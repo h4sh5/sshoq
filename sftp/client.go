@@ -31,6 +31,17 @@ func RunInteractiveClient(c *client.Client) error {
 
 	localDir, _ := os.Getwd()
 	remoteDir := "."
+	// The server starts every SFTP session in the authenticated user's home
+	// directory, so the first pwd reveals it. It backs the `cd`/`cd ~` →
+	// $HOME behavior, like OpenSSH sftp's bare `cd`.
+	homeDir := remoteDir
+	if pwdResp, err := doRequest(channel, &Request{Cmd: "pwd"}); err == nil && pwdResp.OK {
+		remoteDir = pwdResp.Path
+		homeDir = pwdResp.Path
+	}
+	// The previous remote directory, for `cd -`.
+	prevDir := ""
+	hasPrevDir := false
 
 	input, err := newInteractiveReader()
 	if err != nil {
@@ -101,14 +112,14 @@ func RunInteractiveClient(c *client.Client) error {
 			fmt.Println(localDir)
 
 		case "cd":
-			target := remoteDir
+			arg := ""
 			if len(parts) > 1 {
-				arg := undoGlobEscape(parts[1])
-				if path.IsAbs(arg) {
-					target = arg
-				} else {
-					target = path.Join(remoteDir, arg)
-				}
+				arg = undoGlobEscape(parts[1])
+			}
+			target, ok := resolveCDTarget(arg, remoteDir, homeDir, prevDir, hasPrevDir)
+			if !ok {
+				fmt.Fprintln(os.Stderr, "cd: no previous directory")
+				continue
 			}
 			resp, err := doRequest(channel, &Request{Cmd: "cd", Path: target})
 			if err != nil {
@@ -118,6 +129,7 @@ func RunInteractiveClient(c *client.Client) error {
 			if !resp.OK {
 				fmt.Fprintf(os.Stderr, "cd: %s\n", resp.Error)
 			} else {
+				prevDir, hasPrevDir = remoteDir, true
 				pwdResp, _ := doRequest(channel, &Request{Cmd: "pwd"})
 				if pwdResp != nil && pwdResp.OK {
 					remoteDir = pwdResp.Path
@@ -257,6 +269,30 @@ func RunInteractiveClient(c *client.Client) error {
 	}
 
 	return nil
+}
+
+// resolveCDTarget computes the remote path a `cd` command should change to,
+// mirroring OpenSSH sftp and shell cd semantics:
+//   - no argument, "~" or "~/..." resolve to the user's home directory;
+//   - "-" resolves to the previous directory (ok is false when there is none);
+//   - absolute paths are used as-is;
+//   - any other path is resolved against the current remote directory.
+func resolveCDTarget(arg, remoteDir, homeDir, prevDir string, hasPrevDir bool) (target string, ok bool) {
+	switch {
+	case arg == "" || arg == "~":
+		return homeDir, true
+	case strings.HasPrefix(arg, "~/"):
+		return path.Join(homeDir, arg[2:]), true
+	case arg == "-":
+		if !hasPrevDir {
+			return "", false
+		}
+		return prevDir, true
+	case path.IsAbs(arg):
+		return arg, true
+	default:
+		return path.Join(remoteDir, arg), true
+	}
 }
 
 // newCompleter builds the tab-completion callback for the interactive SFTP
@@ -854,7 +890,8 @@ func ensureRemoteDir(channel ssh3.Channel, remotePath string) error {
 
 func printHelp() {
 	fmt.Println(`Commands:
-  cd <path>       change remote directory
+  cd [path]       change remote directory (no argument or "~" goes to $HOME,
+                  "-" goes to the previous directory)
   ls [path]       list remote directory (path may contain * ? [glob] patterns)
   pwd             print remote working directory
   get [-r] <src> [dst]   download remote file or directory (src may contain * ? [glob] patterns)
