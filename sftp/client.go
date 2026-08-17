@@ -169,31 +169,9 @@ func RunInteractiveClient(c *client.Client) error {
 			}
 
 		case "put":
-			recursive, localSource, remoteTarget, err := parseTransferArgs(parts, "put")
-			if err != nil {
-				fmt.Println(err.Error())
-				continue
-			}
-			// The source is not globbed by this client, so the escaped path is
-			// fully un-escaped to the literal file name.
-			localFile := unescape(localSource)
-			if !filepath.IsAbs(localFile) {
-				localFile = filepath.Join(localDir, localFile)
-			}
-			remoteFile := undoGlobEscape(remoteTarget)
-			if remoteFile == "" {
-				remoteFile = filepath.Base(localFile)
-			}
-			if !path.IsAbs(remoteFile) {
-				remoteFile = path.Join(remoteDir, remoteFile)
-			}
-
 			cancel := &transferCancel{}
-			err = input.runTransfer(cancel, func() error {
-				if recursive {
-					return uploadRecursive(channel, localFile, remoteFile, cancel)
-				}
-				return uploadFile(channel, localFile, remoteFile, cancel)
+			err := input.runTransfer(cancel, func() error {
+				return doPut(channel, localDir, remoteDir, parts, cancel)
 			})
 			if err != nil {
 				if errors.Is(err, ErrCancelled) {
@@ -615,16 +593,48 @@ func doGet(channel ssh3.Channel, localDir, remoteDir string, parts []string, can
 		if !resp.OK {
 			return fmt.Errorf("%s", resp.Error)
 		}
+		var matched []FileInfo
 		for _, e := range resp.Entries {
 			ok, err := path.Match(pattern, e.Name)
 			if err != nil {
 				return fmt.Errorf("invalid pattern \"%s\": %w", pattern, err)
 			}
-			if !ok {
-				continue
+			if ok {
+				matched = append(matched, e)
 			}
+		}
+
+		// The local destination is a literal path (not globbed): remove the
+		// escaping makeargv preserved for glob matching and resolve it against
+		// the local working directory. A trailing separator marks the
+		// destination as a directory even when it does not exist yet;
+		// otherwise an existing local directory is detected with a stat.
+		destDir := localDir
+		destIsDir := true
+		if target := undoGlobEscape(localTarget); target != "" {
+			destDir = resolveLocalPath(localDir, target)
+			destIsDir = false
+			if strings.HasSuffix(target, string(filepath.Separator)) {
+				destIsDir = true
+			} else if info, err := os.Stat(destDir); err == nil && info.IsDir() {
+				destIsDir = true
+			}
+		}
+
+		// A single match may target a file name; multiple matches require a
+		// directory destination (or none, in which case the files are placed
+		// in the local working directory).
+		if len(matched) > 1 && !destIsDir {
+			return fmt.Errorf("cannot download %d files to %s: not a directory", len(matched), destDir)
+		}
+
+		for _, e := range matched {
 			remoteFile := path.Join(sourceDir, e.Name)
-			localFile := filepath.Join(localDir, filepath.Base(filepath.Clean(remoteFile)))
+			localFile := filepath.Join(destDir, e.Name)
+			if len(matched) == 1 && !destIsDir {
+				// A single match may target a file name directly.
+				localFile = destDir
+			}
 			if err := downloadOne(channel, remoteFile, localFile, recursive, cancel); err != nil {
 				return err
 			}
@@ -632,15 +642,26 @@ func doGet(channel ssh3.Channel, localDir, remoteDir string, parts []string, can
 		return nil
 	}
 
-	// No glob: preserve the previous single-target behavior.
+	// No glob: preserve the previous single-target behavior, but still resolve
+	// a destination that names an existing local directory (or ends with a
+	// path separator) by copying the file into it under its own basename,
+	// mirroring the scp/download semantics.
 	remoteFile := sourceDir
 	// The local target is not globbed: undo the escaping of glob
 	// metacharacters, mirroring OpenSSH's undo_glob_escape for get targets.
 	localFile := undoGlobEscape(localTarget)
-	if localFile == "" {
-		localFile = filepath.Base(filepath.Clean(remoteFile))
+	base := filepath.Base(filepath.Clean(remoteFile))
+	switch {
+	case localFile == "":
+		localFile = base
+	case strings.HasSuffix(localFile, string(filepath.Separator)):
+		localFile = filepath.Join(localFile, base)
+	default:
+		if info, err := os.Stat(resolveLocalPath(localDir, localFile)); err == nil && info.IsDir() {
+			localFile = filepath.Join(localFile, base)
+		}
 	}
-	localFile = filepath.Join(localDir, localFile)
+	localFile = resolveLocalPath(localDir, localFile)
 	return downloadOne(channel, remoteFile, localFile, recursive, cancel)
 }
 
@@ -653,6 +674,105 @@ func downloadOne(channel ssh3.Channel, remoteFile, localFile string, recursive b
 		return downloadRecursive(channel, remoteFile, localFile, cancel)
 	}
 	return downloadFile(channel, remoteFile, localFile, cancel)
+}
+
+// doPut uploads a local file or directory, or every local file matching a
+// glob pattern in the source, to the remote filesystem. The source is
+// expanded against the local filesystem with filepath.Glob, which understands
+// the backslash escaping that makeargv preserves for glob metacharacters, so
+// escaped metacharacters are matched literally. When the pattern matches
+// nothing it is used as a literal path (mirroring OpenSSH's GLOB_NOCHECK), so
+// the transfer fails with the underlying "no such file" error. The -r flag
+// is honored in both cases: directories (whether matched by the pattern or
+// named directly) are transferred recursively via uploadOne. The remote
+// target is a literal path (not globbed): a single source may target a file
+// name or a directory, while multiple sources require an existing directory
+// (or no target, in which case each source is uploaded under its own
+// basename).
+func doPut(channel ssh3.Channel, localDir, remoteDir string, parts []string, cancel *transferCancel) error {
+	recursive, localSource, remoteTarget, err := parseTransferArgs(parts, "put")
+	if err != nil {
+		return err
+	}
+
+	// Expand a possibly-globbed source against the local filesystem. The
+	// pattern is resolved against the local working directory (the process
+	// working directory tracks it via lcd, but this keeps the source
+	// independent of the process CWD). filepath.Glob understands the backslash
+	// escaping that makeargv preserves for glob metacharacters, so escaped
+	// metacharacters are matched literally.
+	globSource := localSource
+	if !filepath.IsAbs(globSource) {
+		globSource = filepath.Join(localDir, localSource)
+	}
+	matches, globErr := filepath.Glob(globSource)
+	if globErr != nil {
+		return fmt.Errorf("invalid pattern \"%s\": %w", localSource, globErr)
+	}
+	if len(matches) == 0 {
+		// No matches: fall back to the literal path so the transfer fails with
+		// the underlying "no such file" error, mirroring OpenSSH's GLOB_NOCHECK
+		// behavior.
+		matches = []string{unescape(localSource)}
+	}
+
+	// The remote target is a literal path (not globbed): remove the escaping
+	// makeargv preserved for glob matching, then resolve it against the remote
+	// working directory for the directory check.
+	remoteTarget = undoGlobEscape(remoteTarget)
+	resolvedTarget := remoteTarget
+	if resolvedTarget != "" && !path.IsAbs(resolvedTarget) {
+		resolvedTarget = path.Join(remoteDir, resolvedTarget)
+	}
+
+	// A trailing separator marks the target as a directory even when it does
+	// not exist yet; an existing remote directory is detected with a stat.
+	targetIsDir := strings.HasSuffix(remoteTarget, "/")
+	if remoteTarget != "" && !targetIsDir && isRemoteDir(channel, resolvedTarget) {
+		targetIsDir = true
+	}
+
+	// A single source may target a file name; multiple sources require a
+	// directory target (or none, in which case each source is uploaded under
+	// its own basename).
+	if len(matches) > 1 && remoteTarget != "" && !targetIsDir {
+		return fmt.Errorf("cannot upload %d files to %s: not a directory", len(matches), remoteTarget)
+	}
+
+	for _, match := range matches {
+		localFile := match
+		if !filepath.IsAbs(localFile) {
+			localFile = filepath.Join(localDir, localFile)
+		}
+
+		remoteFile := filepath.Base(match)
+		switch {
+		case remoteTarget == "":
+			// The basename, uploaded into remoteDir below.
+		case targetIsDir:
+			remoteFile = path.Join(remoteTarget, remoteFile)
+		default:
+			remoteFile = remoteTarget
+		}
+		if !path.IsAbs(remoteFile) {
+			remoteFile = path.Join(remoteDir, remoteFile)
+		}
+
+		if err := uploadOne(channel, localFile, remoteFile, recursive, cancel); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// resolveLocalPath joins p with localDir when p is relative, returning p
+// unchanged when it is absolute. localDir is the client's current local
+// working directory, which is always absolute.
+func resolveLocalPath(localDir, p string) string {
+	if filepath.IsAbs(p) {
+		return p
+	}
+	return filepath.Join(localDir, p)
 }
 
 // globSplit reports whether arg contains unescaped glob metacharacters in its
@@ -818,6 +938,16 @@ func downloadFileContents(channel ssh3.Channel, remotePath, localPath string, to
 	return nil
 }
 
+// uploadOne uploads localFile to remoteFile, descending into directories when
+// recursive is set. It is the upload counterpart of downloadOne and is shared
+// by the glob and non-glob paths of doPut.
+func uploadOne(channel ssh3.Channel, localFile, remoteFile string, recursive bool, cancel *transferCancel) error {
+	if recursive {
+		return uploadRecursive(channel, localFile, remoteFile, cancel)
+	}
+	return uploadFile(channel, localFile, remoteFile, cancel)
+}
+
 func uploadRecursive(channel ssh3.Channel, localPath, remotePath string, cancel *transferCancel) error {
 	if cancel.cancelled() {
 		return ErrCancelled
@@ -895,7 +1025,7 @@ func printHelp() {
   ls [path]       list remote directory (path may contain * ? [glob] patterns)
   pwd             print remote working directory
   get [-r] <src> [dst]   download remote file or directory (src may contain * ? [glob] patterns)
-  put [-r] <src> [dst]   upload local file or directory
+  put [-r] <src> [dst]   upload local file or directory (src may contain * ? [glob] patterns)
   mkdir <path>    create remote directory
   rm <file>       remove remote file
   rmdir <dir>     remove remote directory
