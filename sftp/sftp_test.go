@@ -19,6 +19,64 @@ import (
 	"github.com/h4sh5/sshoq/util/unix_util"
 )
 
+// windowedMockChannel is a mock channel that delays every response until at
+// least minWrites requests have been written to it. A client that transfers
+// synchronously (send one request, wait for its response, send the next)
+// would deadlock waiting for the first response before it can send the second
+// request; the pipelined transfer loops send their whole initial window up
+// front, so the pre-programmed responses are only served once the window is
+// full. This pins the pipelining behaviour that keeps the pipe to the server
+// full.
+type windowedMockChannel struct {
+	*ssh3.MockChannel
+	mu        sync.Mutex
+	cond      *sync.Cond
+	minWrites int
+	writes    int
+}
+
+func newWindowedMockChannel(minWrites int, msgs ...ssh3Messages.Message) *windowedMockChannel {
+	c := &windowedMockChannel{
+		MockChannel: ssh3.NewMockChannel(msgs...),
+		minWrites:   minWrites,
+	}
+	c.cond = sync.NewCond(&c.mu)
+	return c
+}
+
+func (c *windowedMockChannel) WriteData(dataBuf []byte, dataType ssh3Messages.SSHDataType) (int, error) {
+	c.mu.Lock()
+	c.writes++
+	c.cond.Broadcast()
+	c.mu.Unlock()
+	return c.MockChannel.WriteData(dataBuf, dataType)
+}
+
+func (c *windowedMockChannel) NextMessage() (ssh3Messages.Message, error) {
+	c.mu.Lock()
+	for c.writes < c.minWrites {
+		c.cond.Wait()
+	}
+	c.mu.Unlock()
+	return c.MockChannel.NextMessage()
+}
+
+// runWithTimeout runs fn and fails the test if it does not return within the
+// deadline, so a regression to a synchronous transfer (which would deadlock
+// against a windowedMockChannel) fails promptly instead of hanging the suite.
+func runWithTimeout(t *testing.T, what string, fn func() error) error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- fn() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s did not complete: the transfer is not pipelining", what)
+		return nil
+	}
+}
+
 func currentTestUser(dir string) *unix_util.User {
 	username := ""
 	if u, err := osuser.Current(); err == nil {
@@ -750,8 +808,160 @@ func TestDoRequest(t *testing.T) {
 // --- Chunked transfer size boundary tests ---
 
 func TestChunkSizeConstant(t *testing.T) {
-	if ChunkSize != 16*1024 {
-		t.Fatalf("ChunkSize expected %d, got %d", 16*1024, ChunkSize)
+	if ChunkSize != 32*1024 {
+		t.Fatalf("ChunkSize expected %d, got %d", 32*1024, ChunkSize)
+	}
+	if TransferWindow < 1 {
+		t.Fatalf("TransferWindow must be at least 1, got %d", TransferWindow)
+	}
+}
+
+// TestDownloadFileContentsPipelined verifies that the download keeps a window
+// of read requests in flight instead of waiting for each chunk's response
+// before asking for the next. The windowed mock channel refuses to answer
+// until the whole window has been written, so a synchronous client would
+// deadlock; the pipelined client sends the window up front and completes.
+func TestDownloadFileContentsPipelined(t *testing.T) {
+	tmp := t.TempDir()
+	localPath := filepath.Join(tmp, "out.bin")
+
+	// Three full chunks, distinct per chunk so reassembly order is verifiable.
+	const n = 3
+	total := int64(n) * ChunkSize
+	var msgs []ssh3Messages.Message
+	for i := 0; i < n; i++ {
+		msgs = append(msgs, makeJSONDataMsg(&Response{ID: uint64(i + 1), OK: true, Data: bytes.Repeat([]byte{byte('a' + i)}, ChunkSize)}))
+	}
+	// Each data response triggers a refill request beyond the end of the
+	// file, which the server answers with an empty payload.
+	for i := 0; i < n; i++ {
+		msgs = append(msgs, makeJSONDataMsg(&Response{ID: uint64(n + i + 1), OK: true, Data: []byte{}}))
+	}
+	// The initial window is min(TransferWindow, n); the channel must see the
+	// whole window before serving the first response.
+	ch := newWindowedMockChannel(n, msgs...)
+
+	if err := runWithTimeout(t, "pipelined download", func() error {
+		return downloadFileContents(ch, "remote.bin", localPath, total, nil)
+	}); err != nil {
+		t.Fatalf("downloadFileContents error: %v", err)
+	}
+
+	got, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("read downloaded file: %v", err)
+	}
+	if len(got) != int(total) {
+		t.Fatalf("expected %d bytes, got %d", total, len(got))
+	}
+	for i := 0; i < n; i++ {
+		want := bytes.Repeat([]byte{byte('a' + i)}, ChunkSize)
+		if !bytes.Equal(got[i*ChunkSize:(i+1)*ChunkSize], want) {
+			t.Fatalf("chunk %d corrupted", i)
+		}
+	}
+
+	// Every request must carry a chunk-aligned, strictly increasing offset
+	// (the initial window plus the refills as the responses arrive).
+	var reqs []Request
+	for _, w := range ch.Writes {
+		var req Request
+		if err := json.Unmarshal(w, &req); err != nil {
+			t.Fatalf("unmarshal request: %v", err)
+		}
+		if req.Cmd != "get" || req.Limit != ChunkSize || req.Offset%ChunkSize != 0 {
+			t.Fatalf("unexpected request: %+v", req)
+		}
+		reqs = append(reqs, req)
+	}
+	for i := 1; i < len(reqs); i++ {
+		if reqs[i].Offset <= reqs[i-1].Offset {
+			t.Fatalf("offsets not strictly increasing: %+v", reqs)
+		}
+	}
+}
+
+// TestUploadFilePipelined mirrors TestDownloadFileContentsPipelined for the
+// upload direction: the whole window of write requests must be sent before the
+// first acknowledgement is consumed, and the offsets must be chunk-aligned.
+func TestUploadFilePipelined(t *testing.T) {
+	tmp := t.TempDir()
+	localPath := filepath.Join(tmp, "in.bin")
+
+	const n = 3
+	content := make([]byte, int64(n)*ChunkSize)
+	for i := range content {
+		content[i] = byte(i)
+	}
+	os.WriteFile(localPath, content, 0644)
+
+	var msgs []ssh3Messages.Message
+	for i := 0; i < n; i++ {
+		msgs = append(msgs, makeJSONDataMsg(&Response{ID: uint64(i + 1), OK: true}))
+	}
+	ch := newWindowedMockChannel(n, msgs...)
+
+	if err := runWithTimeout(t, "pipelined upload", func() error {
+		return uploadFile(ch, localPath, "remote.bin", nil)
+	}); err != nil {
+		t.Fatalf("uploadFile error: %v", err)
+	}
+
+	if len(ch.Writes) != n {
+		t.Fatalf("expected %d requests, got %d", n, len(ch.Writes))
+	}
+	for i, w := range ch.Writes {
+		var req Request
+		if err := json.Unmarshal(w, &req); err != nil {
+			t.Fatalf("unmarshal request %d: %v", i, err)
+		}
+		if req.Cmd != "put" || req.Offset != int64(i)*ChunkSize {
+			t.Fatalf("request %d: expected put offset=%d, got %s offset=%d",
+				i, i*ChunkSize, req.Cmd, req.Offset)
+		}
+		if !bytes.Equal(req.Data, content[i*ChunkSize:(i+1)*ChunkSize]) {
+			t.Fatalf("request %d: chunk data corrupted", i)
+		}
+	}
+}
+
+// TestDownloadFileContentsShortFinalChunk verifies that a file whose size is
+// not a multiple of the chunk size is reassembled correctly: every request
+// except the last asks for a full chunk and the final response carries the
+// short remainder.
+func TestDownloadFileContentsShortFinalChunk(t *testing.T) {
+	tmp := t.TempDir()
+	localPath := filepath.Join(tmp, "out.bin")
+
+	const n = 3
+	total := int64(n)*ChunkSize + 1234
+	var msgs []ssh3Messages.Message
+	for i := 0; i < n; i++ {
+		msgs = append(msgs, makeJSONDataMsg(&Response{ID: uint64(i + 1), OK: true, Data: bytes.Repeat([]byte{byte('a' + i)}, ChunkSize)}))
+	}
+	msgs = append(msgs, makeJSONDataMsg(&Response{ID: 4, OK: true, Data: bytes.Repeat([]byte{'d'}, 1234)}))
+	// The four data responses each trigger a refill request beyond the end of
+	// the file, answered with an empty payload.
+	for i := 0; i < 4; i++ {
+		msgs = append(msgs, makeJSONDataMsg(&Response{ID: 5 + uint64(i), OK: true, Data: []byte{}}))
+	}
+
+	ch := newWindowedMockChannel(4, msgs...)
+	if err := runWithTimeout(t, "short-final-chunk download", func() error {
+		return downloadFileContents(ch, "remote.bin", localPath, total, nil)
+	}); err != nil {
+		t.Fatalf("downloadFileContents error: %v", err)
+	}
+
+	got, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("read downloaded file: %v", err)
+	}
+	if int64(len(got)) != total {
+		t.Fatalf("expected %d bytes, got %d", total, len(got))
+	}
+	if !bytes.Equal(got[total-1234:], bytes.Repeat([]byte{'d'}, 1234)) {
+		t.Fatal("final short chunk corrupted")
 	}
 }
 

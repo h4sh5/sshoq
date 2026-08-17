@@ -10,7 +10,14 @@ import (
 	ssh3Messages "github.com/h4sh5/sshoq/message"
 )
 
-const ChunkSize = 16 * 1024
+const ChunkSize = 32 * 1024
+
+// TransferWindow is the number of in-flight read/write requests the pipelined
+// transfer loops keep queued. On links with non-trivial round-trip time this
+// masks the per-chunk serialisation latency and dramatically improves
+// throughput, especially for small chunks. A value of 8 is a good default;
+// very high-latency links can benefit from larger values.
+const TransferWindow = 8
 
 type Request struct {
 	ID     uint64 `json:"id"`

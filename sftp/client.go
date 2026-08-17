@@ -888,6 +888,17 @@ func downloadRecursive(channel ssh3.Channel, remotePath, localPath string, cance
 // total is the remote file size in bytes; 0 when it is unknown, in which case
 // the progress line shows the transferred bytes and speed without a
 // percentage.
+//
+// The transfer is pipelined: a window of read requests is kept in flight so
+// the server is always working on the next chunk while earlier chunks are
+// still in transit. The synchronous request/response loop this replaced (one
+// round trip per chunk) is what capped the transfer speed: with the per-chunk
+// serialisation overhead, throughput was bounded by ChunkSize/RTT regardless
+// of the network bandwidth. The server answers requests strictly in order and
+// returns an empty payload once the requested offset reaches the end of the
+// file, so responses are consumed in request order and the first empty
+// response terminates the transfer (responses already in flight beyond the
+// end of the file are drained so no stray messages pollute the channel).
 func downloadFileContents(channel ssh3.Channel, remotePath, localPath string, total int64, cancel *transferCancel) error {
 	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
 		return err
@@ -907,23 +918,60 @@ func downloadFileContents(channel ssh3.Channel, remotePath, localPath string, to
 		}
 	}()
 
-	var offset int64
-	for {
+	// Issue the initial window of read requests at chunk-aligned offsets. The
+	// stat that precedes this call provides the file size, which bounds the
+	// window: tiny files do not need a full window of requests. When the size
+	// is unknown a full window is issued; refilling is always driven by the
+	// server's end-of-file response, so files that grow or shrink between the
+	// stat and the transfer are still transferred fully.
+	window := TransferWindow
+	if total > 0 {
+		if chunks := int((total + ChunkSize - 1) / ChunkSize); chunks < window {
+			window = chunks
+		}
+	}
+	sent := 0
+	pending := 0
+	for pending < window {
 		if prog.cancelled() {
 			// Remove the partially downloaded file so it is not mistaken for
 			// a complete download.
 			os.Remove(localPath)
 			return ErrCancelled
 		}
-		resp, err := doRequest(channel, &Request{Cmd: "get", Path: remotePath, Offset: offset, Limit: ChunkSize})
+		if err := SendRequest(channel, &Request{Cmd: "get", Path: remotePath, Offset: int64(sent) * ChunkSize, Limit: ChunkSize}); err != nil {
+			return err
+		}
+		sent++
+		pending++
+	}
+
+	// Consume the responses in order, writing each chunk to the file, and keep
+	// the window full by sending the next request as each response arrives.
+	var offset int64
+	eof := false
+	for pending > 0 {
+		if prog.cancelled() {
+			os.Remove(localPath)
+			return ErrCancelled
+		}
+		resp, err := ReceiveResponse(channel)
 		if err != nil {
 			return err
 		}
 		if !resp.OK {
 			return fmt.Errorf("%s", resp.Error)
 		}
+		pending--
 		if len(resp.Data) == 0 {
-			break
+			// End of file: stop refilling the window and drain the responses
+			// already in flight (they are all empty as well).
+			eof = true
+			continue
+		}
+		if eof {
+			// Defensive: no data should arrive after EOF; ignore it.
+			continue
 		}
 		n, err := f.Write(resp.Data)
 		if err != nil {
@@ -931,6 +979,13 @@ func downloadFileContents(channel ssh3.Channel, remotePath, localPath string, to
 		}
 		offset += int64(n)
 		prog.add(int64(n))
+		// The response for the oldest request just arrived; send the next
+		// request to keep the window full.
+		if err := SendRequest(channel, &Request{Cmd: "get", Path: remotePath, Offset: int64(sent) * ChunkSize, Limit: ChunkSize}); err != nil {
+			return err
+		}
+		sent++
+		pending++
 	}
 	prog.finish()
 	fmt.Printf("Downloaded %s to %s (%d bytes)\n", remotePath, localPath, offset)
@@ -1170,33 +1225,101 @@ func uploadFile(channel ssh3.Channel, localPath, remotePath string, cancel *tran
 		}
 	}()
 
-	var offset int64
-	buf := make([]byte, ChunkSize)
-	for {
+	// Pipelined upload, mirroring the download: a window of write requests is
+	// kept in flight so the per-chunk round trip is amortised. The local file
+	// size determines the number of chunks, so exactly the right number of
+	// requests is issued and no stray responses are left on the channel.
+	total := info.Size()
+	chunks := int((total + ChunkSize - 1) / ChunkSize)
+	window := TransferWindow
+	if window > chunks {
+		window = chunks
+	}
+	if window < 1 {
+		window = 1
+	}
+
+	// readChunk reads the next chunk from the local file at its current
+	// position and returns the bytes and the file offset at which they were
+	// read. The offset is sent to the server so it writes at the right spot;
+	// io.ReadFull guarantees every chunk except a short final one is a full
+	// ChunkSize, so the offsets stay aligned with the server's writes.
+	filePos := int64(0)
+	readChunk := func() ([]byte, int64, error) {
+		buf := make([]byte, ChunkSize)
+		n, err := io.ReadFull(f, buf)
+		if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+			return nil, 0, err
+		}
+		off := filePos
+		filePos += int64(n)
+		if n == 0 {
+			return nil, off, nil // EOF: no more data
+		}
+		return buf[:n], off, nil
+	}
+
+	// Issue the initial window of write requests.
+	nextChunk := 0
+	pending := 0
+	for pending < window && nextChunk < chunks {
 		if prog.cancelled() {
 			return ErrCancelled
 		}
-		n, err := f.Read(buf)
-		if err != nil && err != io.EOF {
+		data, off, err := readChunk()
+		if err != nil {
 			return err
 		}
+		if len(data) > 0 {
+			if err := SendRequest(channel, &Request{Cmd: "put", Path: remotePath, Offset: off, Data: data}); err != nil {
+				return err
+			}
+		}
+		nextChunk++
+		pending++
+	}
+
+	// Consume the acknowledgements in order and refill the window as each one
+	// arrives. The response for chunk i acknowledges exactly
+	// min(ChunkSize, total-i*ChunkSize) bytes, so the progress display is
+	// updated as the server confirms each chunk.
+	acked := 0
+	for pending > 0 {
+		if prog.cancelled() {
+			return ErrCancelled
+		}
+		resp, err := ReceiveResponse(channel)
+		if err != nil {
+			return err
+		}
+		if !resp.OK {
+			return fmt.Errorf("%s", resp.Error)
+		}
+		n := int64(ChunkSize)
+		if remaining := total - int64(acked)*ChunkSize; remaining < n {
+			n = remaining
+		}
 		if n > 0 {
-			resp, err := doRequest(channel, &Request{Cmd: "put", Path: remotePath, Offset: offset, Data: buf[:n]})
+			prog.add(n)
+		}
+		acked++
+		pending--
+		if nextChunk < chunks {
+			data, off, err := readChunk()
 			if err != nil {
 				return err
 			}
-			if !resp.OK {
-				return fmt.Errorf("%s", resp.Error)
+			if len(data) > 0 {
+				if err := SendRequest(channel, &Request{Cmd: "put", Path: remotePath, Offset: off, Data: data}); err != nil {
+					return err
+				}
 			}
-			offset += int64(n)
-			prog.add(int64(n))
-		}
-		if err == io.EOF {
-			break
+			nextChunk++
+			pending++
 		}
 	}
 	prog.finish()
-	fmt.Printf("Uploaded %s to %s (%d bytes)\n", localPath, remotePath, offset)
+	fmt.Printf("Uploaded %s to %s (%d bytes)\n", localPath, remotePath, filePos)
 	done = true
 	return nil
 }
