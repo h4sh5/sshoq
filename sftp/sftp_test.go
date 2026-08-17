@@ -1646,6 +1646,497 @@ func TestClientDoGetRecursiveWildcardNoMatch(t *testing.T) {
 	}
 }
 
+func TestClientDoPutWildcard(t *testing.T) {
+	localDir := t.TempDir()
+	os.WriteFile(filepath.Join(localDir, "a.txt"), []byte("A"), 0644)
+	os.WriteFile(filepath.Join(localDir, "b.txt"), []byte("B"), 0644)
+	os.WriteFile(filepath.Join(localDir, "c.log"), []byte("C"), 0644)
+
+	ch := newMockChannel(
+		makeJSONDataMsg(&Response{ID: 1, OK: true}), // put a.txt
+		makeJSONDataMsg(&Response{ID: 2, OK: true}), // put b.txt
+	)
+
+	if err := doPut(ch, localDir, "/remote", []string{"put", "*.txt"}, nil); err != nil {
+		t.Fatalf("doPut error: %v", err)
+	}
+
+	if len(ch.Writes) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(ch.Writes))
+	}
+	var got Request
+	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Cmd != "put" || got.Path != "/remote/a.txt" {
+		t.Errorf("expected put /remote/a.txt, got %s %q", got.Cmd, got.Path)
+	}
+	if err := json.Unmarshal(ch.Writes[1], &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Cmd != "put" || got.Path != "/remote/b.txt" {
+		t.Errorf("expected put /remote/b.txt, got %s %q", got.Cmd, got.Path)
+	}
+}
+
+// TestClientDoPutWildcardSubdirPattern verifies that a put source whose
+// pattern spans a directory (e.g. sub/*.txt) is expanded against the local
+// filesystem, uploading each match under its basename.
+func TestClientDoPutWildcardSubdirPattern(t *testing.T) {
+	localDir := t.TempDir()
+	os.MkdirAll(filepath.Join(localDir, "sub"), 0o755)
+	os.WriteFile(filepath.Join(localDir, "sub", "one.txt"), []byte("1"), 0644)
+	os.WriteFile(filepath.Join(localDir, "sub", "two.TXT"), []byte("2"), 0644)
+	os.WriteFile(filepath.Join(localDir, "top.txt"), []byte("T"), 0644)
+
+	ch := newMockChannel(makeJSONDataMsg(&Response{ID: 1, OK: true}))
+
+	if err := doPut(ch, localDir, "/remote", []string{"put", "sub/*.txt"}, nil); err != nil {
+		t.Fatalf("doPut error: %v", err)
+	}
+	if len(ch.Writes) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(ch.Writes))
+	}
+	var got Request
+	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Cmd != "put" || got.Path != "/remote/one.txt" {
+		t.Fatalf("expected put /remote/one.txt, got %s %q", got.Cmd, got.Path)
+	}
+}
+
+// TestClientDoPutWildcardToRemoteDir verifies that a multi-match put to an
+// existing remote directory uploads each source into that directory under its
+// own basename.
+func TestClientDoPutWildcardToRemoteDir(t *testing.T) {
+	localDir := t.TempDir()
+	os.WriteFile(filepath.Join(localDir, "a.log"), []byte("A"), 0644)
+	os.WriteFile(filepath.Join(localDir, "b.log"), []byte("B"), 0644)
+
+	ch := newMockChannel(
+		makeJSONDataMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "logs", IsDir: true}}), // stat /remote/logs
+		makeJSONDataMsg(&Response{ID: 2, OK: true}),                                             // put a.log
+		makeJSONDataMsg(&Response{ID: 3, OK: true}),                                             // put b.log
+	)
+
+	if err := doPut(ch, localDir, "/remote", []string{"put", "*.log", "logs"}, nil); err != nil {
+		t.Fatalf("doPut error: %v", err)
+	}
+
+	if len(ch.Writes) != 3 {
+		t.Fatalf("expected 3 requests, got %d", len(ch.Writes))
+	}
+	var got Request
+	if err := json.Unmarshal(ch.Writes[1], &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Cmd != "put" || got.Path != "/remote/logs/a.log" {
+		t.Errorf("expected put /remote/logs/a.log, got %s %q", got.Cmd, got.Path)
+	}
+	if err := json.Unmarshal(ch.Writes[2], &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Cmd != "put" || got.Path != "/remote/logs/b.log" {
+		t.Errorf("expected put /remote/logs/b.log, got %s %q", got.Cmd, got.Path)
+	}
+}
+
+// TestClientDoPutWildcardToNonDirectory verifies that a multi-match put to a
+// non-directory remote target fails without uploading anything.
+func TestClientDoPutWildcardToNonDirectory(t *testing.T) {
+	localDir := t.TempDir()
+	os.WriteFile(filepath.Join(localDir, "a.log"), []byte("A"), 0644)
+	os.WriteFile(filepath.Join(localDir, "b.log"), []byte("B"), 0644)
+
+	ch := newMockChannel(makeJSONDataMsg(&Response{ID: 1, OK: false, Error: "no such file"}))
+
+	err := doPut(ch, localDir, "/remote", []string{"put", "*.log", "logs"}, nil)
+	if err == nil {
+		t.Fatal("expected error for multi-match put to non-directory")
+	}
+	if !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// TestClientDoPutSingleToRemoteDir verifies that a single-source put to an
+// existing remote directory copies the file into it under its own basename.
+func TestClientDoPutSingleToRemoteDir(t *testing.T) {
+	localDir := t.TempDir()
+	os.WriteFile(filepath.Join(localDir, "a.txt"), []byte("A"), 0644)
+
+	ch := newMockChannel(
+		makeJSONDataMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "dir", IsDir: true}}),
+		makeJSONDataMsg(&Response{ID: 2, OK: true}),
+	)
+
+	if err := doPut(ch, localDir, "/remote", []string{"put", "a.txt", "dir"}, nil); err != nil {
+		t.Fatalf("doPut error: %v", err)
+	}
+	if len(ch.Writes) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(ch.Writes))
+	}
+	var got Request
+	if err := json.Unmarshal(ch.Writes[1], &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Cmd != "put" || got.Path != "/remote/dir/a.txt" {
+		t.Fatalf("expected put /remote/dir/a.txt, got %s %q", got.Cmd, got.Path)
+	}
+}
+
+// TestClientDoPutSingleToNewName verifies that a single-source put to a target
+// that is neither an existing directory nor slash-terminated uses the target
+// as the remote file name verbatim.
+func TestClientDoPutSingleToNewName(t *testing.T) {
+	localDir := t.TempDir()
+	os.WriteFile(filepath.Join(localDir, "a.txt"), []byte("A"), 0644)
+
+	ch := newMockChannel(
+		makeJSONDataMsg(&Response{ID: 1, OK: false, Error: "no such file"}),
+		makeJSONDataMsg(&Response{ID: 2, OK: true}),
+	)
+
+	if err := doPut(ch, localDir, "/remote", []string{"put", "a.txt", "newname"}, nil); err != nil {
+		t.Fatalf("doPut error: %v", err)
+	}
+	if len(ch.Writes) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(ch.Writes))
+	}
+	var got Request
+	if err := json.Unmarshal(ch.Writes[1], &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Cmd != "put" || got.Path != "/remote/newname" {
+		t.Fatalf("expected put /remote/newname, got %s %q", got.Cmd, got.Path)
+	}
+}
+
+// TestClientDoPutEscapedGlob verifies that a glob metacharacter escaped with a
+// backslash is matched literally against the local filesystem, so a file named
+// "star*file" uploads as itself rather than being globbed.
+func TestClientDoPutEscapedGlob(t *testing.T) {
+	localDir := t.TempDir()
+	os.WriteFile(filepath.Join(localDir, "star*file"), []byte("S"), 0644)
+
+	ch := newMockChannel(makeJSONDataMsg(&Response{ID: 1, OK: true}))
+
+	// parts[1] is what makeargv produces for the typed `star\*file`.
+	if err := doPut(ch, localDir, "/remote", []string{"put", `star\*file`}, nil); err != nil {
+		t.Fatalf("doPut error: %v", err)
+	}
+	if len(ch.Writes) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(ch.Writes))
+	}
+	var got Request
+	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Cmd != "put" || got.Path != "/remote/star*file" {
+		t.Fatalf("expected put /remote/star*file, got %s %q", got.Cmd, got.Path)
+	}
+}
+
+// TestClientDoPutQuotedMetachar verifies the full parsing pipeline: a glob
+// metacharacter typed inside quotes is escaped by makeargv and then matched
+// literally by the local glob, so put 'star*file' uploads the literal file
+// (the same convention the get tests exercise).
+func TestClientDoPutQuotedMetachar(t *testing.T) {
+	localDir := t.TempDir()
+	os.WriteFile(filepath.Join(localDir, "star*file"), []byte("S"), 0644)
+
+	parts, _, _, _, err := makeargv(`put 'star*file'`, false)
+	if err != nil {
+		t.Fatalf("makeargv: %v", err)
+	}
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 parts, got %v", parts)
+	}
+	if parts[1] != `star\*file` {
+		t.Fatalf("expected escaped source %q, got %q", `star\*file`, parts[1])
+	}
+
+	ch := newMockChannel(makeJSONDataMsg(&Response{OK: true}))
+	if err := doPut(ch, localDir, "/remote", parts, nil); err != nil {
+		t.Fatalf("doPut error: %v", err)
+	}
+
+	var got Request
+	if len(ch.Writes) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(ch.Writes))
+	}
+	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Cmd != "put" || got.Path != "/remote/star*file" {
+		t.Fatalf("expected put /remote/star*file, got %s %q", got.Cmd, got.Path)
+	}
+}
+
+// TestClientDoPutNoMatch verifies that a put source with no matching local
+// file falls back to the literal path and fails with the underlying error.
+func TestClientDoPutNoMatch(t *testing.T) {
+	localDir := t.TempDir()
+
+	ch := newMockChannel()
+	err := doPut(ch, localDir, "/remote", []string{"put", "zzz*.txt"}, nil)
+	if err == nil {
+		t.Fatal("expected error for non-matching put source")
+	}
+	if !strings.Contains(err.Error(), "no such file") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// TestClientDoPutInvalidPattern verifies that a malformed put glob pattern is
+// rejected up front.
+func TestClientDoPutInvalidPattern(t *testing.T) {
+	localDir := t.TempDir()
+
+	ch := newMockChannel()
+	err := doPut(ch, localDir, "/remote", []string{"put", "["}, nil)
+	if err == nil {
+		t.Fatal("expected error for invalid glob pattern")
+	}
+}
+
+// TestClientDoPutRecursiveWildcard verifies that put -r with a glob source
+// transfers matched directories recursively through uploadOne.
+func TestClientDoPutRecursiveWildcard(t *testing.T) {
+	localDir := t.TempDir()
+	dirPath := filepath.Join(localDir, "d")
+	os.MkdirAll(dirPath, 0o755)
+	os.WriteFile(filepath.Join(dirPath, "f.txt"), []byte("hello"), 0644)
+	os.WriteFile(filepath.Join(localDir, "solo.txt"), []byte("solo"), 0644)
+
+	ch := newMockChannel(
+		makeJSONDataMsg(&Response{ID: 1, OK: false, Error: "no such file"}),                       // stat /remote/d
+		makeJSONDataMsg(&Response{ID: 2, OK: true, Info: &FileInfo{Name: "remote", IsDir: true}}), // stat /remote
+		makeJSONDataMsg(&Response{ID: 3, OK: true}),                                               // mkdir /remote/d
+		makeJSONDataMsg(&Response{ID: 4, OK: true}),                                               // put /remote/d/f.txt
+		makeJSONDataMsg(&Response{ID: 5, OK: true}),                                               // put /remote/solo.txt
+	)
+
+	if err := doPut(ch, localDir, "/remote", []string{"put", "-r", "*"}, nil); err != nil {
+		t.Fatalf("doPut -r error: %v", err)
+	}
+	if len(ch.Writes) != 5 {
+		t.Fatalf("expected 5 requests, got %d", len(ch.Writes))
+	}
+	var mkdirReq, putReq Request
+	if err := json.Unmarshal(ch.Writes[2], &mkdirReq); err != nil {
+		t.Fatalf("unmarshal mkdir: %v", err)
+	}
+	if mkdirReq.Cmd != "mkdir" || mkdirReq.Path != "/remote/d" {
+		t.Errorf("expected mkdir /remote/d, got %s %q", mkdirReq.Cmd, mkdirReq.Path)
+	}
+	if err := json.Unmarshal(ch.Writes[4], &putReq); err != nil {
+		t.Fatalf("unmarshal put: %v", err)
+	}
+	if putReq.Cmd != "put" || putReq.Path != "/remote/solo.txt" {
+		t.Errorf("expected put /remote/solo.txt, got %s %q", putReq.Cmd, putReq.Path)
+	}
+}
+
+// TestClientDoGetWildcardToLocalDir verifies that get with a glob source and an
+// existing local directory destination downloads each match into that
+// directory.
+func TestClientDoGetWildcardToLocalDir(t *testing.T) {
+	localDir := t.TempDir()
+	destDir := filepath.Join(localDir, "dest")
+	os.MkdirAll(destDir, 0o755)
+
+	ch := newMockChannel(
+		makeJSONDataMsg(&Response{OK: true, Entries: lsEntries("test", "testa", "nope")}),
+		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "test", Size: 5}}),
+		makeJSONDataMsg(&Response{OK: true, Data: []byte("hello")}),
+		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
+		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "testa", Size: 5}}),
+		makeJSONDataMsg(&Response{OK: true, Data: []byte("world")}),
+		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
+	)
+
+	if err := doGet(ch, localDir, "/remote/path", []string{"get", "test*", "dest"}, nil); err != nil {
+		t.Fatalf("doGet error: %v", err)
+	}
+
+	// The ls request must target the source parent directory, not the
+	// destination.
+	var got Request
+	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Cmd != "ls" || got.Path != "/remote/path" {
+		t.Fatalf("expected ls /remote/path, got %s %q", got.Cmd, got.Path)
+	}
+
+	for name, want := range map[string]string{"test": "hello", "testa": "world"} {
+		content, err := os.ReadFile(filepath.Join(destDir, name))
+		if err != nil {
+			t.Fatalf("read %s from destination: %v", name, err)
+		}
+		if string(content) != want {
+			t.Errorf("unexpected content for %s: %q", name, content)
+		}
+	}
+	// Non-matching entries must not be downloaded anywhere.
+	if _, err := os.Stat(filepath.Join(localDir, "nope")); !os.IsNotExist(err) {
+		t.Errorf("expected no download for non-matching entry, stat err: %v", err)
+	}
+}
+
+// TestClientDoGetWildcardToTrailingSlashDir verifies that get with a glob
+// source and a slash-terminated destination treats the destination as a
+// directory even when it does not exist yet, creating it for the download.
+func TestClientDoGetWildcardToTrailingSlashDir(t *testing.T) {
+	localDir := t.TempDir()
+
+	ch := newMockChannel(
+		makeJSONDataMsg(&Response{OK: true, Entries: lsEntries("test")}),
+		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "test", Size: 5}}),
+		makeJSONDataMsg(&Response{OK: true, Data: []byte("hello")}),
+		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
+	)
+
+	if err := doGet(ch, localDir, "/remote/path", []string{"get", "test*", "newdir/"}, nil); err != nil {
+		t.Fatalf("doGet error: %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(localDir, "newdir", "test"))
+	if err != nil {
+		t.Fatalf("read downloaded file: %v", err)
+	}
+	if string(content) != "hello" {
+		t.Fatalf("unexpected content: %q", content)
+	}
+}
+
+// TestClientDoGetWildcardSingleToFile verifies that a get whose glob source
+// matches a single entry and whose destination is not a directory uses the
+// destination as the downloaded file name verbatim.
+func TestClientDoGetWildcardSingleToFile(t *testing.T) {
+	localDir := t.TempDir()
+
+	ch := newMockChannel(
+		makeJSONDataMsg(&Response{OK: true, Entries: lsEntries("test")}),
+		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "test", Size: 5}}),
+		makeJSONDataMsg(&Response{OK: true, Data: []byte("hello")}),
+		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
+	)
+
+	if err := doGet(ch, localDir, "/remote/path", []string{"get", "test*", "out.txt"}, nil); err != nil {
+		t.Fatalf("doGet error: %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(localDir, "out.txt"))
+	if err != nil {
+		t.Fatalf("read downloaded file: %v", err)
+	}
+	if string(content) != "hello" {
+		t.Fatalf("unexpected content: %q", content)
+	}
+}
+
+// TestClientDoGetWildcardMultiToNonDir verifies that a get whose glob source
+// matches multiple entries cannot target a file: the destination must be a
+// directory.
+func TestClientDoGetWildcardMultiToNonDir(t *testing.T) {
+	localDir := t.TempDir()
+
+	ch := newMockChannel(makeJSONDataMsg(&Response{OK: true, Entries: lsEntries("test", "testa")}))
+
+	err := doGet(ch, localDir, "/remote/path", []string{"get", "test*", "out.txt"}, nil)
+	if err == nil {
+		t.Fatal("expected error for multi-match get to non-directory")
+	}
+	if !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// TestClientDoGetToExistingLocalDir verifies that a non-glob get to an
+// existing local directory copies the remote file into it under its own
+// basename.
+func TestClientDoGetToExistingLocalDir(t *testing.T) {
+	localDir := t.TempDir()
+	destDir := filepath.Join(localDir, "dest")
+	os.MkdirAll(destDir, 0o755)
+
+	ch := newMockChannel(
+		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "remote.txt", Size: 5}}),
+		makeJSONDataMsg(&Response{OK: true, Data: []byte("hello")}),
+		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
+	)
+
+	if err := doGet(ch, localDir, "/remote", []string{"get", "remote.txt", "dest"}, nil); err != nil {
+		t.Fatalf("doGet error: %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(destDir, "remote.txt"))
+	if err != nil {
+		t.Fatalf("read downloaded file: %v", err)
+	}
+	if string(content) != "hello" {
+		t.Fatalf("unexpected content: %q", content)
+	}
+}
+
+// TestClientDoGetToNewLocalName verifies that a non-glob get to a target that
+// is neither an existing directory nor slash-terminated uses the target as the
+// local file name verbatim.
+func TestClientDoGetToNewLocalName(t *testing.T) {
+	localDir := t.TempDir()
+
+	ch := newMockChannel(
+		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "remote.txt", Size: 5}}),
+		makeJSONDataMsg(&Response{OK: true, Data: []byte("hello")}),
+		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
+	)
+
+	newName := filepath.Join(localDir, "newname")
+	if err := doGet(ch, localDir, "/remote", []string{"get", "remote.txt", "newname"}, nil); err != nil {
+		t.Fatalf("doGet error: %v", err)
+	}
+
+	content, err := os.ReadFile(newName)
+	if err != nil {
+		t.Fatalf("read downloaded file: %v", err)
+	}
+	if string(content) != "hello" {
+		t.Fatalf("unexpected content: %q", content)
+	}
+}
+
+// TestClientDoGetToAbsoluteTarget verifies that an absolute local destination
+// is used as-is rather than being joined onto the local working directory.
+func TestClientDoGetToAbsoluteTarget(t *testing.T) {
+	localDir := t.TempDir()
+	outDir := t.TempDir()
+	target := filepath.Join(outDir, "absolute.txt")
+
+	ch := newMockChannel(
+		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "remote.txt", Size: 5}}),
+		makeJSONDataMsg(&Response{OK: true, Data: []byte("hello")}),
+		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
+	)
+
+	if err := doGet(ch, localDir, "/remote", []string{"get", "remote.txt", target}, nil); err != nil {
+		t.Fatalf("doGet error: %v", err)
+	}
+
+	content, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read downloaded file: %v", err)
+	}
+	if string(content) != "hello" {
+		t.Fatalf("unexpected content: %q", content)
+	}
+	if _, err := os.Stat(filepath.Join(localDir, "absolute.txt")); !os.IsNotExist(err) {
+		t.Errorf("expected file not to be placed under localDir, stat err: %v", err)
+	}
+}
+
 func TestResolveCDTarget(t *testing.T) {
 	const (
 		remoteDir = "/home/alice/work"
