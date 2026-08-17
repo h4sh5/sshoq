@@ -64,7 +64,7 @@ func TestUploadFileCancelled(t *testing.T) {
 		cancelAt:    1, // interrupt as soon as the first chunk is sent
 	}
 
-	err := uploadFile(ch, localPath, "remote.bin", cancel)
+	err := uploadFile(ch, localPath, "remote.bin", true, cancel)
 	if !errors.Is(err, ErrCancelled) {
 		t.Fatalf("expected ErrCancelled, got %v", err)
 	}
@@ -84,7 +84,7 @@ func TestUploadFileCancelledBeforeStart(t *testing.T) {
 	cancel.cancel()
 	ch := newMockChannel()
 
-	err := uploadFile(ch, localPath, "remote.bin", cancel)
+	err := uploadFile(ch, localPath, "remote.bin", true, cancel)
 	if !errors.Is(err, ErrCancelled) {
 		t.Fatalf("expected ErrCancelled, got %v", err)
 	}
@@ -111,7 +111,7 @@ func TestDownloadFileCancelled(t *testing.T) {
 		cancelAt: 2, // interrupt as soon as the first get request is sent
 	}
 
-	err := downloadFile(ch, "remote.bin", localPath, cancel)
+	err := downloadFile(ch, "remote.bin", localPath, true, cancel)
 	if !errors.Is(err, ErrCancelled) {
 		t.Fatalf("expected ErrCancelled, got %v", err)
 	}
@@ -127,7 +127,7 @@ func TestDownloadRecursiveCancelled(t *testing.T) {
 	cancel.cancel()
 	ch := newMockChannel()
 
-	err := downloadRecursive(ch, "remote-dir", filepath.Join(t.TempDir(), "out"), cancel)
+	err := downloadRecursive(ch, "remote-dir", filepath.Join(t.TempDir(), "out"), true, cancel)
 	if !errors.Is(err, ErrCancelled) {
 		t.Fatalf("expected ErrCancelled, got %v", err)
 	}
@@ -148,7 +148,7 @@ func TestUploadRecursiveCancelled(t *testing.T) {
 	cancel.cancel()
 	ch := newMockChannel()
 
-	err := uploadRecursive(ch, localDir, "remote-dir", cancel)
+	err := uploadRecursive(ch, localDir, "remote-dir", true, cancel)
 	if !errors.Is(err, ErrCancelled) {
 		t.Fatalf("expected ErrCancelled, got %v", err)
 	}

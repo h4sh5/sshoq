@@ -19,7 +19,7 @@ import (
 	"github.com/h4sh5/sshoq/client"
 )
 
-func RunInteractiveClient(c *client.Client) error {
+func RunInteractiveClient(c *client.Client, follow bool) error {
 	channel, err := c.OpenChannel("sftp", 30000, 0)
 	if err != nil {
 		return fmt.Errorf("could not open sftp channel: %w", err)
@@ -157,7 +157,7 @@ func RunInteractiveClient(c *client.Client) error {
 		case "get":
 			cancel := &transferCancel{}
 			err := input.runTransfer(cancel, func() error {
-				return doGet(channel, localDir, remoteDir, parts, cancel)
+				return doGet(channel, localDir, remoteDir, parts, follow, cancel)
 			})
 			if err != nil {
 				if errors.Is(err, ErrCancelled) {
@@ -171,7 +171,7 @@ func RunInteractiveClient(c *client.Client) error {
 		case "put":
 			cancel := &transferCancel{}
 			err := input.runTransfer(cancel, func() error {
-				return doPut(channel, localDir, remoteDir, parts, cancel)
+				return doPut(channel, localDir, remoteDir, parts, follow, cancel)
 			})
 			if err != nil {
 				if errors.Is(err, ErrCancelled) {
@@ -550,7 +550,7 @@ func (r *interactiveReader) runTransfer(cancel *transferCancel, fn func() error)
 // un-globbed source is downloaded directly, preserving the previous behavior.
 // The -r flag is honored in both cases: directories (whether matched by the
 // pattern or named directly) are transferred recursively via downloadOne.
-func doGet(channel ssh3.Channel, localDir, remoteDir string, parts []string, cancel *transferCancel) error {
+func doGet(channel ssh3.Channel, localDir, remoteDir string, parts []string, follow bool, cancel *transferCancel) error {
 	recursive, remoteSource, localTarget, err := parseTransferArgs(parts, "get")
 	if err != nil {
 		return err
@@ -635,7 +635,7 @@ func doGet(channel ssh3.Channel, localDir, remoteDir string, parts []string, can
 				// A single match may target a file name directly.
 				localFile = destDir
 			}
-			if err := downloadOne(channel, remoteFile, localFile, recursive, cancel); err != nil {
+			if err := downloadOne(channel, remoteFile, localFile, recursive, follow, cancel); err != nil {
 				return err
 			}
 		}
@@ -662,18 +662,18 @@ func doGet(channel ssh3.Channel, localDir, remoteDir string, parts []string, can
 		}
 	}
 	localFile = resolveLocalPath(localDir, localFile)
-	return downloadOne(channel, remoteFile, localFile, recursive, cancel)
+	return downloadOne(channel, remoteFile, localFile, recursive, follow, cancel)
 }
 
 // downloadOne downloads remoteFile to localFile, descending into directories when
 // recursive is set. It reproduces the transfer behavior of a non-glob "get" and
 // is shared by the glob and non-glob paths of doGet so that wildcards work the
 // same way with and without -r.
-func downloadOne(channel ssh3.Channel, remoteFile, localFile string, recursive bool, cancel *transferCancel) error {
+func downloadOne(channel ssh3.Channel, remoteFile, localFile string, recursive, follow bool, cancel *transferCancel) error {
 	if recursive {
-		return downloadRecursive(channel, remoteFile, localFile, cancel)
+		return downloadRecursive(channel, remoteFile, localFile, follow, cancel)
 	}
-	return downloadFile(channel, remoteFile, localFile, cancel)
+	return downloadFile(channel, remoteFile, localFile, follow, cancel)
 }
 
 // doPut uploads a local file or directory, or every local file matching a
@@ -689,7 +689,7 @@ func downloadOne(channel ssh3.Channel, remoteFile, localFile string, recursive b
 // name or a directory, while multiple sources require an existing directory
 // (or no target, in which case each source is uploaded under its own
 // basename).
-func doPut(channel ssh3.Channel, localDir, remoteDir string, parts []string, cancel *transferCancel) error {
+func doPut(channel ssh3.Channel, localDir, remoteDir string, parts []string, follow bool, cancel *transferCancel) error {
 	recursive, localSource, remoteTarget, err := parseTransferArgs(parts, "put")
 	if err != nil {
 		return err
@@ -758,7 +758,7 @@ func doPut(channel ssh3.Channel, localDir, remoteDir string, parts []string, can
 			remoteFile = path.Join(remoteDir, remoteFile)
 		}
 
-		if err := uploadOne(channel, localFile, remoteFile, recursive, cancel); err != nil {
+		if err := uploadOne(channel, localFile, remoteFile, recursive, follow, cancel); err != nil {
 			return err
 		}
 	}
@@ -840,47 +840,64 @@ func parseTransferArgs(parts []string, cmd string) (recursive bool, source strin
 	return recursive, source, target, nil
 }
 
-func downloadRecursive(channel ssh3.Channel, remotePath, localPath string, cancel *transferCancel) error {
+func downloadRecursive(channel ssh3.Channel, remotePath, localPath string, follow bool, cancel *transferCancel) error {
 	if cancel.cancelled() {
 		return ErrCancelled
 	}
-	statResp, err := doRequest(channel, &Request{Cmd: "stat", Path: remotePath})
+
+	// Resolve any server-side symbolic links on the way to remotePath. When
+	// follow is false a trailing symlink is left unresolved so it can be
+	// rejected below; when follow is true the client follows each link hop by
+	// asking the server for its target.
+	resolved, info, err := resolveRemote(channel, remotePath, follow)
 	if err != nil {
 		return err
 	}
-	if !statResp.OK {
-		return serverError(remotePath, statResp.Error)
+	if !follow && info != nil && info.IsSymlink {
+		return fmt.Errorf("Cannot download %s: symbolic link", remotePath)
 	}
-	if statResp.Info != nil && statResp.Info.IsDir {
+
+	if info != nil && info.IsDir {
 		if err := os.MkdirAll(localPath, 0o755); err != nil {
 			return err
 		}
-		resp, err := doRequest(channel, &Request{Cmd: "ls", Path: remotePath})
+		resp, err := doRequest(channel, &Request{Cmd: "ls", Path: resolved})
 		if err != nil {
 			return err
 		}
 		if !resp.OK {
-			return serverError(remotePath, resp.Error)
+			return serverError(resolved, resp.Error)
 		}
 		for _, entry := range resp.Entries {
-			childRemote := path.Join(remotePath, entry.Name)
+			childRemote := path.Join(resolved, entry.Name)
 			childLocal := filepath.Join(localPath, entry.Name)
-			if entry.IsDir {
-				if err := downloadRecursive(channel, childRemote, childLocal, cancel); err != nil {
+			switch {
+			case entry.IsDir:
+				if err := downloadRecursive(channel, childRemote, childLocal, follow, cancel); err != nil {
 					return err
 				}
-			} else if err := downloadFileContents(channel, childRemote, childLocal, entry.Size, cancel); err != nil {
-				return err
+			case entry.IsSymlink && !follow:
+				return fmt.Errorf("Cannot download %s: symbolic link", childRemote)
+			case entry.IsSymlink:
+				// Recurse so the symlink is resolved (and followed if it points
+				// to a directory, downloaded if it points to a file).
+				if err := downloadRecursive(channel, childRemote, childLocal, follow, cancel); err != nil {
+					return err
+				}
+			default:
+				if err := downloadFileContents(channel, childRemote, childLocal, entry.Size, cancel); err != nil {
+					return err
+				}
 			}
 		}
 		return nil
 	}
 
 	var total int64
-	if statResp.Info != nil {
-		total = statResp.Info.Size
+	if info != nil {
+		total = info.Size
 	}
-	return downloadFileContents(channel, remotePath, localPath, total, cancel)
+	return downloadFileContents(channel, resolved, localPath, total, cancel)
 }
 
 // downloadFileContents downloads remotePath into localPath, displaying a
@@ -996,23 +1013,37 @@ func downloadFileContents(channel ssh3.Channel, remotePath, localPath string, to
 // uploadOne uploads localFile to remoteFile, descending into directories when
 // recursive is set. It is the upload counterpart of downloadOne and is shared
 // by the glob and non-glob paths of doPut.
-func uploadOne(channel ssh3.Channel, localFile, remoteFile string, recursive bool, cancel *transferCancel) error {
+func uploadOne(channel ssh3.Channel, localFile, remoteFile string, recursive, follow bool, cancel *transferCancel) error {
 	if recursive {
-		return uploadRecursive(channel, localFile, remoteFile, cancel)
+		return uploadRecursive(channel, localFile, remoteFile, follow, cancel)
 	}
-	return uploadFile(channel, localFile, remoteFile, cancel)
+	return uploadFile(channel, localFile, remoteFile, follow, cancel)
 }
 
-func uploadRecursive(channel ssh3.Channel, localPath, remotePath string, cancel *transferCancel) error {
+// statLocal reports the local FileInfo used to decide whether a path is a
+// directory during an upload. With follow it uses stat (resolving symlinks, so
+// a symlink to a directory is uploaded recursively); with follow=false it uses
+// lstat so a symlink is seen as a symlink rather than its target.
+func statLocal(p string, follow bool) (os.FileInfo, error) {
+	if follow {
+		return os.Stat(p)
+	}
+	return os.Lstat(p)
+}
+
+func uploadRecursive(channel ssh3.Channel, localPath, remotePath string, follow bool, cancel *transferCancel) error {
 	if cancel.cancelled() {
 		return ErrCancelled
 	}
-	info, err := os.Stat(localPath)
+	info, err := statLocal(localPath, follow)
 	if err != nil {
 		return err
 	}
+	if !follow && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("Cannot upload %s: symbolic link", localPath)
+	}
 	if !info.IsDir() {
-		return uploadFile(channel, localPath, remotePath, cancel)
+		return uploadFile(channel, localPath, remotePath, follow, cancel)
 	}
 	if err := ensureRemoteDir(channel, remotePath); err != nil {
 		return err
@@ -1025,15 +1056,18 @@ func uploadRecursive(channel ssh3.Channel, localPath, remotePath string, cancel 
 	for _, entry := range entries {
 		childLocal := filepath.Join(localPath, entry.Name())
 		childRemote := path.Join(remotePath, entry.Name())
-		childInfo, err := entry.Info()
+		childInfo, err := statLocal(childLocal, follow)
 		if err != nil {
 			return err
 		}
+		if !follow && childInfo.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("Cannot upload %s: symbolic link", childLocal)
+		}
 		if childInfo.IsDir() {
-			if err := uploadRecursive(channel, childLocal, childRemote, cancel); err != nil {
+			if err := uploadRecursive(channel, childLocal, childRemote, follow, cancel); err != nil {
 				return err
 			}
-		} else if err := uploadFile(channel, childLocal, childRemote, cancel); err != nil {
+		} else if err := uploadFile(channel, childLocal, childRemote, follow, cancel); err != nil {
 			return err
 		}
 	}
@@ -1090,6 +1124,12 @@ func printHelp() {
   exit/quit       exit
 
 Ctrl+C during a get/put cancels the transfer and returns to the prompt.
+
+Symbolic links are followed by default: get resolves server-side links (the
+server reports each link, the client follows it) and put resolves client-side
+links, including inside recursive transfers. Start sshoq with
+-no-follow-symlinks to disable this on the client: get then refuses to download
+a server-side symlink and put refuses to upload a client-side symlink.
 
 Paths are parsed like OpenSSH sftp: single quotes ('...') and double quotes
 ("...") protect spaces and metacharacters, and a backslash escapes the next
@@ -1201,26 +1241,79 @@ func serverError(path, msg string) error {
 	return fmt.Errorf("%s: %s", path, msg)
 }
 
-func downloadFile(channel ssh3.Channel, remotePath, localPath string, cancel *transferCancel) error {
-	statResp, err := doRequest(channel, &Request{Cmd: "stat", Path: remotePath})
+// downloadFile downloads remoteFile to localFile, resolving any server-side
+// symbolic links by asking the server for each link's target (see resolveRemote)
+// unless follow is false, in which case a trailing symlink is rejected rather
+// than followed.
+func downloadFile(channel ssh3.Channel, remotePath, localPath string, follow bool, cancel *transferCancel) error {
+	resolved, info, err := resolveRemote(channel, remotePath, follow)
 	if err != nil {
 		return err
 	}
-	if !statResp.OK {
-		return serverError(remotePath, statResp.Error)
+	if !follow && info != nil && info.IsSymlink {
+		return fmt.Errorf("Cannot download %s: symbolic link", remotePath)
 	}
-	if statResp.Info != nil && statResp.Info.IsDir {
+	if info != nil && info.IsDir {
 		return fmt.Errorf("cannot download a directory: %s", remotePath)
 	}
 
 	var total int64
-	if statResp.Info != nil {
-		total = statResp.Info.Size
+	if info != nil {
+		total = info.Size
 	}
-	return downloadFileContents(channel, remotePath, localPath, total, cancel)
+	return downloadFileContents(channel, resolved, localPath, total, cancel)
 }
 
-func uploadFile(channel ssh3.Channel, localPath, remotePath string, cancel *transferCancel) error {
+// maxSymlinkFollow caps how many server-side symbolic links the client will
+// follow while resolving a remote path, mirroring the kernel's ELOOP limit of
+// 40 so a symlink loop is reported instead of looping forever.
+const maxSymlinkFollow = 40
+
+// resolveRemote follows symbolic links on the remote side one hop at a time,
+// asking the server to stat the current path and, when it is a symlink, using
+// the link target it returns as the next path. It returns the final resolved
+// path and its FileInfo. When follow is false a trailing symlink is returned
+// unresolved (with is-symlink set) so the caller can decide what to do.
+// Symlink following is client-side: the server merely reports each next link
+// to follow, so a client-side -no-follow switch can disable it.
+func resolveRemote(channel ssh3.Channel, p string, follow bool) (string, *FileInfo, error) {
+	cur := p
+	for i := 0; i < maxSymlinkFollow; i++ {
+		resp, err := doRequest(channel, &Request{Cmd: "stat", Path: cur})
+		if err != nil {
+			return "", nil, err
+		}
+		if !resp.OK {
+			return "", nil, serverError(cur, resp.Error)
+		}
+		info := resp.Info
+		if info == nil || !follow || !info.IsSymlink {
+			return cur, info, nil
+		}
+		if info.LinkTarget == "" {
+			return "", nil, fmt.Errorf("%s: empty symbolic link target", cur)
+		}
+		// Resolve the target against the symlink's own directory, mirroring
+		// how the kernel resolves a relative link target.
+		if path.IsAbs(info.LinkTarget) {
+			cur = path.Clean(info.LinkTarget)
+		} else {
+			cur = path.Clean(path.Join(path.Dir(cur), info.LinkTarget))
+		}
+	}
+	return "", nil, fmt.Errorf("%s: too many levels of symbolic links", p)
+}
+
+func uploadFile(channel ssh3.Channel, localPath, remotePath string, follow bool, cancel *transferCancel) error {
+	// By default a client-side symbolic link is followed (its target is
+	// uploaded); with follow=false a symlink is rejected rather than followed,
+	// matching OpenSSH's put -P.
+	if !follow {
+		if fi, err := os.Lstat(localPath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("Cannot upload %s: symbolic link", localPath)
+		}
+	}
+
 	f, err := os.Open(localPath)
 	if err != nil {
 		return err

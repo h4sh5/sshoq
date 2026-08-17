@@ -575,7 +575,7 @@ func TestClientDoGetQuotedPath(t *testing.T) {
 		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
 	)
 	// parts simulate the output of makeargv("get 'Downloads/Test File.txt'").
-	if err := doGet(ch, localDir, "/remote", []string{"get", "Downloads/Test File.txt"}, nil); err != nil {
+	if err := doGet(ch, localDir, "/remote", []string{"get", "Downloads/Test File.txt"}, true, nil); err != nil {
 		t.Fatalf("doGet error: %v", err)
 	}
 	var got Request
@@ -609,7 +609,7 @@ func TestClientDoGetEscapedGlobMetachar(t *testing.T) {
 		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
 	)
 	// parts simulate the output of makeargv("get 'foo*.txt'").
-	if err := doGet(ch, localDir, "/remote", []string{"get", `foo\*.txt`}, nil); err != nil {
+	if err := doGet(ch, localDir, "/remote", []string{"get", `foo\*.txt`}, true, nil); err != nil {
 		t.Fatalf("doGet error: %v", err)
 	}
 	var got Request

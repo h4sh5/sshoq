@@ -244,6 +244,13 @@ To use sftp mode on the client, run this to drop into a SFTP shell:
 
 Type `help` in the `sftp>` prompt to see what commands are available.
 
+Symbolic links are followed by default, both directions: `get` resolves
+server-side links (the server reports each link, the client follows it) and
+`put` resolves client-side links, including inside recursive transfers. Pass
+`-no-follow-symlinks` to disable this on the client: `get` then refuses to
+download a server-side symlink and `put` refuses to upload a client-side
+symlink.
+
 For non-interactive, scp-style copy, use `-scp`. Since `:` is already used for the port designation in the connection URL, the remote path is separated from the sshoq server URL with `%`. Add `-r` to copy directories recursively:
 
 Upload a local file to a remote path:

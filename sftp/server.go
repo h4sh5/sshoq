@@ -249,7 +249,10 @@ func (s *ServerSession) handleRequest(req Request) *Response {
 			break
 		}
 		dirfd, pathArg := s.dirFDAndPath(req.Path, target)
-		fd, err := unix.Openat(dirfd, pathArg, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		// Change into the directory, following symbolic links by default. The
+		// path's final component is resolved to whatever it points at; ancestor
+		// components are resolved by the kernel as the path is traversed.
+		fd, err := unix.Openat(dirfd, pathArg, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 		if err != nil {
 			resp.Error = pathErr(target, err).Error()
 			break
@@ -273,7 +276,11 @@ func (s *ServerSession) handleRequest(req Request) *Response {
 			break
 		}
 		dirfd, pathArg := s.dirFDAndPath(req.Path, target)
-		fd, err := unix.Openat(dirfd, pathArg, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		// List a directory, following symbolic links by default so that
+		// "ls symlink-to-dir" lists the target directory's entries (matching
+		// OpenSSH sftp). Individual entries are still reported via lstat, so
+		// symlinks appear as symlinks with their target.
+		fd, err := unix.Openat(dirfd, pathArg, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 		if err != nil {
 			resp.Error = pathErr(target, err).Error()
 			break
@@ -304,7 +311,7 @@ func (s *ServerSession) handleRequest(req Request) *Response {
 				continue
 			}
 			uid, gid := ownershipFromInfo(info)
-			resp.Entries = append(resp.Entries, FileInfo{
+			ti := FileInfo{
 				Name:      e.Name(),
 				Size:      info.Size(),
 				Mode:      uint32(info.Mode()),
@@ -314,7 +321,16 @@ func (s *ServerSession) handleRequest(req Request) *Response {
 				GID:       gid,
 				UserName:  s.userName(uid),
 				GroupName: s.groupName(gid),
-			})
+			}
+			// Report symbolic links so the client can follow the next hop. e.Info
+			// is an lstat, so a symlink is reported as a symlink (never resolved).
+			if info.Mode()&os.ModeSymlink != 0 {
+				ti.IsSymlink = true
+				if lt, err := os.Readlink(filepath.Join(target, e.Name())); err == nil {
+					ti.LinkTarget = lt
+				}
+			}
+			resp.Entries = append(resp.Entries, ti)
 		}
 
 	case "stat":
@@ -324,7 +340,7 @@ func (s *ServerSession) handleRequest(req Request) *Response {
 			break
 		}
 		resp.OK = true
-		resp.Info = &FileInfo{
+		ti := &FileInfo{
 			Name:      filepath.Base(target),
 			Size:      st.Size,
 			Mode:      uint32(st.Mode),
@@ -335,6 +351,15 @@ func (s *ServerSession) handleRequest(req Request) *Response {
 			UserName:  s.userName(st.Uid),
 			GroupName: s.groupName(st.Gid),
 		}
+		// statPath uses lstat, so a symlink is reported as a symlink with its
+		// target (the "next link to follow"), leaving resolution to the client.
+		if (st.Mode & unix.S_IFMT) == unix.S_IFLNK {
+			ti.IsSymlink = true
+			if lt, err := os.Readlink(target); err == nil {
+				ti.LinkTarget = lt
+			}
+		}
+		resp.Info = ti
 
 	case "get":
 		if err := s.checkAncestorExecute(target); err != nil {
