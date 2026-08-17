@@ -292,7 +292,7 @@ func newCompleter(channel ssh3.Channel, localDir, remoteDir *string) completeFun
 			return nil, err
 		}
 		if !resp.OK {
-			return nil, fmt.Errorf("%s", resp.Error)
+			return nil, serverError(dir, resp.Error)
 		}
 		names := make([]string, 0, len(resp.Entries))
 		for _, e := range resp.Entries {
@@ -497,7 +497,7 @@ func doLs(channel ssh3.Channel, remoteDir string, parts []string) error {
 		return err
 	}
 	if !resp.OK {
-		return fmt.Errorf("%s", resp.Error)
+		return serverError(listDir, resp.Error)
 	}
 
 	entries := resp.Entries
@@ -591,7 +591,7 @@ func doGet(channel ssh3.Channel, localDir, remoteDir string, parts []string, can
 			return err
 		}
 		if !resp.OK {
-			return fmt.Errorf("%s", resp.Error)
+			return serverError(sourceDir, resp.Error)
 		}
 		var matched []FileInfo
 		for _, e := range resp.Entries {
@@ -849,7 +849,7 @@ func downloadRecursive(channel ssh3.Channel, remotePath, localPath string, cance
 		return err
 	}
 	if !statResp.OK {
-		return fmt.Errorf("%s", statResp.Error)
+		return serverError(remotePath, statResp.Error)
 	}
 	if statResp.Info != nil && statResp.Info.IsDir {
 		if err := os.MkdirAll(localPath, 0o755); err != nil {
@@ -860,7 +860,7 @@ func downloadRecursive(channel ssh3.Channel, remotePath, localPath string, cance
 			return err
 		}
 		if !resp.OK {
-			return fmt.Errorf("%s", resp.Error)
+			return serverError(remotePath, resp.Error)
 		}
 		for _, entry := range resp.Entries {
 			childRemote := path.Join(remotePath, entry.Name)
@@ -960,7 +960,7 @@ func downloadFileContents(channel ssh3.Channel, remotePath, localPath string, to
 			return err
 		}
 		if !resp.OK {
-			return fmt.Errorf("%s", resp.Error)
+			return serverError(remotePath, resp.Error)
 		}
 		pending--
 		if len(resp.Data) == 0 {
@@ -1068,7 +1068,7 @@ func ensureRemoteDir(channel ssh3.Channel, remotePath string) error {
 		return err
 	}
 	if !mkdirResp.OK {
-		return fmt.Errorf("%s", mkdirResp.Error)
+		return serverError(remotePath, mkdirResp.Error)
 	}
 	return nil
 }
@@ -1183,16 +1183,34 @@ func doRequest(channel ssh3.Channel, req *Request) (*Response, error) {
 	return ReceiveResponse(channel)
 }
 
+// serverError converts a non-OK server response into an error that names the
+// filepath it concerns. Servers normally include the path in their error
+// messages (any absolute path contains a "/"), but messages without one are
+// prefixed with the path known to the client so errors like "too many levels
+// of symbolic links" identify the file involved.
+func serverError(path, msg string) error {
+	if msg == "" {
+		msg = "unknown error"
+	}
+	if path == "" || path == "." || path == "/" {
+		return errors.New(msg)
+	}
+	if strings.Contains(msg, "/") || strings.Contains(msg, path) {
+		return errors.New(msg)
+	}
+	return fmt.Errorf("%s: %s", path, msg)
+}
+
 func downloadFile(channel ssh3.Channel, remotePath, localPath string, cancel *transferCancel) error {
 	statResp, err := doRequest(channel, &Request{Cmd: "stat", Path: remotePath})
 	if err != nil {
 		return err
 	}
 	if !statResp.OK {
-		return fmt.Errorf("%s", statResp.Error)
+		return serverError(remotePath, statResp.Error)
 	}
 	if statResp.Info != nil && statResp.Info.IsDir {
-		return fmt.Errorf("cannot download a directory")
+		return fmt.Errorf("cannot download a directory: %s", remotePath)
 	}
 
 	var total int64
@@ -1214,7 +1232,7 @@ func uploadFile(channel ssh3.Channel, localPath, remotePath string, cancel *tran
 		return err
 	}
 	if info.IsDir() {
-		return fmt.Errorf("cannot upload a directory")
+		return fmt.Errorf("cannot upload a directory: %s", localPath)
 	}
 
 	prog := newProgress(filepath.Base(localPath), info.Size(), os.Stdout, cancel)
@@ -1293,7 +1311,7 @@ func uploadFile(channel ssh3.Channel, localPath, remotePath string, cancel *tran
 			return err
 		}
 		if !resp.OK {
-			return fmt.Errorf("%s", resp.Error)
+			return serverError(remotePath, resp.Error)
 		}
 		n := int64(ChunkSize)
 		if remaining := total - int64(acked)*ChunkSize; remaining < n {
