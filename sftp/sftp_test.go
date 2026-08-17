@@ -1906,6 +1906,48 @@ func TestClientDoGetRecursiveDir(t *testing.T) {
 	}
 }
 
+// TestClientDoGetRecursivePermissionDenied exercises get -r on a directory
+// containing a file the server refuses to read: the denied file is reported
+// and skipped, and the remaining files in the directory are still downloaded.
+func TestClientDoGetRecursivePermissionDenied(t *testing.T) {
+	localDir := t.TempDir()
+
+	ch := newMockChannel(
+		// stat of the top-level directory.
+		makeResponseMsg(&Response{OK: true, Info: &FileInfo{Name: "d", IsDir: true}}),
+		// ls of the directory: "secret.txt" cannot be read, "ok.txt" can.
+		makeResponseMsg(&Response{OK: true, Entries: []FileInfo{
+			{Name: "secret.txt", Size: 6, Mode: 0000},
+			{Name: "ok.txt", Size: 2, Mode: 0644},
+		}}),
+		// The server refuses the read of secret.txt.
+		makeResponseMsg(&Response{OK: false, Error: "secret.txt: permission denied"}),
+		// The download of ok.txt succeeds (its size comes from the ls entry).
+		makeResponseMsg(&Response{OK: true, Data: []byte("ok")}),
+		makeResponseMsg(&Response{OK: true, Data: []byte{}}),
+	)
+
+	if err := doGet(ch, localDir, "/remote", []string{"get", "-r", "d"}, true, nil); err != nil {
+		t.Fatalf("doGet -r error: %v", err)
+	}
+
+	// The denied file leaves a zero-length placeholder behind (a failed
+	// download is not cleaned up) and must not abort the transfer.
+	if info, err := os.Stat(filepath.Join(localDir, "d", "secret.txt")); err != nil {
+		t.Fatalf("expected zero-length placeholder for denied file: %v", err)
+	} else if info.Size() != 0 {
+		t.Fatalf("expected zero-length placeholder, got %d bytes", info.Size())
+	}
+
+	content, err := os.ReadFile(filepath.Join(localDir, "d", "ok.txt"))
+	if err != nil {
+		t.Fatalf("read downloaded file: %v", err)
+	}
+	if string(content) != "ok" {
+		t.Fatalf("unexpected content: %q", content)
+	}
+}
+
 // TestClientDoGetRecursiveWildcard exercises get -r with a glob source: the
 // parent directory is listed, entries matching the pattern are transferred
 // recursively (directories walked, files downloaded), and non-matching entries
