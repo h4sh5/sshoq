@@ -3,7 +3,6 @@ package sftp
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,7 +61,7 @@ func remoteEntries(entries ...FileInfo) []FileInfo {
 }
 
 func TestCompleterRemote(t *testing.T) {
-	resp := makeJSONDataMsg(&Response{OK: true, Entries: remoteEntries(
+	resp := makeResponseMsg(&Response{OK: true, Entries: remoteEntries(
 		FileInfo{Name: "docs", IsDir: true},
 		FileInfo{Name: "file1.txt"},
 		FileInfo{Name: "file2.txt"},
@@ -81,7 +80,7 @@ func TestCompleterRemote(t *testing.T) {
 		t.Errorf("candidates = %v, want [file1.txt file2.txt]", cands)
 	}
 	var got Request
-	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+	if err := decodeRequestFrame(ch.Writes[0], &got); err != nil {
 		t.Fatalf("unmarshal request: %v", err)
 	}
 	if got.Cmd != "ls" || got.Path != "/remote" {
@@ -112,7 +111,7 @@ func TestCompleterRemote(t *testing.T) {
 }
 
 func TestCompleterRemoteTrailingSlashListsDir(t *testing.T) {
-	ch := newMockChannel(makeJSONDataMsg(&Response{OK: true, Entries: remoteEntries(
+	ch := newMockChannel(makeResponseMsg(&Response{OK: true, Entries: remoteEntries(
 		FileInfo{Name: "main.go"},
 		FileInfo{Name: "util.go"},
 	)}))
@@ -128,7 +127,7 @@ func TestCompleterRemoteTrailingSlashListsDir(t *testing.T) {
 		t.Errorf("candidates = %v, want [docs/main.go]", cands)
 	}
 	var got Request
-	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+	if err := decodeRequestFrame(ch.Writes[0], &got); err != nil {
 		t.Fatalf("unmarshal request: %v", err)
 	}
 	if got.Path != "/remote/docs" {
@@ -137,7 +136,7 @@ func TestCompleterRemoteTrailingSlashListsDir(t *testing.T) {
 }
 
 func TestCompleterRemoteAbsolute(t *testing.T) {
-	ch := newMockChannel(makeJSONDataMsg(&Response{OK: true, Entries: remoteEntries(
+	ch := newMockChannel(makeResponseMsg(&Response{OK: true, Entries: remoteEntries(
 		FileInfo{Name: "var"},
 		FileInfo{Name: "usr", IsDir: true},
 	)}))
@@ -149,7 +148,7 @@ func TestCompleterRemoteAbsolute(t *testing.T) {
 		t.Errorf("absolute candidates = %v, want [/usr/]", cands)
 	}
 	var got Request
-	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+	if err := decodeRequestFrame(ch.Writes[0], &got); err != nil {
 		t.Fatalf("unmarshal request: %v", err)
 	}
 	if got.Path != "/" {
@@ -158,7 +157,7 @@ func TestCompleterRemoteAbsolute(t *testing.T) {
 }
 
 func TestCompleterRemoteError(t *testing.T) {
-	ch := newMockChannel(makeJSONDataMsg(&Response{OK: false, Error: "no such file"}))
+	ch := newMockChannel(makeResponseMsg(&Response{OK: false, Error: "no such file"}))
 	localDir, remoteDir := "/local", "/remote"
 	c := newCompleter(ch, &localDir, &remoteDir)
 
@@ -197,10 +196,10 @@ func TestCompleterGetPutSides(t *testing.T) {
 	// Two completer calls reach the channel (get source and put target), each
 	// needs its own ls response.
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{OK: true, Entries: remoteEntries(
+		makeResponseMsg(&Response{OK: true, Entries: remoteEntries(
 			FileInfo{Name: "remote.txt"},
 		)}),
-		makeJSONDataMsg(&Response{OK: true, Entries: remoteEntries(
+		makeResponseMsg(&Response{OK: true, Entries: remoteEntries(
 			FileInfo{Name: "remote.txt"},
 		)}),
 	)
@@ -246,15 +245,15 @@ func TestCompleterGetPutSides(t *testing.T) {
 func TestEditorRemoteTabCompletion(t *testing.T) {
 	q := newQueuedMockChannel()
 	q.enqueue(
-		makeJSONDataMsg(&Response{OK: true, Entries: remoteEntries(
+		makeResponseMsg(&Response{OK: true, Entries: remoteEntries(
 			FileInfo{Name: "src", IsDir: true},
 			FileInfo{Name: "src.tar.gz"},
 		)}),
-		makeJSONDataMsg(&Response{OK: true, Entries: remoteEntries(
+		makeResponseMsg(&Response{OK: true, Entries: remoteEntries(
 			FileInfo{Name: "src", IsDir: true},
 			FileInfo{Name: "src.tar.gz"},
 		)}),
-		makeJSONDataMsg(&Response{OK: true, Entries: remoteEntries(
+		makeResponseMsg(&Response{OK: true, Entries: remoteEntries(
 			FileInfo{Name: "main.go"},
 			FileInfo{Name: "util.go"},
 		)}),
@@ -286,7 +285,7 @@ func TestEditorRemoteTabCompletion(t *testing.T) {
 	}
 	for i, want := range []string{"/remote", "/remote", "/remote/src"} {
 		var got Request
-		if err := json.Unmarshal(writes[i], &got); err != nil {
+		if err := decodeRequestFrame(writes[i], &got); err != nil {
 			t.Fatalf("unmarshal request %d: %v", i, err)
 		}
 		if got.Cmd != "ls" || got.Path != want {

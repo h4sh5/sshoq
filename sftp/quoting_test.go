@@ -1,7 +1,6 @@
 package sftp
 
 import (
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -497,7 +496,7 @@ func TestMakeargvErrorType(t *testing.T) {
 // metacharacter is not treated as a glob: ls foo\* lists the literal path
 // "foo*" (after makeargv, the escaped star reaches doLs as "foo\*").
 func TestClientDoLsEscapedLiteralGlob(t *testing.T) {
-	ch := newMockChannel(makeJSONDataMsg(&Response{
+	ch := newMockChannel(makeResponseMsg(&Response{
 		OK:      true,
 		Entries: lsEntries("inside"),
 	}))
@@ -509,7 +508,7 @@ func TestClientDoLsEscapedLiteralGlob(t *testing.T) {
 	if len(ch.Writes) != 1 {
 		t.Fatalf("expected 1 request, got %d", len(ch.Writes))
 	}
-	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+	if err := decodeRequestFrame(ch.Writes[0], &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if got.Cmd != "ls" || got.Path != "/remote/foo*" {
@@ -521,7 +520,7 @@ func TestClientDoLsEscapedLiteralGlob(t *testing.T) {
 // directory is un-escaped before the ls request: ls 'sub\ dir'/*.txt lists
 // /remote/sub dir and matches entries against *.txt.
 func TestClientDoLsEscapedSpaceInDir(t *testing.T) {
-	ch := newMockChannel(makeJSONDataMsg(&Response{
+	ch := newMockChannel(makeResponseMsg(&Response{
 		OK:      true,
 		Entries: lsEntries("a.txt", "b.txt", "c.md"),
 	}))
@@ -533,7 +532,7 @@ func TestClientDoLsEscapedSpaceInDir(t *testing.T) {
 	if len(ch.Writes) != 1 {
 		t.Fatalf("expected 1 request, got %d", len(ch.Writes))
 	}
-	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+	if err := decodeRequestFrame(ch.Writes[0], &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if got.Cmd != "ls" || got.Path != "/remote/sub dir" {
@@ -545,7 +544,7 @@ func TestClientDoLsEscapedSpaceInDir(t *testing.T) {
 // escaped to a literal: ls 'test*' must not glob, so the request goes to the
 // literal path /remote/test*.
 func TestClientDoLsQuotedWildcard(t *testing.T) {
-	ch := newMockChannel(makeJSONDataMsg(&Response{
+	ch := newMockChannel(makeResponseMsg(&Response{
 		OK:      true,
 		Entries: lsEntries("inside"),
 	}))
@@ -557,7 +556,7 @@ func TestClientDoLsQuotedWildcard(t *testing.T) {
 	if len(ch.Writes) != 1 {
 		t.Fatalf("expected 1 request, got %d", len(ch.Writes))
 	}
-	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+	if err := decodeRequestFrame(ch.Writes[0], &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if got.Cmd != "ls" || got.Path != "/remote/test*" {
@@ -570,9 +569,9 @@ func TestClientDoLsQuotedWildcard(t *testing.T) {
 func TestClientDoGetQuotedPath(t *testing.T) {
 	localDir := t.TempDir()
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "Test File.txt", Size: 5}}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte("hello")}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
+		makeResponseMsg(&Response{OK: true, Info: &FileInfo{Name: "Test File.txt", Size: 5}}),
+		makeResponseMsg(&Response{OK: true, Data: []byte("hello")}),
+		makeResponseMsg(&Response{OK: true, Data: []byte{}}),
 	)
 	// parts simulate the output of makeargv("get 'Downloads/Test File.txt'").
 	if err := doGet(ch, localDir, "/remote", []string{"get", "Downloads/Test File.txt"}, true, nil); err != nil {
@@ -582,7 +581,7 @@ func TestClientDoGetQuotedPath(t *testing.T) {
 	if len(ch.Writes) != 3 {
 		t.Fatalf("expected 3 requests, got %d", len(ch.Writes))
 	}
-	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+	if err := decodeRequestFrame(ch.Writes[0], &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if got.Cmd != "stat" || got.Path != "/remote/Downloads/Test File.txt" {
@@ -604,9 +603,9 @@ func TestClientDoGetQuotedPath(t *testing.T) {
 func TestClientDoGetEscapedGlobMetachar(t *testing.T) {
 	localDir := t.TempDir()
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "foo*.txt", Size: 5}}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte("hello")}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
+		makeResponseMsg(&Response{OK: true, Info: &FileInfo{Name: "foo*.txt", Size: 5}}),
+		makeResponseMsg(&Response{OK: true, Data: []byte("hello")}),
+		makeResponseMsg(&Response{OK: true, Data: []byte{}}),
 	)
 	// parts simulate the output of makeargv("get 'foo*.txt'").
 	if err := doGet(ch, localDir, "/remote", []string{"get", `foo\*.txt`}, true, nil); err != nil {
@@ -616,7 +615,7 @@ func TestClientDoGetEscapedGlobMetachar(t *testing.T) {
 	if len(ch.Writes) != 3 {
 		t.Fatalf("expected 3 requests, got %d", len(ch.Writes))
 	}
-	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+	if err := decodeRequestFrame(ch.Writes[0], &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if got.Cmd != "stat" || got.Path != "/remote/foo*.txt" {
@@ -635,7 +634,7 @@ func TestClientDoGetEscapedGlobMetachar(t *testing.T) {
 // word: the candidate is re-quoted (opening and closing quote) and the
 // replacement starts at the opening quote.
 func TestCompleterQuotedWord(t *testing.T) {
-	ch := newMockChannel(makeJSONDataMsg(&Response{OK: true, Entries: remoteEntries(
+	ch := newMockChannel(makeResponseMsg(&Response{OK: true, Entries: remoteEntries(
 		FileInfo{Name: "remote.txt"},
 	)}))
 	localDir, remoteDir := "/local", "/remote"
@@ -654,7 +653,7 @@ func TestCompleterQuotedWord(t *testing.T) {
 // containing a space: the directory is resolved from the parsed word and the
 // candidate is wrapped in quotes.
 func TestCompleterQuotedWordWithSpace(t *testing.T) {
-	ch := newMockChannel(makeJSONDataMsg(&Response{OK: true, Entries: remoteEntries(
+	ch := newMockChannel(makeResponseMsg(&Response{OK: true, Entries: remoteEntries(
 		FileInfo{Name: "foobar.txt"},
 	)}))
 	localDir, remoteDir := "/local", "/remote"
@@ -668,7 +667,7 @@ func TestCompleterQuotedWordWithSpace(t *testing.T) {
 		t.Errorf("candidates = %v, want ['my dir/foobar.txt']", cands)
 	}
 	var got Request
-	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+	if err := decodeRequestFrame(ch.Writes[0], &got); err != nil {
 		t.Fatalf("unmarshal request: %v", err)
 	}
 	if got.Cmd != "ls" || got.Path != "/remote/my dir" {
@@ -750,7 +749,7 @@ func TestParseTransferArgsQuoted(t *testing.T) {
 // TestCompleterUTF8Spans verifies that completion start offsets are rune
 // indices even when the prefix contains multibyte characters.
 func TestCompleterUTF8Spans(t *testing.T) {
-	ch := newMockChannel(makeJSONDataMsg(&Response{OK: true, Entries: remoteEntries(
+	ch := newMockChannel(makeResponseMsg(&Response{OK: true, Entries: remoteEntries(
 		FileInfo{Name: "café.txt"},
 	)}))
 	localDir, remoteDir := "/local", "/remote"
@@ -766,7 +765,7 @@ func TestCompleterUTF8Spans(t *testing.T) {
 		t.Errorf("candidates = %v, want [docé/café.txt]", cands)
 	}
 	var got Request
-	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+	if err := decodeRequestFrame(ch.Writes[0], &got); err != nil {
 		t.Fatalf("unmarshal request: %v", err)
 	}
 	if got.Path != "/remote/docé" {

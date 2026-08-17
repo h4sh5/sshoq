@@ -1354,11 +1354,14 @@ func uploadFile(channel ssh3.Channel, localPath, remotePath string, follow bool,
 	// position and returns the bytes and the file offset at which they were
 	// read. The offset is sent to the server so it writes at the right spot;
 	// io.ReadFull guarantees every chunk except a short final one is a full
-	// ChunkSize, so the offsets stay aligned with the server's writes.
+	// ChunkSize, so the offsets stay aligned with the server's writes. The
+	// chunk buffer is allocated once and reused: SendRequest copies the data
+	// into its frame synchronously, so the next read cannot clobber a chunk
+	// that is still in flight.
 	filePos := int64(0)
+	chunkBuf := make([]byte, ChunkSize)
 	readChunk := func() ([]byte, int64, error) {
-		buf := make([]byte, ChunkSize)
-		n, err := io.ReadFull(f, buf)
+		n, err := io.ReadFull(f, chunkBuf)
 		if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
 			return nil, 0, err
 		}
@@ -1367,7 +1370,7 @@ func uploadFile(channel ssh3.Channel, localPath, remotePath string, follow bool,
 		if n == 0 {
 			return nil, off, nil // EOF: no more data
 		}
-		return buf[:n], off, nil
+		return chunkBuf[:n], off, nil
 	}
 
 	// Issue the initial window of write requests.

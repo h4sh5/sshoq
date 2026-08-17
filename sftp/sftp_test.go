@@ -2,7 +2,7 @@ package sftp
 
 import (
 	"bytes"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -97,9 +97,25 @@ func makeDataMsg(data []byte) *ssh3Messages.DataOrExtendedDataMessage {
 	}
 }
 
-func makeJSONDataMsg(v interface{}) *ssh3Messages.DataOrExtendedDataMessage {
-	b, _ := json.Marshal(v)
-	return makeDataMsg(b)
+func makeResponseMsg(resp *Response) *ssh3Messages.DataOrExtendedDataMessage {
+	return makeDataMsg(EncodeResponse(resp))
+}
+
+// decodeRequestFrame and decodeResponseFrame decode a full frame as written
+// to the channel (4-byte length prefix followed by the payload) into a
+// Request/Response, mirroring the wire format.
+func decodeRequestFrame(data []byte, req *Request) error {
+	if len(data) < 4 {
+		return errors.New("short request frame")
+	}
+	return DecodeRequest(data[4:], req)
+}
+
+func decodeResponseFrame(data []byte, resp *Response) error {
+	if len(data) < 4 {
+		return errors.New("short response frame")
+	}
+	return DecodeResponse(data[4:], resp)
 }
 
 // newMockChannel creates a ssh3.MockChannel wired with pre-programmed messages.
@@ -119,7 +135,7 @@ func TestSendRequest(t *testing.T) {
 		t.Fatalf("expected 1 write, got %d", len(ch.Writes))
 	}
 	var got Request
-	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+	if err := decodeRequestFrame(ch.Writes[0], &got); err != nil {
 		t.Fatalf("unmarshal error: %v", err)
 	}
 	if got.Cmd != "pwd" || got.ID != 1 {
@@ -129,7 +145,7 @@ func TestSendRequest(t *testing.T) {
 
 func TestReceiveResponse(t *testing.T) {
 	want := &Response{ID: 2, OK: true, Path: "/tmp"}
-	ch := newMockChannel(makeJSONDataMsg(want))
+	ch := newMockChannel(makeResponseMsg(want))
 	got, err := ReceiveResponse(ch)
 	if err != nil {
 		t.Fatalf("ReceiveResponse error: %v", err)
@@ -143,7 +159,7 @@ func TestReceiveResponse_SkipsNonDataMessages(t *testing.T) {
 	want := &Response{ID: 2, OK: true, Path: "/tmp"}
 	ch := newMockChannel(
 		&ssh3Messages.ChannelRequestMessage{},
-		makeJSONDataMsg(want),
+		makeResponseMsg(want),
 	)
 	got, err := ReceiveResponse(ch)
 	if err != nil {
@@ -160,7 +176,7 @@ func TestReceiveResponse_ChunkedMessage(t *testing.T) {
 	// MaxPacketSize minus framing bytes). ReceiveResponse must reassemble the
 	// chunks into a single JSON document instead of parsing a truncated one.
 	var entries []FileInfo
-	for i := 0; i < 500; i++ {
+	for i := 0; i < 800; i++ {
 		entries = append(entries, FileInfo{
 			Name:      fmt.Sprintf("file_%03d.txt", i),
 			Size:      4096,
@@ -174,10 +190,7 @@ func TestReceiveResponse_ChunkedMessage(t *testing.T) {
 		})
 	}
 	want := &Response{ID: 7, OK: true, Entries: entries}
-	raw, err := json.Marshal(want)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
+	raw := EncodeResponse(want)
 
 	msgs := splitIntoChannelMessages(raw)
 	if len(msgs) < 2 {
@@ -567,7 +580,7 @@ func TestServerRespond(t *testing.T) {
 		t.Fatalf("expected 1 write, got %d", len(ch.Writes))
 	}
 	var got Response
-	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+	if err := decodeResponseFrame(ch.Writes[0], &got); err != nil {
 		t.Fatalf("unmarshal error: %v", err)
 	}
 	if got.ID != 42 || !got.OK {
@@ -664,10 +677,10 @@ func TestDownloadFile(t *testing.T) {
 	done := &Response{ID: 4, OK: true, Data: []byte{}}
 
 	ch := newMockChannel(
-		makeJSONDataMsg(statResp),
-		makeJSONDataMsg(chunk1),
-		makeJSONDataMsg(chunk2),
-		makeJSONDataMsg(done),
+		makeResponseMsg(statResp),
+		makeResponseMsg(chunk1),
+		makeResponseMsg(chunk2),
+		makeResponseMsg(done),
 	)
 
 	if err := downloadFile(ch, "remote.txt", localPath, true, nil); err != nil {
@@ -683,7 +696,7 @@ func TestDownloadFile(t *testing.T) {
 }
 
 func TestDownloadFile_StatFail(t *testing.T) {
-	ch := newMockChannel(makeJSONDataMsg(&Response{ID: 1, OK: false, Error: "no such file"}))
+	ch := newMockChannel(makeResponseMsg(&Response{ID: 1, OK: false, Error: "no such file"}))
 	err := downloadFile(ch, "missing", filepath.Join(t.TempDir(), "out"), true, nil)
 	if err == nil {
 		t.Fatal("expected error for stat failure")
@@ -694,7 +707,7 @@ func TestDownloadFile_StatFail(t *testing.T) {
 // reported without a path is enriched with the remote path on the client, so
 // errors like "too many levels of symbolic links" identify the file.
 func TestDownloadFile_ServerErrorIncludesPath(t *testing.T) {
-	ch := newMockChannel(makeJSONDataMsg(&Response{ID: 1, OK: false, Error: "too many levels of symbolic links"}))
+	ch := newMockChannel(makeResponseMsg(&Response{ID: 1, OK: false, Error: "too many levels of symbolic links"}))
 	err := downloadFile(ch, "loop/file.txt", filepath.Join(t.TempDir(), "out"), true, nil)
 	if err == nil {
 		t.Fatal("expected error from server")
@@ -708,7 +721,7 @@ func TestDownloadFile_ServerErrorIncludesPath(t *testing.T) {
 // error that already carries the path is passed through unchanged.
 func TestDownloadFile_ServerErrorWithPathNotDuplicated(t *testing.T) {
 	const serverErr = "/remote/loop/file.txt: too many levels of symbolic links"
-	ch := newMockChannel(makeJSONDataMsg(&Response{ID: 1, OK: false, Error: serverErr}))
+	ch := newMockChannel(makeResponseMsg(&Response{ID: 1, OK: false, Error: serverErr}))
 	err := downloadFile(ch, "/remote/loop/file.txt", filepath.Join(t.TempDir(), "out"), true, nil)
 	if err == nil || err.Error() != serverErr {
 		t.Fatalf("expected unchanged server error, got: %v", err)
@@ -722,7 +735,7 @@ func TestUploadFile_ServerErrorIncludesPath(t *testing.T) {
 	localPath := filepath.Join(tmp, "local.txt")
 	os.WriteFile(localPath, []byte("x"), 0644)
 
-	ch := newMockChannel(makeJSONDataMsg(&Response{ID: 1, OK: false, Error: "too many levels of symbolic links"}))
+	ch := newMockChannel(makeResponseMsg(&Response{ID: 1, OK: false, Error: "too many levels of symbolic links"}))
 	err := uploadFile(ch, localPath, "loop/out.txt", true, nil)
 	if err == nil {
 		t.Fatal("expected error from server")
@@ -739,7 +752,7 @@ func TestUploadFile(t *testing.T) {
 	os.WriteFile(localPath, content, 0644)
 
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{ID: 1, OK: true}),
+		makeResponseMsg(&Response{ID: 1, OK: true}),
 	)
 
 	// Verify that uploadFile sends the data through the channel without error.
@@ -758,14 +771,14 @@ func TestDownloadRecursive(t *testing.T) {
 	localRoot := filepath.Join(tmp, "downloaded")
 
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "remote-dir", IsDir: true}}),
-		makeJSONDataMsg(&Response{ID: 2, OK: true, Entries: []FileInfo{{Name: "subdir", IsDir: true}, {Name: "file.txt", Size: 5, Mode: 0644}}}),
-		makeJSONDataMsg(&Response{ID: 3, OK: true, Info: &FileInfo{Name: "subdir", IsDir: true}}),
-		makeJSONDataMsg(&Response{ID: 4, OK: true, Entries: []FileInfo{{Name: "nested.txt", Size: 11, Mode: 0644}}}),
-		makeJSONDataMsg(&Response{ID: 5, OK: true, Data: []byte("hello world")}),
-		makeJSONDataMsg(&Response{ID: 6, OK: true, Data: []byte{}}),
-		makeJSONDataMsg(&Response{ID: 7, OK: true, Data: []byte("hello")}),
-		makeJSONDataMsg(&Response{ID: 8, OK: true, Data: []byte{}}),
+		makeResponseMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "remote-dir", IsDir: true}}),
+		makeResponseMsg(&Response{ID: 2, OK: true, Entries: []FileInfo{{Name: "subdir", IsDir: true}, {Name: "file.txt", Size: 5, Mode: 0644}}}),
+		makeResponseMsg(&Response{ID: 3, OK: true, Info: &FileInfo{Name: "subdir", IsDir: true}}),
+		makeResponseMsg(&Response{ID: 4, OK: true, Entries: []FileInfo{{Name: "nested.txt", Size: 11, Mode: 0644}}}),
+		makeResponseMsg(&Response{ID: 5, OK: true, Data: []byte("hello world")}),
+		makeResponseMsg(&Response{ID: 6, OK: true, Data: []byte{}}),
+		makeResponseMsg(&Response{ID: 7, OK: true, Data: []byte("hello")}),
+		makeResponseMsg(&Response{ID: 8, OK: true, Data: []byte{}}),
 	)
 
 	if err := downloadRecursive(ch, "remote-dir", localRoot, true, nil); err != nil {
@@ -797,11 +810,11 @@ func TestUploadRecursive(t *testing.T) {
 	os.WriteFile(filepath.Join(localRoot, "subdir", "nested.txt"), []byte("world"), 0644)
 
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{ID: 1, OK: false, Error: "no such file"}),
-		makeJSONDataMsg(&Response{ID: 2, OK: true}),
-		makeJSONDataMsg(&Response{ID: 3, OK: true}),
-		makeJSONDataMsg(&Response{ID: 4, OK: true, Info: &FileInfo{Name: "subdir", IsDir: true}}),
-		makeJSONDataMsg(&Response{ID: 5, OK: true}),
+		makeResponseMsg(&Response{ID: 1, OK: false, Error: "no such file"}),
+		makeResponseMsg(&Response{ID: 2, OK: true}),
+		makeResponseMsg(&Response{ID: 3, OK: true}),
+		makeResponseMsg(&Response{ID: 4, OK: true, Info: &FileInfo{Name: "subdir", IsDir: true}}),
+		makeResponseMsg(&Response{ID: 5, OK: true}),
 	)
 
 	if err := uploadRecursive(ch, localRoot, "remote-dir", true, nil); err != nil {
@@ -826,7 +839,7 @@ func TestUploadFile_DirectoryError(t *testing.T) {
 
 func TestDoRequest(t *testing.T) {
 	want := &Response{ID: 7, OK: true, Path: "/tmp"}
-	ch := newMockChannel(makeJSONDataMsg(want))
+	ch := newMockChannel(makeResponseMsg(want))
 	got, err := doRequest(ch, &Request{Cmd: "pwd"})
 	if err != nil {
 		t.Fatalf("doRequest error: %v", err)
@@ -839,7 +852,7 @@ func TestDoRequest(t *testing.T) {
 		t.Fatalf("expected 1 written request, got %d", len(ch.Writes))
 	}
 	var req Request
-	if err := json.Unmarshal(ch.Writes[0], &req); err != nil {
+	if err := decodeRequestFrame(ch.Writes[0], &req); err != nil {
 		t.Fatalf("unmarshal written request: %v", err)
 	}
 	if req.Cmd != "pwd" {
@@ -850,8 +863,12 @@ func TestDoRequest(t *testing.T) {
 // --- Chunked transfer size boundary tests ---
 
 func TestChunkSizeConstant(t *testing.T) {
-	if ChunkSize != 32*1024 {
-		t.Fatalf("ChunkSize expected %d, got %d", 32*1024, ChunkSize)
+	// Larger chunks amortise per-chunk framing and syscalls over more data,
+	// which is what makes pipelined transfers fast; 128 KiB is a power of
+	// two that keeps the in-flight transfer window (TransferWindow ×
+	// ChunkSize) well under a few MiB per direction.
+	if ChunkSize != 128*1024 {
+		t.Fatalf("ChunkSize expected %d, got %d", 128*1024, ChunkSize)
 	}
 	if TransferWindow < 1 {
 		t.Fatalf("TransferWindow must be at least 1, got %d", TransferWindow)
@@ -872,12 +889,12 @@ func TestDownloadFileContentsPipelined(t *testing.T) {
 	total := int64(n) * ChunkSize
 	var msgs []ssh3Messages.Message
 	for i := 0; i < n; i++ {
-		msgs = append(msgs, makeJSONDataMsg(&Response{ID: uint64(i + 1), OK: true, Data: bytes.Repeat([]byte{byte('a' + i)}, ChunkSize)}))
+		msgs = append(msgs, makeResponseMsg(&Response{ID: uint64(i + 1), OK: true, Data: bytes.Repeat([]byte{byte('a' + i)}, ChunkSize)}))
 	}
 	// Each data response triggers a refill request beyond the end of the
 	// file, which the server answers with an empty payload.
 	for i := 0; i < n; i++ {
-		msgs = append(msgs, makeJSONDataMsg(&Response{ID: uint64(n + i + 1), OK: true, Data: []byte{}}))
+		msgs = append(msgs, makeResponseMsg(&Response{ID: uint64(n + i + 1), OK: true, Data: []byte{}}))
 	}
 	// The initial window is min(TransferWindow, n); the channel must see the
 	// whole window before serving the first response.
@@ -908,7 +925,7 @@ func TestDownloadFileContentsPipelined(t *testing.T) {
 	var reqs []Request
 	for _, w := range ch.Writes {
 		var req Request
-		if err := json.Unmarshal(w, &req); err != nil {
+		if err := decodeRequestFrame(w, &req); err != nil {
 			t.Fatalf("unmarshal request: %v", err)
 		}
 		if req.Cmd != "get" || req.Limit != ChunkSize || req.Offset%ChunkSize != 0 {
@@ -939,7 +956,7 @@ func TestUploadFilePipelined(t *testing.T) {
 
 	var msgs []ssh3Messages.Message
 	for i := 0; i < n; i++ {
-		msgs = append(msgs, makeJSONDataMsg(&Response{ID: uint64(i + 1), OK: true}))
+		msgs = append(msgs, makeResponseMsg(&Response{ID: uint64(i + 1), OK: true}))
 	}
 	ch := newWindowedMockChannel(n, msgs...)
 
@@ -954,7 +971,7 @@ func TestUploadFilePipelined(t *testing.T) {
 	}
 	for i, w := range ch.Writes {
 		var req Request
-		if err := json.Unmarshal(w, &req); err != nil {
+		if err := decodeRequestFrame(w, &req); err != nil {
 			t.Fatalf("unmarshal request %d: %v", i, err)
 		}
 		if req.Cmd != "put" || req.Offset != int64(i)*ChunkSize {
@@ -979,13 +996,13 @@ func TestDownloadFileContentsShortFinalChunk(t *testing.T) {
 	total := int64(n)*ChunkSize + 1234
 	var msgs []ssh3Messages.Message
 	for i := 0; i < n; i++ {
-		msgs = append(msgs, makeJSONDataMsg(&Response{ID: uint64(i + 1), OK: true, Data: bytes.Repeat([]byte{byte('a' + i)}, ChunkSize)}))
+		msgs = append(msgs, makeResponseMsg(&Response{ID: uint64(i + 1), OK: true, Data: bytes.Repeat([]byte{byte('a' + i)}, ChunkSize)}))
 	}
-	msgs = append(msgs, makeJSONDataMsg(&Response{ID: 4, OK: true, Data: bytes.Repeat([]byte{'d'}, 1234)}))
+	msgs = append(msgs, makeResponseMsg(&Response{ID: 4, OK: true, Data: bytes.Repeat([]byte{'d'}, 1234)}))
 	// The four data responses each trigger a refill request beyond the end of
 	// the file, answered with an empty payload.
 	for i := 0; i < 4; i++ {
-		msgs = append(msgs, makeJSONDataMsg(&Response{ID: 5 + uint64(i), OK: true, Data: []byte{}}))
+		msgs = append(msgs, makeResponseMsg(&Response{ID: 5 + uint64(i), OK: true, Data: []byte{}}))
 	}
 
 	ch := newWindowedMockChannel(4, msgs...)
@@ -1226,8 +1243,8 @@ func TestServeChannel_TwoRequests(t *testing.T) {
 
 	req1 := Request{Cmd: "pwd"}
 	req2 := Request{Cmd: "ls", Path: "."}
-	b1, _ := json.Marshal(req1)
-	b2, _ := json.Marshal(req2)
+	b1 := EncodeRequest(&req1)
+	b2 := EncodeRequest(&req2)
 
 	ch := newMockChannel(
 		makeDataMsg(b1),
@@ -1242,8 +1259,8 @@ func TestServeChannel_TwoRequests(t *testing.T) {
 	}
 	var resp1 Response
 	var resp2 Response
-	json.Unmarshal(ch.Writes[0], &resp1)
-	json.Unmarshal(ch.Writes[1], &resp2)
+	decodeResponseFrame(ch.Writes[0], &resp1)
+	decodeResponseFrame(ch.Writes[1], &resp2)
 
 	if !resp1.OK || resp1.Path != tmp {
 		t.Fatalf("unexpected resp1: %+v", resp1)
@@ -1259,16 +1276,12 @@ func TestServeChannel_TwoRequests(t *testing.T) {
 func TestServeChannel_ChunkedRequest(t *testing.T) {
 	tmp := t.TempDir()
 
-	// Build a put request whose JSON payload exceeds one channel data message
-	// (the base64 encoding of the data alone is larger than MaxPacketSize), so
+	// Build a put request whose frame exceeds one channel data message, so
 	// the request arrives split across several messages. The server must
 	// reassemble it before handling, mirroring the response-side reassembly.
-	payload := bytes.Repeat([]byte("abcdefghij"), 3000) // 30000 bytes
+	payload := bytes.Repeat([]byte("abcdefghij"), 3000) // 30000 bytes of data
 	req := Request{Cmd: "put", Path: filepath.Join(tmp, "big.bin"), Data: payload}
-	raw, err := json.Marshal(req)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
+	raw := EncodeRequest(&req)
 	msgs := splitIntoChannelMessages(raw)
 	if len(msgs) < 2 {
 		t.Fatalf("test request too small to be split across messages")
@@ -1282,7 +1295,7 @@ func TestServeChannel_ChunkedRequest(t *testing.T) {
 		t.Fatalf("expected 1 response, got %d", len(ch.Writes))
 	}
 	var resp Response
-	if err := json.Unmarshal(ch.Writes[0], &resp); err != nil {
+	if err := decodeResponseFrame(ch.Writes[0], &resp); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
 	if !resp.OK {
@@ -1381,8 +1394,7 @@ func (q *queuedMockChannel) waitResponses(n int) {
 }
 
 func writeRequest(req Request) *ssh3Messages.DataOrExtendedDataMessage {
-	b, _ := json.Marshal(req)
-	return makeDataMsg(b)
+	return makeDataMsg(EncodeRequest(&req))
 }
 
 func readResponses(t *testing.T, writes [][]byte, n int) []Response {
@@ -1392,7 +1404,7 @@ func readResponses(t *testing.T, writes [][]byte, n int) []Response {
 	}
 	resps := make([]Response, n)
 	for i, w := range writes {
-		if err := json.Unmarshal(w, &resps[i]); err != nil {
+		if err := decodeResponseFrame(w, &resps[i]); err != nil {
 			t.Fatalf("unmarshal response %d: %v", i, err)
 		}
 	}
@@ -1679,7 +1691,7 @@ func lsEntries(names ...string) []FileInfo {
 }
 
 func TestClientDoLsNoArg(t *testing.T) {
-	ch := newMockChannel(makeJSONDataMsg(&Response{
+	ch := newMockChannel(makeResponseMsg(&Response{
 		OK:      true,
 		Entries: lsEntries("."),
 	}))
@@ -1690,7 +1702,7 @@ func TestClientDoLsNoArg(t *testing.T) {
 	if len(ch.Writes) != 1 {
 		t.Fatalf("expected 1 request, got %d", len(ch.Writes))
 	}
-	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+	if err := decodeRequestFrame(ch.Writes[0], &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if got.Cmd != "ls" || got.Path != "/remote" {
@@ -1699,7 +1711,7 @@ func TestClientDoLsNoArg(t *testing.T) {
 }
 
 func TestClientDoLsWildcard(t *testing.T) {
-	ch := newMockChannel(makeJSONDataMsg(&Response{
+	ch := newMockChannel(makeResponseMsg(&Response{
 		OK:      true,
 		Entries: lsEntries("atest", "test", "testa", "test2", "nope"),
 	}))
@@ -1713,7 +1725,7 @@ func TestClientDoLsWildcard(t *testing.T) {
 	if len(ch.Writes) != 1 {
 		t.Fatalf("expected 1 request, got %d", len(ch.Writes))
 	}
-	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+	if err := decodeRequestFrame(ch.Writes[0], &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if got.Cmd != "ls" || got.Path != "/remote/path" {
@@ -1742,7 +1754,7 @@ func TestClientDoLsWildcard(t *testing.T) {
 }
 
 func TestClientDoLsNoMatch(t *testing.T) {
-	ch := newMockChannel(makeJSONDataMsg(&Response{
+	ch := newMockChannel(makeResponseMsg(&Response{
 		OK:      true,
 		Entries: lsEntries("one", "two"),
 	}))
@@ -1757,7 +1769,7 @@ func TestClientDoLsNoMatch(t *testing.T) {
 }
 
 func TestClientDoLsInvalidPattern(t *testing.T) {
-	ch := newMockChannel(makeJSONDataMsg(&Response{OK: true, Entries: lsEntries("a")}))
+	ch := newMockChannel(makeResponseMsg(&Response{OK: true, Entries: lsEntries("a")}))
 	err := doLs(ch, "/remote", []string{"ls", "["})
 	if err == nil {
 		t.Fatal("expected error for invalid glob pattern")
@@ -1768,9 +1780,9 @@ func TestClientDoGetNoGlob(t *testing.T) {
 	localDir := t.TempDir()
 
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "remote.txt", Size: 5}}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte("hello")}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
+		makeResponseMsg(&Response{OK: true, Info: &FileInfo{Name: "remote.txt", Size: 5}}),
+		makeResponseMsg(&Response{OK: true, Data: []byte("hello")}),
+		makeResponseMsg(&Response{OK: true, Data: []byte{}}),
 	)
 
 	if err := doGet(ch, localDir, "/remote", []string{"get", "remote.txt"}, true, nil); err != nil {
@@ -1781,7 +1793,7 @@ func TestClientDoGetNoGlob(t *testing.T) {
 	if len(ch.Writes) != 3 {
 		t.Fatalf("expected 3 requests, got %d", len(ch.Writes))
 	}
-	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+	if err := decodeRequestFrame(ch.Writes[0], &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if got.Cmd != "stat" || got.Path != "/remote/remote.txt" {
@@ -1800,13 +1812,13 @@ func TestClientDoGetWildcard(t *testing.T) {
 	localDir := t.TempDir()
 
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{OK: true, Entries: lsEntries("atest", "test", "testa", "nope")}),
-		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "test", Size: 5}}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte("hello")}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
-		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "testa", Size: 5}}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte("world")}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
+		makeResponseMsg(&Response{OK: true, Entries: lsEntries("atest", "test", "testa", "nope")}),
+		makeResponseMsg(&Response{OK: true, Info: &FileInfo{Name: "test", Size: 5}}),
+		makeResponseMsg(&Response{OK: true, Data: []byte("hello")}),
+		makeResponseMsg(&Response{OK: true, Data: []byte{}}),
+		makeResponseMsg(&Response{OK: true, Info: &FileInfo{Name: "testa", Size: 5}}),
+		makeResponseMsg(&Response{OK: true, Data: []byte("world")}),
+		makeResponseMsg(&Response{OK: true, Data: []byte{}}),
 	)
 
 	if err := doGet(ch, localDir, "/remote/path", []string{"get", "test*"}, true, nil); err != nil {
@@ -1817,7 +1829,7 @@ func TestClientDoGetWildcard(t *testing.T) {
 	if len(ch.Writes) != 7 {
 		t.Fatalf("expected 7 requests, got %d", len(ch.Writes))
 	}
-	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+	if err := decodeRequestFrame(ch.Writes[0], &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if got.Cmd != "ls" || got.Path != "/remote/path" {
@@ -1843,7 +1855,7 @@ func TestClientDoGetWildcard(t *testing.T) {
 func TestClientDoGetNoMatch(t *testing.T) {
 	localDir := t.TempDir()
 
-	ch := newMockChannel(makeJSONDataMsg(&Response{
+	ch := newMockChannel(makeResponseMsg(&Response{
 		OK:      true,
 		Entries: lsEntries("one", "two"),
 	}))
@@ -1864,7 +1876,7 @@ func TestClientDoGetNoMatch(t *testing.T) {
 }
 
 func TestClientDoGetInvalidPattern(t *testing.T) {
-	ch := newMockChannel(makeJSONDataMsg(&Response{OK: true, Entries: lsEntries("a")}))
+	ch := newMockChannel(makeResponseMsg(&Response{OK: true, Entries: lsEntries("a")}))
 	err := doGet(ch, t.TempDir(), "/remote", []string{"get", "["}, true, nil)
 	if err == nil {
 		t.Fatal("expected error for invalid glob pattern")
@@ -1875,10 +1887,10 @@ func TestClientDoGetRecursiveDir(t *testing.T) {
 	localDir := t.TempDir()
 
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "d", IsDir: true}}),
-		makeJSONDataMsg(&Response{OK: true, Entries: []FileInfo{{Name: "f.txt", Size: 5, Mode: 0644}}}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte("hello")}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
+		makeResponseMsg(&Response{OK: true, Info: &FileInfo{Name: "d", IsDir: true}}),
+		makeResponseMsg(&Response{OK: true, Entries: []FileInfo{{Name: "f.txt", Size: 5, Mode: 0644}}}),
+		makeResponseMsg(&Response{OK: true, Data: []byte("hello")}),
+		makeResponseMsg(&Response{OK: true, Data: []byte{}}),
 	)
 
 	if err := doGet(ch, localDir, "/remote", []string{"get", "-r", "d"}, true, nil); err != nil {
@@ -1904,20 +1916,20 @@ func TestClientDoGetRecursiveWildcard(t *testing.T) {
 	ch := newMockChannel(
 		// ls of the globbed parent directory: "atest" does not match "test*",
 		// "test" is a directory and "testa" a file.
-		makeJSONDataMsg(&Response{OK: true, Entries: []FileInfo{
+		makeResponseMsg(&Response{OK: true, Entries: []FileInfo{
 			{Name: "atest"},
 			{Name: "test", IsDir: true},
 			{Name: "testa", Size: 5, Mode: 0644},
 		}}),
 		// Recursing into the matched directory "test".
-		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "test", IsDir: true}}),
-		makeJSONDataMsg(&Response{OK: true, Entries: []FileInfo{{Name: "nested.txt", Size: 11, Mode: 0644}}}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte("hello world")}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
+		makeResponseMsg(&Response{OK: true, Info: &FileInfo{Name: "test", IsDir: true}}),
+		makeResponseMsg(&Response{OK: true, Entries: []FileInfo{{Name: "nested.txt", Size: 11, Mode: 0644}}}),
+		makeResponseMsg(&Response{OK: true, Data: []byte("hello world")}),
+		makeResponseMsg(&Response{OK: true, Data: []byte{}}),
 		// Downloading the matched file "testa".
-		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "testa", Size: 5, Mode: 0644}}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte("world")}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
+		makeResponseMsg(&Response{OK: true, Info: &FileInfo{Name: "testa", Size: 5, Mode: 0644}}),
+		makeResponseMsg(&Response{OK: true, Data: []byte("world")}),
+		makeResponseMsg(&Response{OK: true, Data: []byte{}}),
 	)
 
 	if err := doGet(ch, localDir, "/remote/path", []string{"get", "-r", "test*"}, true, nil); err != nil {
@@ -1951,7 +1963,7 @@ func TestClientDoGetRecursiveWildcard(t *testing.T) {
 		t.Fatalf("expected 8 requests, got %d", len(ch.Writes))
 	}
 	var got Request
-	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+	if err := decodeRequestFrame(ch.Writes[0], &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if got.Cmd != "ls" || got.Path != "/remote/path" {
@@ -1962,7 +1974,7 @@ func TestClientDoGetRecursiveWildcard(t *testing.T) {
 func TestClientDoGetRecursiveWildcardNoMatch(t *testing.T) {
 	localDir := t.TempDir()
 
-	ch := newMockChannel(makeJSONDataMsg(&Response{
+	ch := newMockChannel(makeResponseMsg(&Response{
 		OK:      true,
 		Entries: lsEntries("one", "two"),
 	}))
@@ -1989,8 +2001,8 @@ func TestClientDoPutWildcard(t *testing.T) {
 	os.WriteFile(filepath.Join(localDir, "c.log"), []byte("C"), 0644)
 
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{ID: 1, OK: true}), // put a.txt
-		makeJSONDataMsg(&Response{ID: 2, OK: true}), // put b.txt
+		makeResponseMsg(&Response{ID: 1, OK: true}), // put a.txt
+		makeResponseMsg(&Response{ID: 2, OK: true}), // put b.txt
 	)
 
 	if err := doPut(ch, localDir, "/remote", []string{"put", "*.txt"}, true, nil); err != nil {
@@ -2001,13 +2013,13 @@ func TestClientDoPutWildcard(t *testing.T) {
 		t.Fatalf("expected 2 requests, got %d", len(ch.Writes))
 	}
 	var got Request
-	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+	if err := decodeRequestFrame(ch.Writes[0], &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if got.Cmd != "put" || got.Path != "/remote/a.txt" {
 		t.Errorf("expected put /remote/a.txt, got %s %q", got.Cmd, got.Path)
 	}
-	if err := json.Unmarshal(ch.Writes[1], &got); err != nil {
+	if err := decodeRequestFrame(ch.Writes[1], &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if got.Cmd != "put" || got.Path != "/remote/b.txt" {
@@ -2025,7 +2037,7 @@ func TestClientDoPutWildcardSubdirPattern(t *testing.T) {
 	os.WriteFile(filepath.Join(localDir, "sub", "two.TXT"), []byte("2"), 0644)
 	os.WriteFile(filepath.Join(localDir, "top.txt"), []byte("T"), 0644)
 
-	ch := newMockChannel(makeJSONDataMsg(&Response{ID: 1, OK: true}))
+	ch := newMockChannel(makeResponseMsg(&Response{ID: 1, OK: true}))
 
 	if err := doPut(ch, localDir, "/remote", []string{"put", "sub/*.txt"}, true, nil); err != nil {
 		t.Fatalf("doPut error: %v", err)
@@ -2034,7 +2046,7 @@ func TestClientDoPutWildcardSubdirPattern(t *testing.T) {
 		t.Fatalf("expected 1 request, got %d", len(ch.Writes))
 	}
 	var got Request
-	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+	if err := decodeRequestFrame(ch.Writes[0], &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if got.Cmd != "put" || got.Path != "/remote/one.txt" {
@@ -2051,9 +2063,9 @@ func TestClientDoPutWildcardToRemoteDir(t *testing.T) {
 	os.WriteFile(filepath.Join(localDir, "b.log"), []byte("B"), 0644)
 
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "logs", IsDir: true}}), // stat /remote/logs
-		makeJSONDataMsg(&Response{ID: 2, OK: true}),                                             // put a.log
-		makeJSONDataMsg(&Response{ID: 3, OK: true}),                                             // put b.log
+		makeResponseMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "logs", IsDir: true}}), // stat /remote/logs
+		makeResponseMsg(&Response{ID: 2, OK: true}),                                             // put a.log
+		makeResponseMsg(&Response{ID: 3, OK: true}),                                             // put b.log
 	)
 
 	if err := doPut(ch, localDir, "/remote", []string{"put", "*.log", "logs"}, true, nil); err != nil {
@@ -2064,13 +2076,13 @@ func TestClientDoPutWildcardToRemoteDir(t *testing.T) {
 		t.Fatalf("expected 3 requests, got %d", len(ch.Writes))
 	}
 	var got Request
-	if err := json.Unmarshal(ch.Writes[1], &got); err != nil {
+	if err := decodeRequestFrame(ch.Writes[1], &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if got.Cmd != "put" || got.Path != "/remote/logs/a.log" {
 		t.Errorf("expected put /remote/logs/a.log, got %s %q", got.Cmd, got.Path)
 	}
-	if err := json.Unmarshal(ch.Writes[2], &got); err != nil {
+	if err := decodeRequestFrame(ch.Writes[2], &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if got.Cmd != "put" || got.Path != "/remote/logs/b.log" {
@@ -2085,7 +2097,7 @@ func TestClientDoPutWildcardToNonDirectory(t *testing.T) {
 	os.WriteFile(filepath.Join(localDir, "a.log"), []byte("A"), 0644)
 	os.WriteFile(filepath.Join(localDir, "b.log"), []byte("B"), 0644)
 
-	ch := newMockChannel(makeJSONDataMsg(&Response{ID: 1, OK: false, Error: "no such file"}))
+	ch := newMockChannel(makeResponseMsg(&Response{ID: 1, OK: false, Error: "no such file"}))
 
 	err := doPut(ch, localDir, "/remote", []string{"put", "*.log", "logs"}, true, nil)
 	if err == nil {
@@ -2103,8 +2115,8 @@ func TestClientDoPutSingleToRemoteDir(t *testing.T) {
 	os.WriteFile(filepath.Join(localDir, "a.txt"), []byte("A"), 0644)
 
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "dir", IsDir: true}}),
-		makeJSONDataMsg(&Response{ID: 2, OK: true}),
+		makeResponseMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "dir", IsDir: true}}),
+		makeResponseMsg(&Response{ID: 2, OK: true}),
 	)
 
 	if err := doPut(ch, localDir, "/remote", []string{"put", "a.txt", "dir"}, true, nil); err != nil {
@@ -2114,7 +2126,7 @@ func TestClientDoPutSingleToRemoteDir(t *testing.T) {
 		t.Fatalf("expected 2 requests, got %d", len(ch.Writes))
 	}
 	var got Request
-	if err := json.Unmarshal(ch.Writes[1], &got); err != nil {
+	if err := decodeRequestFrame(ch.Writes[1], &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if got.Cmd != "put" || got.Path != "/remote/dir/a.txt" {
@@ -2130,8 +2142,8 @@ func TestClientDoPutSingleToNewName(t *testing.T) {
 	os.WriteFile(filepath.Join(localDir, "a.txt"), []byte("A"), 0644)
 
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{ID: 1, OK: false, Error: "no such file"}),
-		makeJSONDataMsg(&Response{ID: 2, OK: true}),
+		makeResponseMsg(&Response{ID: 1, OK: false, Error: "no such file"}),
+		makeResponseMsg(&Response{ID: 2, OK: true}),
 	)
 
 	if err := doPut(ch, localDir, "/remote", []string{"put", "a.txt", "newname"}, true, nil); err != nil {
@@ -2141,7 +2153,7 @@ func TestClientDoPutSingleToNewName(t *testing.T) {
 		t.Fatalf("expected 2 requests, got %d", len(ch.Writes))
 	}
 	var got Request
-	if err := json.Unmarshal(ch.Writes[1], &got); err != nil {
+	if err := decodeRequestFrame(ch.Writes[1], &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if got.Cmd != "put" || got.Path != "/remote/newname" {
@@ -2156,7 +2168,7 @@ func TestClientDoPutEscapedGlob(t *testing.T) {
 	localDir := t.TempDir()
 	os.WriteFile(filepath.Join(localDir, "star*file"), []byte("S"), 0644)
 
-	ch := newMockChannel(makeJSONDataMsg(&Response{ID: 1, OK: true}))
+	ch := newMockChannel(makeResponseMsg(&Response{ID: 1, OK: true}))
 
 	// parts[1] is what makeargv produces for the typed `star\*file`.
 	if err := doPut(ch, localDir, "/remote", []string{"put", `star\*file`}, true, nil); err != nil {
@@ -2166,7 +2178,7 @@ func TestClientDoPutEscapedGlob(t *testing.T) {
 		t.Fatalf("expected 1 request, got %d", len(ch.Writes))
 	}
 	var got Request
-	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+	if err := decodeRequestFrame(ch.Writes[0], &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if got.Cmd != "put" || got.Path != "/remote/star*file" {
@@ -2193,7 +2205,7 @@ func TestClientDoPutQuotedMetachar(t *testing.T) {
 		t.Fatalf("expected escaped source %q, got %q", `star\*file`, parts[1])
 	}
 
-	ch := newMockChannel(makeJSONDataMsg(&Response{OK: true}))
+	ch := newMockChannel(makeResponseMsg(&Response{OK: true}))
 	if err := doPut(ch, localDir, "/remote", parts, true, nil); err != nil {
 		t.Fatalf("doPut error: %v", err)
 	}
@@ -2202,7 +2214,7 @@ func TestClientDoPutQuotedMetachar(t *testing.T) {
 	if len(ch.Writes) != 1 {
 		t.Fatalf("expected 1 request, got %d", len(ch.Writes))
 	}
-	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+	if err := decodeRequestFrame(ch.Writes[0], &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if got.Cmd != "put" || got.Path != "/remote/star*file" {
@@ -2247,11 +2259,11 @@ func TestClientDoPutRecursiveWildcard(t *testing.T) {
 	os.WriteFile(filepath.Join(localDir, "solo.txt"), []byte("solo"), 0644)
 
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{ID: 1, OK: false, Error: "no such file"}),                       // stat /remote/d
-		makeJSONDataMsg(&Response{ID: 2, OK: true, Info: &FileInfo{Name: "remote", IsDir: true}}), // stat /remote
-		makeJSONDataMsg(&Response{ID: 3, OK: true}),                                               // mkdir /remote/d
-		makeJSONDataMsg(&Response{ID: 4, OK: true}),                                               // put /remote/d/f.txt
-		makeJSONDataMsg(&Response{ID: 5, OK: true}),                                               // put /remote/solo.txt
+		makeResponseMsg(&Response{ID: 1, OK: false, Error: "no such file"}),                       // stat /remote/d
+		makeResponseMsg(&Response{ID: 2, OK: true, Info: &FileInfo{Name: "remote", IsDir: true}}), // stat /remote
+		makeResponseMsg(&Response{ID: 3, OK: true}),                                               // mkdir /remote/d
+		makeResponseMsg(&Response{ID: 4, OK: true}),                                               // put /remote/d/f.txt
+		makeResponseMsg(&Response{ID: 5, OK: true}),                                               // put /remote/solo.txt
 	)
 
 	if err := doPut(ch, localDir, "/remote", []string{"put", "-r", "*"}, true, nil); err != nil {
@@ -2261,13 +2273,13 @@ func TestClientDoPutRecursiveWildcard(t *testing.T) {
 		t.Fatalf("expected 5 requests, got %d", len(ch.Writes))
 	}
 	var mkdirReq, putReq Request
-	if err := json.Unmarshal(ch.Writes[2], &mkdirReq); err != nil {
+	if err := decodeRequestFrame(ch.Writes[2], &mkdirReq); err != nil {
 		t.Fatalf("unmarshal mkdir: %v", err)
 	}
 	if mkdirReq.Cmd != "mkdir" || mkdirReq.Path != "/remote/d" {
 		t.Errorf("expected mkdir /remote/d, got %s %q", mkdirReq.Cmd, mkdirReq.Path)
 	}
-	if err := json.Unmarshal(ch.Writes[4], &putReq); err != nil {
+	if err := decodeRequestFrame(ch.Writes[4], &putReq); err != nil {
 		t.Fatalf("unmarshal put: %v", err)
 	}
 	if putReq.Cmd != "put" || putReq.Path != "/remote/solo.txt" {
@@ -2284,13 +2296,13 @@ func TestClientDoGetWildcardToLocalDir(t *testing.T) {
 	os.MkdirAll(destDir, 0o755)
 
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{OK: true, Entries: lsEntries("test", "testa", "nope")}),
-		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "test", Size: 5}}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte("hello")}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
-		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "testa", Size: 5}}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte("world")}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
+		makeResponseMsg(&Response{OK: true, Entries: lsEntries("test", "testa", "nope")}),
+		makeResponseMsg(&Response{OK: true, Info: &FileInfo{Name: "test", Size: 5}}),
+		makeResponseMsg(&Response{OK: true, Data: []byte("hello")}),
+		makeResponseMsg(&Response{OK: true, Data: []byte{}}),
+		makeResponseMsg(&Response{OK: true, Info: &FileInfo{Name: "testa", Size: 5}}),
+		makeResponseMsg(&Response{OK: true, Data: []byte("world")}),
+		makeResponseMsg(&Response{OK: true, Data: []byte{}}),
 	)
 
 	if err := doGet(ch, localDir, "/remote/path", []string{"get", "test*", "dest"}, true, nil); err != nil {
@@ -2300,7 +2312,7 @@ func TestClientDoGetWildcardToLocalDir(t *testing.T) {
 	// The ls request must target the source parent directory, not the
 	// destination.
 	var got Request
-	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+	if err := decodeRequestFrame(ch.Writes[0], &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if got.Cmd != "ls" || got.Path != "/remote/path" {
@@ -2329,10 +2341,10 @@ func TestClientDoGetWildcardToTrailingSlashDir(t *testing.T) {
 	localDir := t.TempDir()
 
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{OK: true, Entries: lsEntries("test")}),
-		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "test", Size: 5}}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte("hello")}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
+		makeResponseMsg(&Response{OK: true, Entries: lsEntries("test")}),
+		makeResponseMsg(&Response{OK: true, Info: &FileInfo{Name: "test", Size: 5}}),
+		makeResponseMsg(&Response{OK: true, Data: []byte("hello")}),
+		makeResponseMsg(&Response{OK: true, Data: []byte{}}),
 	)
 
 	if err := doGet(ch, localDir, "/remote/path", []string{"get", "test*", "newdir/"}, true, nil); err != nil {
@@ -2355,10 +2367,10 @@ func TestClientDoGetWildcardSingleToFile(t *testing.T) {
 	localDir := t.TempDir()
 
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{OK: true, Entries: lsEntries("test")}),
-		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "test", Size: 5}}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte("hello")}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
+		makeResponseMsg(&Response{OK: true, Entries: lsEntries("test")}),
+		makeResponseMsg(&Response{OK: true, Info: &FileInfo{Name: "test", Size: 5}}),
+		makeResponseMsg(&Response{OK: true, Data: []byte("hello")}),
+		makeResponseMsg(&Response{OK: true, Data: []byte{}}),
 	)
 
 	if err := doGet(ch, localDir, "/remote/path", []string{"get", "test*", "out.txt"}, true, nil); err != nil {
@@ -2380,7 +2392,7 @@ func TestClientDoGetWildcardSingleToFile(t *testing.T) {
 func TestClientDoGetWildcardMultiToNonDir(t *testing.T) {
 	localDir := t.TempDir()
 
-	ch := newMockChannel(makeJSONDataMsg(&Response{OK: true, Entries: lsEntries("test", "testa")}))
+	ch := newMockChannel(makeResponseMsg(&Response{OK: true, Entries: lsEntries("test", "testa")}))
 
 	err := doGet(ch, localDir, "/remote/path", []string{"get", "test*", "out.txt"}, true, nil)
 	if err == nil {
@@ -2400,9 +2412,9 @@ func TestClientDoGetToExistingLocalDir(t *testing.T) {
 	os.MkdirAll(destDir, 0o755)
 
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "remote.txt", Size: 5}}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte("hello")}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
+		makeResponseMsg(&Response{OK: true, Info: &FileInfo{Name: "remote.txt", Size: 5}}),
+		makeResponseMsg(&Response{OK: true, Data: []byte("hello")}),
+		makeResponseMsg(&Response{OK: true, Data: []byte{}}),
 	)
 
 	if err := doGet(ch, localDir, "/remote", []string{"get", "remote.txt", "dest"}, true, nil); err != nil {
@@ -2425,9 +2437,9 @@ func TestClientDoGetToNewLocalName(t *testing.T) {
 	localDir := t.TempDir()
 
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "remote.txt", Size: 5}}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte("hello")}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
+		makeResponseMsg(&Response{OK: true, Info: &FileInfo{Name: "remote.txt", Size: 5}}),
+		makeResponseMsg(&Response{OK: true, Data: []byte("hello")}),
+		makeResponseMsg(&Response{OK: true, Data: []byte{}}),
 	)
 
 	newName := filepath.Join(localDir, "newname")
@@ -2452,9 +2464,9 @@ func TestClientDoGetToAbsoluteTarget(t *testing.T) {
 	target := filepath.Join(outDir, "absolute.txt")
 
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{OK: true, Info: &FileInfo{Name: "remote.txt", Size: 5}}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte("hello")}),
-		makeJSONDataMsg(&Response{OK: true, Data: []byte{}}),
+		makeResponseMsg(&Response{OK: true, Info: &FileInfo{Name: "remote.txt", Size: 5}}),
+		makeResponseMsg(&Response{OK: true, Data: []byte("hello")}),
+		makeResponseMsg(&Response{OK: true, Data: []byte{}}),
 	)
 
 	if err := doGet(ch, localDir, "/remote", []string{"get", "remote.txt", target}, true, nil); err != nil {

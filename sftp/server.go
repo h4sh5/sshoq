@@ -2,7 +2,6 @@ package sftp
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -73,7 +72,7 @@ func serveChannelInProcess(ctx context.Context, user *unix_util.User, channel sf
 	defer log.Info().Msgf("ending SFTP session for user %s", user.Username)
 
 	for {
-		payload, err := receiveJSON(channel)
+		payload, err := receiveFrame(channel)
 		if err != nil {
 			if err != io.EOF {
 				log.Error().Msgf("sftp channel error: %s", err)
@@ -82,7 +81,7 @@ func serveChannelInProcess(ctx context.Context, user *unix_util.User, channel sf
 		}
 
 		var req Request
-		if err := json.Unmarshal(payload, &req); err != nil {
+		if err := DecodeRequest(payload, &req); err != nil {
 			session.respond(&Response{Error: fmt.Sprintf("invalid request: %s", err)})
 			continue
 		}
@@ -210,11 +209,10 @@ func (s *ServerSession) groupName(gid uint32) string {
 }
 
 func (s *ServerSession) respond(resp *Response) error {
-	data, err := json.Marshal(resp)
-	if err != nil {
-		return err
-	}
-	_, err = s.channel.WriteData(data, ssh3Messages.SSH_EXTENDED_DATA_NONE)
+	buf := framePool.Get().([]byte)
+	buf = encodeResponseFrameInto(buf, resp)
+	_, err := s.channel.WriteData(buf, ssh3Messages.SSH_EXTENDED_DATA_NONE)
+	framePool.Put(buf[:4])
 	return err
 }
 

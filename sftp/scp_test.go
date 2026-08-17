@@ -1,7 +1,6 @@
 package sftp
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -16,7 +15,7 @@ func TestScpUploadFileToTrailingSlashTarget(t *testing.T) {
 	os.WriteFile(localPath, []byte("hello"), 0644)
 
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{ID: 1, OK: true}),
+		makeResponseMsg(&Response{ID: 1, OK: true}),
 	)
 
 	if err := scpUpload(ch, false, localPath, "/tmp/", nil); err != nil {
@@ -27,7 +26,7 @@ func TestScpUploadFileToTrailingSlashTarget(t *testing.T) {
 		t.Fatalf("expected 1 request, got %d", len(ch.Writes))
 	}
 	var got Request
-	if err := json.Unmarshal(ch.Writes[0], &got); err != nil {
+	if err := decodeRequestFrame(ch.Writes[0], &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if got.Cmd != "put" || got.Path != "/tmp/local.txt" {
@@ -44,8 +43,8 @@ func TestScpUploadFileToExistingRemoteDir(t *testing.T) {
 	os.WriteFile(localPath, []byte("hello"), 0644)
 
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "remotedir", IsDir: true}}),
-		makeJSONDataMsg(&Response{ID: 2, OK: true}),
+		makeResponseMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "remotedir", IsDir: true}}),
+		makeResponseMsg(&Response{ID: 2, OK: true}),
 	)
 
 	if err := scpUpload(ch, false, localPath, "/tmp/remotedir", nil); err != nil {
@@ -56,10 +55,10 @@ func TestScpUploadFileToExistingRemoteDir(t *testing.T) {
 		t.Fatalf("expected 2 requests (stat + put), got %d", len(ch.Writes))
 	}
 	var statReq, putReq Request
-	if err := json.Unmarshal(ch.Writes[0], &statReq); err != nil {
+	if err := decodeRequestFrame(ch.Writes[0], &statReq); err != nil {
 		t.Fatalf("unmarshal stat: %v", err)
 	}
-	if err := json.Unmarshal(ch.Writes[1], &putReq); err != nil {
+	if err := decodeRequestFrame(ch.Writes[1], &putReq); err != nil {
 		t.Fatalf("unmarshal put: %v", err)
 	}
 	if statReq.Cmd != "stat" || statReq.Path != "/tmp/remotedir" {
@@ -79,8 +78,8 @@ func TestScpUploadFileToNewRemoteName(t *testing.T) {
 	os.WriteFile(localPath, []byte("hello"), 0644)
 
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{ID: 1, OK: false, Error: "no such file"}),
-		makeJSONDataMsg(&Response{ID: 2, OK: true}),
+		makeResponseMsg(&Response{ID: 1, OK: false, Error: "no such file"}),
+		makeResponseMsg(&Response{ID: 2, OK: true}),
 	)
 
 	if err := scpUpload(ch, false, localPath, "/tmp/remotefile", nil); err != nil {
@@ -91,7 +90,7 @@ func TestScpUploadFileToNewRemoteName(t *testing.T) {
 		t.Fatalf("expected 2 requests (stat + put), got %d", len(ch.Writes))
 	}
 	var putReq Request
-	if err := json.Unmarshal(ch.Writes[1], &putReq); err != nil {
+	if err := decodeRequestFrame(ch.Writes[1], &putReq); err != nil {
 		t.Fatalf("unmarshal put: %v", err)
 	}
 	if putReq.Cmd != "put" || putReq.Path != "/tmp/remotefile" {
@@ -139,14 +138,14 @@ func TestScpUploadRecursiveDirectoryToTrailingSlashTarget(t *testing.T) {
 	//   upload file "b.txt":
 	//     put("/tmp/localfolder/sub/b.txt") -> ok
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{ID: 1, OK: false, Error: "no such file"}),
-		makeJSONDataMsg(&Response{ID: 2, OK: true, Info: &FileInfo{Name: "tmp", IsDir: true}}),
-		makeJSONDataMsg(&Response{ID: 3, OK: true}),
-		makeJSONDataMsg(&Response{ID: 4, OK: true}),
-		makeJSONDataMsg(&Response{ID: 5, OK: false, Error: "no such file"}),
-		makeJSONDataMsg(&Response{ID: 6, OK: true, Info: &FileInfo{Name: "localfolder", IsDir: true}}),
-		makeJSONDataMsg(&Response{ID: 7, OK: true}),
-		makeJSONDataMsg(&Response{ID: 8, OK: true}),
+		makeResponseMsg(&Response{ID: 1, OK: false, Error: "no such file"}),
+		makeResponseMsg(&Response{ID: 2, OK: true, Info: &FileInfo{Name: "tmp", IsDir: true}}),
+		makeResponseMsg(&Response{ID: 3, OK: true}),
+		makeResponseMsg(&Response{ID: 4, OK: true}),
+		makeResponseMsg(&Response{ID: 5, OK: false, Error: "no such file"}),
+		makeResponseMsg(&Response{ID: 6, OK: true, Info: &FileInfo{Name: "localfolder", IsDir: true}}),
+		makeResponseMsg(&Response{ID: 7, OK: true}),
+		makeResponseMsg(&Response{ID: 8, OK: true}),
 	)
 
 	if err := scpUpload(ch, true, localDir, "/tmp/", nil); err != nil {
@@ -157,7 +156,7 @@ func TestScpUploadRecursiveDirectoryToTrailingSlashTarget(t *testing.T) {
 		t.Fatalf("expected 8 requests, got %d", len(ch.Writes))
 	}
 	var mkdirReq Request
-	if err := json.Unmarshal(ch.Writes[2], &mkdirReq); err != nil {
+	if err := decodeRequestFrame(ch.Writes[2], &mkdirReq); err != nil {
 		t.Fatalf("unmarshal mkdir: %v", err)
 	}
 	if mkdirReq.Cmd != "mkdir" || mkdirReq.Path != "/tmp/localfolder" {
@@ -174,9 +173,9 @@ func TestScpDownloadToExistingLocalDir(t *testing.T) {
 	content := []byte("hello from remote")
 
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "remote.txt", Size: int64(len(content))}}),
-		makeJSONDataMsg(&Response{ID: 2, OK: true, Data: content}),
-		makeJSONDataMsg(&Response{ID: 3, OK: true, Data: []byte{}}),
+		makeResponseMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "remote.txt", Size: int64(len(content))}}),
+		makeResponseMsg(&Response{ID: 2, OK: true, Data: content}),
+		makeResponseMsg(&Response{ID: 3, OK: true, Data: []byte{}}),
 	)
 
 	if err := scpDownload(ch, false, "/etc/remote.txt", tmp, nil); err != nil {
@@ -195,7 +194,7 @@ func TestScpDownloadToExistingLocalDir(t *testing.T) {
 	if len(ch.Writes) != 3 {
 		t.Fatalf("expected 3 requests, got %d", len(ch.Writes))
 	}
-	if err := json.Unmarshal(ch.Writes[0], &statReq); err != nil {
+	if err := decodeRequestFrame(ch.Writes[0], &statReq); err != nil {
 		t.Fatalf("unmarshal stat: %v", err)
 	}
 	if statReq.Cmd != "stat" || statReq.Path != "/etc/remote.txt" {
@@ -211,9 +210,9 @@ func TestScpDownloadToTrailingSlashLocalTarget(t *testing.T) {
 	content := []byte("hello")
 
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "remote.txt", Size: int64(len(content))}}),
-		makeJSONDataMsg(&Response{ID: 2, OK: true, Data: content}),
-		makeJSONDataMsg(&Response{ID: 3, OK: true, Data: []byte{}}),
+		makeResponseMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "remote.txt", Size: int64(len(content))}}),
+		makeResponseMsg(&Response{ID: 2, OK: true, Data: content}),
+		makeResponseMsg(&Response{ID: 3, OK: true, Data: []byte{}}),
 	)
 
 	target := filepath.Join(tmp, "out") + string(filepath.Separator)
@@ -238,9 +237,9 @@ func TestScpDownloadToNewLocalName(t *testing.T) {
 	content := []byte("hello")
 
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "remote.txt", Size: int64(len(content))}}),
-		makeJSONDataMsg(&Response{ID: 2, OK: true, Data: content}),
-		makeJSONDataMsg(&Response{ID: 3, OK: true, Data: []byte{}}),
+		makeResponseMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "remote.txt", Size: int64(len(content))}}),
+		makeResponseMsg(&Response{ID: 2, OK: true, Data: content}),
+		makeResponseMsg(&Response{ID: 3, OK: true, Data: []byte{}}),
 	)
 
 	newName := filepath.Join(tmp, "newname")
@@ -265,10 +264,10 @@ func TestScpDownloadRecursiveToExistingLocalDir(t *testing.T) {
 	tmp := t.TempDir()
 
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "nginx", IsDir: true}}),
-		makeJSONDataMsg(&Response{ID: 2, OK: true, Entries: []FileInfo{{Name: "nginx.conf", Size: 4, Mode: 0644}}}),
-		makeJSONDataMsg(&Response{ID: 3, OK: true, Data: []byte("conf")}),
-		makeJSONDataMsg(&Response{ID: 4, OK: true, Data: []byte{}}),
+		makeResponseMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "nginx", IsDir: true}}),
+		makeResponseMsg(&Response{ID: 2, OK: true, Entries: []FileInfo{{Name: "nginx.conf", Size: 4, Mode: 0644}}}),
+		makeResponseMsg(&Response{ID: 3, OK: true, Data: []byte("conf")}),
+		makeResponseMsg(&Response{ID: 4, OK: true, Data: []byte{}}),
 	)
 
 	if err := scpDownload(ch, true, "/etc/nginx", tmp, nil); err != nil {

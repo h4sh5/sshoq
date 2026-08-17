@@ -2,7 +2,6 @@ package sftp
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -115,10 +114,10 @@ func TestDownloadFileFollowsServerSymlink(t *testing.T) {
 
 	// stat link.txt -> symlink to real.txt; stat real.txt -> regular file.
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "link.txt", IsSymlink: true, LinkTarget: "real.txt"}}),
-		makeJSONDataMsg(&Response{ID: 2, OK: true, Info: &FileInfo{Name: "real.txt", Size: 5}}),
-		makeJSONDataMsg(&Response{ID: 3, OK: true, Data: []byte("hello")}),
-		makeJSONDataMsg(&Response{ID: 4, OK: true, Data: []byte{}}),
+		makeResponseMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "link.txt", IsSymlink: true, LinkTarget: "real.txt"}}),
+		makeResponseMsg(&Response{ID: 2, OK: true, Info: &FileInfo{Name: "real.txt", Size: 5}}),
+		makeResponseMsg(&Response{ID: 3, OK: true, Data: []byte("hello")}),
+		makeResponseMsg(&Response{ID: 4, OK: true, Data: []byte{}}),
 	)
 
 	if err := downloadFile(ch, "/remote/link.txt", localPath, true, nil); err != nil {
@@ -140,19 +139,19 @@ func TestDownloadFileFollowsServerSymlink(t *testing.T) {
 		t.Fatalf("expected 4 requests, got %d", len(ch.Writes))
 	}
 	var req Request
-	if err := json.Unmarshal(ch.Writes[0], &req); err != nil {
+	if err := decodeRequestFrame(ch.Writes[0], &req); err != nil {
 		t.Fatalf("unmarshal stat: %v", err)
 	}
 	if req.Cmd != "stat" || req.Path != "/remote/link.txt" {
 		t.Fatalf("expected stat /remote/link.txt, got %s %q", req.Cmd, req.Path)
 	}
-	if err := json.Unmarshal(ch.Writes[1], &req); err != nil {
+	if err := decodeRequestFrame(ch.Writes[1], &req); err != nil {
 		t.Fatalf("unmarshal stat: %v", err)
 	}
 	if req.Cmd != "stat" || req.Path != "/remote/real.txt" {
 		t.Fatalf("expected stat /remote/real.txt, got %s %q", req.Cmd, req.Path)
 	}
-	if err := json.Unmarshal(ch.Writes[2], &req); err != nil {
+	if err := decodeRequestFrame(ch.Writes[2], &req); err != nil {
 		t.Fatalf("unmarshal get: %v", err)
 	}
 	if req.Cmd != "get" || req.Path != "/remote/real.txt" {
@@ -165,16 +164,16 @@ func TestDownloadFileFollowsRelativeAndAbsoluteTargets(t *testing.T) {
 
 	// link -> ../other/real.txt (relative to the link's directory).
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "link", IsSymlink: true, LinkTarget: "../other/real.txt"}}),
-		makeJSONDataMsg(&Response{ID: 2, OK: true, Info: &FileInfo{Name: "real.txt", Size: 4}}),
-		makeJSONDataMsg(&Response{ID: 3, OK: true, Data: []byte("data")}),
-		makeJSONDataMsg(&Response{ID: 4, OK: true, Data: []byte{}}),
+		makeResponseMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "link", IsSymlink: true, LinkTarget: "../other/real.txt"}}),
+		makeResponseMsg(&Response{ID: 2, OK: true, Info: &FileInfo{Name: "real.txt", Size: 4}}),
+		makeResponseMsg(&Response{ID: 3, OK: true, Data: []byte("data")}),
+		makeResponseMsg(&Response{ID: 4, OK: true, Data: []byte{}}),
 	)
 	if err := downloadFile(ch, "/home/u/sub/link", localPath, true, nil); err != nil {
 		t.Fatalf("downloadFile (relative target) error: %v", err)
 	}
 	var req Request
-	if err := json.Unmarshal(ch.Writes[1], &req); err != nil {
+	if err := decodeRequestFrame(ch.Writes[1], &req); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if req.Path != "/home/u/other/real.txt" {
@@ -183,15 +182,15 @@ func TestDownloadFileFollowsRelativeAndAbsoluteTargets(t *testing.T) {
 
 	// link -> /etc/passwd (absolute target used verbatim).
 	ch2 := newMockChannel(
-		makeJSONDataMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "link", IsSymlink: true, LinkTarget: "/etc/passwd"}}),
-		makeJSONDataMsg(&Response{ID: 2, OK: true, Info: &FileInfo{Name: "passwd", Size: 4}}),
-		makeJSONDataMsg(&Response{ID: 3, OK: true, Data: []byte("data")}),
-		makeJSONDataMsg(&Response{ID: 4, OK: true, Data: []byte{}}),
+		makeResponseMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "link", IsSymlink: true, LinkTarget: "/etc/passwd"}}),
+		makeResponseMsg(&Response{ID: 2, OK: true, Info: &FileInfo{Name: "passwd", Size: 4}}),
+		makeResponseMsg(&Response{ID: 3, OK: true, Data: []byte("data")}),
+		makeResponseMsg(&Response{ID: 4, OK: true, Data: []byte{}}),
 	)
 	if err := downloadFile(ch2, "/home/u/link", localPath, true, nil); err != nil {
 		t.Fatalf("downloadFile (absolute target) error: %v", err)
 	}
-	if err := json.Unmarshal(ch2.Writes[1], &req); err != nil {
+	if err := decodeRequestFrame(ch2.Writes[1], &req); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if req.Path != "/etc/passwd" {
@@ -201,7 +200,7 @@ func TestDownloadFileFollowsRelativeAndAbsoluteTargets(t *testing.T) {
 
 func TestDownloadFileNoFollowRejectsServerSymlink(t *testing.T) {
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "link.txt", IsSymlink: true, LinkTarget: "real.txt"}}),
+		makeResponseMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "link.txt", IsSymlink: true, LinkTarget: "real.txt"}}),
 	)
 
 	err := downloadFile(ch, "/remote/link.txt", filepath.Join(t.TempDir(), "out"), false, nil)
@@ -222,7 +221,7 @@ func TestDownloadFileFollowSymlinkLoop(t *testing.T) {
 	// returns the same symlink for each of the fatal-link resolution hops.
 	var msgs []ssh3Messages.Message
 	for i := 0; i < maxSymlinkFollow; i++ {
-		msgs = append(msgs, makeJSONDataMsg(&Response{ID: uint64(i + 1), OK: true, Info: &FileInfo{Name: "loop", IsSymlink: true, LinkTarget: "loop"}}))
+		msgs = append(msgs, makeResponseMsg(&Response{ID: uint64(i + 1), OK: true, Info: &FileInfo{Name: "loop", IsSymlink: true, LinkTarget: "loop"}}))
 	}
 	ch := newMockChannel(msgs...)
 	err := downloadFile(ch, "/remote/loop", filepath.Join(t.TempDir(), "out"), true, nil)
@@ -240,18 +239,18 @@ func TestDownloadRecursiveFollowsServerSymlinkToDir(t *testing.T) {
 
 	// remote-dir/ contains a symlink "dirlink" -> "sub" (a directory).
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "remote-dir", IsDir: true}}),
-		makeJSONDataMsg(&Response{ID: 2, OK: true, Entries: []FileInfo{
+		makeResponseMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "remote-dir", IsDir: true}}),
+		makeResponseMsg(&Response{ID: 2, OK: true, Entries: []FileInfo{
 			{Name: "file.txt", Size: 5, Mode: 0644},
 			{Name: "dirlink", IsSymlink: true, LinkTarget: "sub"},
 		}}),
-		makeJSONDataMsg(&Response{ID: 3, OK: true, Data: []byte("hello")}),
-		makeJSONDataMsg(&Response{ID: 4, OK: true, Data: []byte{}}),
+		makeResponseMsg(&Response{ID: 3, OK: true, Data: []byte("hello")}),
+		makeResponseMsg(&Response{ID: 4, OK: true, Data: []byte{}}),
 		// Following dirlink: stat resolves sub, ls sub.
-		makeJSONDataMsg(&Response{ID: 5, OK: true, Info: &FileInfo{Name: "sub", IsDir: true}}),
-		makeJSONDataMsg(&Response{ID: 6, OK: true, Entries: []FileInfo{{Name: "nested.txt", Size: 11, Mode: 0644}}}),
-		makeJSONDataMsg(&Response{ID: 7, OK: true, Data: []byte("hello world")}),
-		makeJSONDataMsg(&Response{ID: 8, OK: true, Data: []byte{}}),
+		makeResponseMsg(&Response{ID: 5, OK: true, Info: &FileInfo{Name: "sub", IsDir: true}}),
+		makeResponseMsg(&Response{ID: 6, OK: true, Entries: []FileInfo{{Name: "nested.txt", Size: 11, Mode: 0644}}}),
+		makeResponseMsg(&Response{ID: 7, OK: true, Data: []byte("hello world")}),
+		makeResponseMsg(&Response{ID: 8, OK: true, Data: []byte{}}),
 	)
 
 	if err := downloadRecursive(ch, "remote-dir", localRoot, true, nil); err != nil {
@@ -278,10 +277,10 @@ func TestDownloadRecursiveNoFollowRejectsServerSymlink(t *testing.T) {
 	localRoot := filepath.Join(t.TempDir(), "downloaded")
 
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "remote-dir", IsDir: true}}),
+		makeResponseMsg(&Response{ID: 1, OK: true, Info: &FileInfo{Name: "remote-dir", IsDir: true}}),
 		// The symlink entry comes first so it is rejected before any file chunk
 		// request is attempted.
-		makeJSONDataMsg(&Response{ID: 2, OK: true, Entries: []FileInfo{
+		makeResponseMsg(&Response{ID: 2, OK: true, Entries: []FileInfo{
 			{Name: "dirlink", IsSymlink: true, LinkTarget: "sub"},
 			{Name: "file.txt", Size: 5, Mode: 0644},
 		}}),
@@ -305,7 +304,7 @@ func TestUploadFileFollowsLocalSymlink(t *testing.T) {
 		t.Skipf("cannot create symlink: %v", err)
 	}
 
-	ch := newMockChannel(makeJSONDataMsg(&Response{ID: 1, OK: true}))
+	ch := newMockChannel(makeResponseMsg(&Response{ID: 1, OK: true}))
 
 	if err := uploadFile(ch, filepath.Join(tmp, "link.txt"), "/remote/link.txt", true, nil); err != nil {
 		t.Fatalf("uploadFile error: %v", err)
@@ -315,7 +314,7 @@ func TestUploadFileFollowsLocalSymlink(t *testing.T) {
 	}
 	// The target's content must be uploaded, not the link itself.
 	var req Request
-	if err := json.Unmarshal(ch.Writes[0], &req); err != nil {
+	if err := decodeRequestFrame(ch.Writes[0], &req); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if string(req.Data) != "upload me" {
@@ -370,17 +369,17 @@ func TestUploadRecursiveFollowsLocalSymlinkToDir(t *testing.T) {
 	//     mkdir("remote-dir/sub") -> ok
 	//   upload nested.txt: put("remote-dir/sub/nested.txt") -> ok
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{ID: 1, OK: false, Error: "no such file"}),
-		makeJSONDataMsg(&Response{ID: 2, OK: true}),
-		makeJSONDataMsg(&Response{ID: 3, OK: false, Error: "no such file"}),
-		makeJSONDataMsg(&Response{ID: 4, OK: true, Info: &FileInfo{Name: "remote-dir", IsDir: true}}),
-		makeJSONDataMsg(&Response{ID: 5, OK: true}),
-		makeJSONDataMsg(&Response{ID: 6, OK: true}),
-		makeJSONDataMsg(&Response{ID: 7, OK: true}),
-		makeJSONDataMsg(&Response{ID: 8, OK: false, Error: "no such file"}),
-		makeJSONDataMsg(&Response{ID: 9, OK: true, Info: &FileInfo{Name: "remote-dir", IsDir: true}}),
-		makeJSONDataMsg(&Response{ID: 10, OK: true}),
-		makeJSONDataMsg(&Response{ID: 11, OK: true}),
+		makeResponseMsg(&Response{ID: 1, OK: false, Error: "no such file"}),
+		makeResponseMsg(&Response{ID: 2, OK: true}),
+		makeResponseMsg(&Response{ID: 3, OK: false, Error: "no such file"}),
+		makeResponseMsg(&Response{ID: 4, OK: true, Info: &FileInfo{Name: "remote-dir", IsDir: true}}),
+		makeResponseMsg(&Response{ID: 5, OK: true}),
+		makeResponseMsg(&Response{ID: 6, OK: true}),
+		makeResponseMsg(&Response{ID: 7, OK: true}),
+		makeResponseMsg(&Response{ID: 8, OK: false, Error: "no such file"}),
+		makeResponseMsg(&Response{ID: 9, OK: true, Info: &FileInfo{Name: "remote-dir", IsDir: true}}),
+		makeResponseMsg(&Response{ID: 10, OK: true}),
+		makeResponseMsg(&Response{ID: 11, OK: true}),
 	)
 
 	if err := uploadRecursive(ch, localRoot, "remote-dir", true, nil); err != nil {
@@ -394,7 +393,7 @@ func TestUploadRecursiveFollowsLocalSymlinkToDir(t *testing.T) {
 	var putReq Request
 	found := false
 	for _, w := range ch.Writes {
-		if err := json.Unmarshal(w, &putReq); err != nil {
+		if err := decodeRequestFrame(w, &putReq); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
 		if putReq.Cmd == "put" && putReq.Path == "remote-dir/dirlink/nested.txt" {
@@ -422,8 +421,8 @@ func TestUploadRecursiveNoFollowRejectsLocalSymlink(t *testing.T) {
 	// ensured (stat miss, then mkdir). With follow=false it is then rejected
 	// as a symbolic link.
 	ch := newMockChannel(
-		makeJSONDataMsg(&Response{ID: 1, OK: false, Error: "no such file"}),
-		makeJSONDataMsg(&Response{ID: 2, OK: true}),
+		makeResponseMsg(&Response{ID: 1, OK: false, Error: "no such file"}),
+		makeResponseMsg(&Response{ID: 2, OK: true}),
 	)
 	err := uploadRecursive(ch, localRoot, "remote-dir", false, nil)
 	if err == nil {
@@ -440,7 +439,7 @@ func requestPaths(writes [][]byte) []string {
 	var out []string
 	for _, w := range writes {
 		var req Request
-		if err := json.Unmarshal(w, &req); err != nil {
+		if err := decodeRequestFrame(w, &req); err != nil {
 			out = append(out, "<unparseable>")
 			continue
 		}
