@@ -252,7 +252,7 @@ func TestServerHandleRequest_cdNotDir(t *testing.T) {
 
 	sess := &ServerSession{currentDir: tmp}
 	resp := sess.handleRequest(Request{Cmd: "cd", Path: "file.txt"})
-	if resp.OK || resp.Error != "not a directory" {
+	if resp.OK || !strings.Contains(resp.Error, "not a directory") {
 		t.Fatalf("unexpected response: %+v", resp)
 	}
 }
@@ -690,6 +690,48 @@ func TestDownloadFile_StatFail(t *testing.T) {
 	}
 }
 
+// TestDownloadFile_ServerErrorIncludesPath verifies that a server error
+// reported without a path is enriched with the remote path on the client, so
+// errors like "too many levels of symbolic links" identify the file.
+func TestDownloadFile_ServerErrorIncludesPath(t *testing.T) {
+	ch := newMockChannel(makeJSONDataMsg(&Response{ID: 1, OK: false, Error: "too many levels of symbolic links"}))
+	err := downloadFile(ch, "loop/file.txt", filepath.Join(t.TempDir(), "out"), nil)
+	if err == nil {
+		t.Fatal("expected error from server")
+	}
+	if !strings.Contains(err.Error(), "loop/file.txt") {
+		t.Fatalf("expected error to include the remote path, got: %v", err)
+	}
+}
+
+// TestDownloadFile_ServerErrorWithPathNotDuplicated verifies that a server
+// error that already carries the path is passed through unchanged.
+func TestDownloadFile_ServerErrorWithPathNotDuplicated(t *testing.T) {
+	const serverErr = "/remote/loop/file.txt: too many levels of symbolic links"
+	ch := newMockChannel(makeJSONDataMsg(&Response{ID: 1, OK: false, Error: serverErr}))
+	err := downloadFile(ch, "/remote/loop/file.txt", filepath.Join(t.TempDir(), "out"), nil)
+	if err == nil || err.Error() != serverErr {
+		t.Fatalf("expected unchanged server error, got: %v", err)
+	}
+}
+
+// TestUploadFile_ServerErrorIncludesPath verifies that an upload rejection by
+// the server is reported with the remote path it concerned.
+func TestUploadFile_ServerErrorIncludesPath(t *testing.T) {
+	tmp := t.TempDir()
+	localPath := filepath.Join(tmp, "local.txt")
+	os.WriteFile(localPath, []byte("x"), 0644)
+
+	ch := newMockChannel(makeJSONDataMsg(&Response{ID: 1, OK: false, Error: "too many levels of symbolic links"}))
+	err := uploadFile(ch, localPath, "loop/out.txt", nil)
+	if err == nil {
+		t.Fatal("expected error from server")
+	}
+	if !strings.Contains(err.Error(), "loop/out.txt") {
+		t.Fatalf("expected error to include the remote path, got: %v", err)
+	}
+}
+
 func TestUploadFile(t *testing.T) {
 	tmp := t.TempDir()
 	localPath := filepath.Join(tmp, "local.txt")
@@ -777,7 +819,7 @@ func TestUploadFile_DirectoryError(t *testing.T) {
 
 	ch := newMockChannel()
 	err := uploadFile(ch, dirPath, "/remote/file", nil)
-	if err == nil || err.Error() != "cannot upload a directory" {
+	if err == nil || !strings.Contains(err.Error(), "cannot upload a directory") {
 		t.Fatalf("expected directory upload error, got: %v", err)
 	}
 }
@@ -1089,6 +1131,90 @@ func TestServerHandleRequest_lsMissing(t *testing.T) {
 	resp := sess.handleRequest(Request{Cmd: "ls", Path: "missing"})
 	if resp.OK || resp.Error == "" {
 		t.Fatalf("expected error for missing dir, got %+v", resp)
+	}
+}
+
+// TestServerHandleRequest_symlinkLoopIncludesPath verifies that syscall errors
+// such as ELOOP ("too many levels of symbolic links") identify the filepath
+// that caused them, both when the loop sits in an ancestor directory
+// (checkAncestorExecute) and when the request target itself is the loop.
+func TestServerHandleRequest_symlinkLoopIncludesPath(t *testing.T) {
+	tmp := t.TempDir()
+	loop := filepath.Join(tmp, "loop")
+	if err := os.Mkdir(loop, 0755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	if err := os.Symlink("loop", filepath.Join(loop, "loop")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	sess := &ServerSession{currentDir: tmp}
+	loopPath := filepath.Join(loop, "loop")
+
+	// The ancestor tmp/loop/loop is a symlink loop: checkAncestorExecute
+	// fails while traversing it and must report the path that failed.
+	resp := sess.handleRequest(Request{Cmd: "ls", Path: "loop/loop/loop"})
+	if resp.OK || resp.Error == "" {
+		t.Fatalf("expected symlink loop error, got %+v", resp)
+	}
+	if !strings.Contains(resp.Error, loopPath) {
+		t.Fatalf("expected error to include path %s, got %q", loopPath, resp.Error)
+	}
+	if !strings.Contains(resp.Error, "symbolic links") {
+		t.Fatalf("expected 'too many levels of symbolic links' error, got %q", resp.Error)
+	}
+
+	// The target itself is a symlink loop: the open fails on the final
+	// component and must report the requested path.
+	resp = sess.handleRequest(Request{Cmd: "get", Path: "loop/loop"})
+	if resp.OK || resp.Error == "" {
+		t.Fatalf("expected symlink loop error, got %+v", resp)
+	}
+	if !strings.Contains(resp.Error, loopPath) {
+		t.Fatalf("expected error to include path %s, got %q", loopPath, resp.Error)
+	}
+	if !strings.Contains(resp.Error, "symbolic links") {
+		t.Fatalf("expected 'too many levels of symbolic links' error, got %q", resp.Error)
+	}
+}
+
+// TestServerHandleRequest_putToDirectoryIncludesPath verifies that a put
+// targeting an existing directory reports the path in its error.
+func TestServerHandleRequest_putToDirectoryIncludesPath(t *testing.T) {
+	tmp := t.TempDir()
+	d := filepath.Join(tmp, "adir")
+	if err := os.Mkdir(d, 0755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+
+	sess := &ServerSession{currentDir: tmp}
+	resp := sess.handleRequest(Request{Cmd: "put", Path: "adir", Data: []byte("x")})
+	if resp.OK || resp.Error == "" {
+		t.Fatalf("expected put to directory to fail, got %+v", resp)
+	}
+	if !strings.Contains(resp.Error, d) {
+		t.Fatalf("expected error to include path %s, got %q", d, resp.Error)
+	}
+	if !strings.Contains(resp.Error, "is a directory") {
+		t.Fatalf("expected 'is a directory' error, got %q", resp.Error)
+	}
+}
+
+// TestServerHandleRequest_missingFileIncludesPath verifies that a missing
+// file is reported with its path for the commands that resolve it.
+func TestServerHandleRequest_missingFileIncludesPath(t *testing.T) {
+	tmp := t.TempDir()
+	missing := filepath.Join(tmp, "missing.txt")
+	sess := &ServerSession{currentDir: tmp}
+
+	for _, cmd := range []string{"stat", "get", "rm", "ls", "cd"} {
+		resp := sess.handleRequest(Request{Cmd: cmd, Path: "missing.txt"})
+		if resp.OK || resp.Error == "" {
+			t.Fatalf("expected error for %s of missing file, got %+v", cmd, resp)
+		}
+		if !strings.Contains(resp.Error, missing) {
+			t.Fatalf("%s: expected error to include path %s, got %q", cmd, missing, resp.Error)
+		}
 	}
 }
 
