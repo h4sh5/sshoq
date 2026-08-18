@@ -21,6 +21,44 @@ func testOptionParsers() map[config.OptionName]config.OptionParser {
 	}
 }
 
+// --- config-dir resolution tests ---
+
+// When -config-dir is empty, the default ~/.ssh3 directory must be used.
+func TestResolveConfigDirDefault(t *testing.T) {
+	// homedir() prefers os/user.Current().HomeDir and ignores the HOME env
+	// var when the current user can be resolved, so compute the expected value
+	// from homedir() itself.
+	expected := path.Join(homedir(), ".ssh3")
+	got := resolveConfigDir("")
+	if got != expected {
+		t.Errorf("expected %s, got %s", expected, got)
+	}
+}
+
+// When -config-dir is provided, it must be used as-is instead of the default.
+func TestResolveConfigDirCustom(t *testing.T) {
+	custom := path.Join(t.TempDir(), "my-custom-config")
+	got := resolveConfigDir(custom)
+	if got != custom {
+		t.Errorf("expected %s, got %s", custom, got)
+	}
+}
+
+// The custom config dir must be used even when HOME points elsewhere.
+func TestResolveConfigDirCustomOverridesHome(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	custom := path.Join(t.TempDir(), "other")
+	got := resolveConfigDir(custom)
+	if got != custom {
+		t.Errorf("expected %s, got %s", custom, got)
+	}
+	if got == path.Join(tmpDir, ".ssh3") {
+		t.Errorf("custom config dir should not fall back to ~/.ssh3")
+	}
+}
+
 // When no identity is configured anywhere, the default private keys from
 // ~/.ssh must be used.
 func TestGetConnectionMaterialFromURL_DefaultKeysFromDotSSH(t *testing.T) {

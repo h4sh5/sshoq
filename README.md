@@ -151,6 +151,12 @@ You can connect to your SSHOQ server at my-server.example.org listening on `/my-
 
       sshoq -i ~/.ssh/id_rsa username@my-server.example.org/my-secret-path
 
+### Custom config directory
+
+By default the SSHOQ client stores its configuration data (such as the `known_hosts` file and the OIDC issuer config) in `~/.ssh3`. You can override this directory with the `-config-dir` flag:
+
+`sshoq -config-dir /path/to/my/config username@my-server.example.org/my-secret-path`
+
 ### Alternate port
 
 Put the alternative port in the URL like so:
