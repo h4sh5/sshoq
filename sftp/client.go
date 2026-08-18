@@ -765,6 +765,12 @@ func doPut(channel ssh3.Channel, localDir, remoteDir string, parts []string, fol
 		}
 
 		if err := uploadOne(channel, localFile, remoteFile, recursive, follow, cancel); err != nil {
+			// With -r a permission-denied match is reported and skipped so
+			// the remaining matches are still transferred.
+			if recursive && isPermissionError(err) {
+				fmt.Fprintf(os.Stderr, "put: %s\n", err)
+				continue
+			}
 			return err
 		}
 	}
@@ -1090,6 +1096,12 @@ func uploadRecursive(channel ssh3.Channel, localPath, remotePath string, follow 
 		childRemote := path.Join(remotePath, entry.Name())
 		childInfo, err := statLocal(childLocal, follow)
 		if err != nil {
+			// A permission-denied entry is reported and skipped so the rest
+			// of the directory is still transferred.
+			if isPermissionError(err) {
+				fmt.Fprintf(os.Stderr, "put: %s\n", err)
+				continue
+			}
 			return err
 		}
 		if !follow && childInfo.Mode()&os.ModeSymlink != 0 {
@@ -1097,9 +1109,22 @@ func uploadRecursive(channel ssh3.Channel, localPath, remotePath string, follow 
 		}
 		if childInfo.IsDir() {
 			if err := uploadRecursive(channel, childLocal, childRemote, follow, cancel); err != nil {
+				// A permission-denied subtree (e.g. an unreadable directory or
+				// one the server refuses to create) is reported and skipped
+				// so the rest of the directory is still transferred.
+				if isPermissionError(err) {
+					fmt.Fprintf(os.Stderr, "put: %s\n", err)
+					continue
+				}
 				return err
 			}
 		} else if err := uploadFile(channel, childLocal, childRemote, follow, cancel); err != nil {
+			// A permission-denied file is reported and skipped so the rest
+			// of the directory is still transferred.
+			if isPermissionError(err) {
+				fmt.Fprintf(os.Stderr, "put: %s\n", err)
+				continue
+			}
 			return err
 		}
 	}
@@ -1275,8 +1300,9 @@ func serverError(path, msg string) error {
 
 // isPermissionError reports whether err is a permission failure: the read or
 // listing of a file the user may not access, reported by the server, or a
-// local permission error while creating the destination. The recursive
-// download skips such entries and continues with the rest of the directory.
+// local permission error while reading the source or creating the
+// destination. Recursive transfers skip such entries and continue with the
+// rest of the directory.
 func isPermissionError(err error) bool {
 	if err == nil {
 		return false
@@ -1423,19 +1449,35 @@ func uploadFile(channel ssh3.Channel, localPath, remotePath string, follow bool,
 		return chunkBuf[:n], off, nil
 	}
 
-	// Issue the initial window of write requests.
+	// drain consumes the responses still in flight for this transfer; it is
+	// called on every error path below. The server answers strictly in request
+	// order, so every response drained belongs to a request sent for
+	// remotePath: without the drain the next transfer would mistake them for
+	// its own responses (a denied file would wrongly deny the file after it).
 	nextChunk := 0
 	pending := 0
+	drain := func() {
+		for pending > 0 {
+			pending--
+			if _, err := ReceiveResponse(channel); err != nil {
+				break
+			}
+		}
+	}
+
+	// Issue the initial window of write requests.
 	for pending < window && nextChunk < chunks {
 		if prog.cancelled() {
 			return ErrCancelled
 		}
 		data, off, err := readChunk()
 		if err != nil {
+			drain()
 			return err
 		}
 		if len(data) > 0 {
 			if err := SendRequest(channel, &Request{Cmd: "put", Path: remotePath, Offset: off, Data: data}); err != nil {
+				drain()
 				return err
 			}
 		}
@@ -1456,8 +1498,14 @@ func uploadFile(channel ssh3.Channel, localPath, remotePath string, follow bool,
 		if err != nil {
 			return err
 		}
+		pending--
 		if !resp.OK {
-			return serverError(remotePath, resp.Error)
+			// The server denied this write (e.g. permission denied). Every
+			// request in the window is denied too: drain them so the rest of
+			// the directory is still transferred cleanly.
+			err := serverError(remotePath, resp.Error)
+			drain()
+			return err
 		}
 		n := int64(ChunkSize)
 		if remaining := total - int64(acked)*ChunkSize; remaining < n {
@@ -1467,14 +1515,15 @@ func uploadFile(channel ssh3.Channel, localPath, remotePath string, follow bool,
 			prog.add(n)
 		}
 		acked++
-		pending--
 		if nextChunk < chunks {
 			data, off, err := readChunk()
 			if err != nil {
+				drain()
 				return err
 			}
 			if len(data) > 0 {
 				if err := SendRequest(channel, &Request{Cmd: "put", Path: remotePath, Offset: off, Data: data}); err != nil {
+					drain()
 					return err
 				}
 			}

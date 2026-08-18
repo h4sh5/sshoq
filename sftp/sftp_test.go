@@ -2174,6 +2174,141 @@ func TestClientDoPutWildcardToNonDirectory(t *testing.T) {
 	}
 }
 
+// TestClientDoPutRecursivePermissionDenied exercises put -r on a directory
+// containing a mix of uploadable files and files the server refuses to write
+// (permission denied): each denied file is reported and skipped, and every
+// uploadable file is still uploaded. sa.bin is larger than one chunk so its
+// write window has several in-flight requests, all of which the server
+// denies: the client must drain them so they are not mistaken for the next
+// file's responses. sc.txt sorts after the denied files, so it proves the
+// drained responses of sa.bin were not mistaken for its own.
+func TestClientDoPutRecursivePermissionDenied(t *testing.T) {
+	localDir := t.TempDir()
+	root := filepath.Join(localDir, "d")
+	os.MkdirAll(root, 0o755)
+
+	// A large denied file spans three chunks: three write requests go out and
+	// the server denies all three.
+	bigSize := int64(2*ChunkSize + 10)
+	os.WriteFile(filepath.Join(root, "ok1.txt"), []byte("O1"), 0644)
+	os.WriteFile(filepath.Join(root, "ok2.txt"), []byte("OK2"), 0644)
+	os.WriteFile(filepath.Join(root, "ok3.txt"), []byte("OK3"), 0644)
+	os.WriteFile(filepath.Join(root, "sa.bin"), bytes.Repeat([]byte("s"), int(bigSize)), 0644)
+	os.WriteFile(filepath.Join(root, "sb.txt"), []byte("x"), 0644)
+	os.WriteFile(filepath.Join(root, "sc.txt"), []byte("SC"), 0644)
+
+	ch := newMockChannel(
+		// stat of the top-level directory.
+		makeResponseMsg(&Response{OK: true, Info: &FileInfo{Name: "d", IsDir: true}}),
+		// The uploads of ok1.txt, ok2.txt and ok3.txt succeed.
+		makeResponseMsg(&Response{OK: true}),
+		makeResponseMsg(&Response{OK: true}),
+		makeResponseMsg(&Response{OK: true}),
+		// The server denies all three writes of sa.bin.
+		makeResponseMsg(&Response{OK: false, Error: "sa.bin: permission denied"}),
+		makeResponseMsg(&Response{OK: false, Error: "sa.bin: permission denied"}),
+		makeResponseMsg(&Response{OK: false, Error: "sa.bin: permission denied"}),
+		// The server refuses the single write of sb.txt.
+		makeResponseMsg(&Response{OK: false, Error: "sb.txt: permission denied"}),
+		// The upload of sc.txt succeeds, proving the drained responses of
+		// sa.bin were not mistaken for its own.
+		makeResponseMsg(&Response{OK: true}),
+	)
+
+	if err := doPut(ch, localDir, "/remote", []string{"put", "-r", "d"}, true, nil); err != nil {
+		t.Fatalf("doPut -r error: %v", err)
+	}
+
+	// Every pre-programmed response must have been consumed: the denied
+	// file's in-flight responses were drained rather than left to be
+	// mistaken for the next file's, and every uploadable file was
+	// transferred.
+	if ch.MsgIndex != len(ch.NextMsgs) {
+		t.Fatalf("expected all %d responses to be consumed, got %d: the denied file's in-flight responses were not drained", len(ch.NextMsgs), ch.MsgIndex)
+	}
+
+	// The uploadable files must have been written to the server; the denied
+	// ones are reported and skipped but their requests are still sent.
+	var got Request
+	var paths []string
+	for _, w := range ch.Writes {
+		if err := decodeRequestFrame(w, &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if got.Cmd == "put" {
+			paths = append(paths, got.Path)
+		}
+	}
+	for _, want := range []string{
+		"/remote/d/ok1.txt",
+		"/remote/d/ok2.txt",
+		"/remote/d/ok3.txt",
+		"/remote/d/sc.txt",
+	} {
+		found := false
+		for _, p := range paths {
+			if p == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected put of %s, got puts %v", want, paths)
+		}
+	}
+}
+
+// TestClientDoPutRecursivePermissionDeniedWildcard exercises put -r with a
+// glob source where one match is denied by the server: the denied match is
+// reported and skipped and the remaining matches are still uploaded,
+// mirroring the permission handling of a recursive get.
+func TestClientDoPutRecursivePermissionDeniedWildcard(t *testing.T) {
+	localDir := t.TempDir()
+	os.WriteFile(filepath.Join(localDir, "a.txt"), []byte("A"), 0644)
+	os.WriteFile(filepath.Join(localDir, "b.txt"), []byte("B"), 0644)
+	os.WriteFile(filepath.Join(localDir, "c.txt"), []byte("C"), 0644)
+
+	ch := newMockChannel(
+		// The upload of a.txt succeeds.
+		makeResponseMsg(&Response{OK: true}),
+		// The server refuses to write b.txt.
+		makeResponseMsg(&Response{OK: false, Error: "b.txt: permission denied"}),
+		// The upload of c.txt succeeds.
+		makeResponseMsg(&Response{OK: true}),
+	)
+
+	if err := doPut(ch, localDir, "/remote", []string{"put", "-r", "*.txt"}, true, nil); err != nil {
+		t.Fatalf("doPut -r wildcard error: %v", err)
+	}
+
+	if ch.MsgIndex != len(ch.NextMsgs) {
+		t.Fatalf("expected all %d responses to be consumed, got %d", len(ch.NextMsgs), ch.MsgIndex)
+	}
+
+	var got Request
+	var paths []string
+	for _, w := range ch.Writes {
+		if err := decodeRequestFrame(w, &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if got.Cmd == "put" {
+			paths = append(paths, got.Path)
+		}
+	}
+	for _, want := range []string{"/remote/a.txt", "/remote/c.txt"} {
+		found := false
+		for _, p := range paths {
+			if p == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected put of %s, got puts %v", want, paths)
+		}
+	}
+}
+
 // TestClientDoPutSingleToRemoteDir verifies that a single-source put to an
 // existing remote directory copies the file into it under its own basename.
 func TestClientDoPutSingleToRemoteDir(t *testing.T) {
