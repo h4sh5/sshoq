@@ -2589,3 +2589,152 @@ func TestResolveCDTarget(t *testing.T) {
 		})
 	}
 }
+
+// --- Tilde expansion ---
+
+func TestExpandTilde(t *testing.T) {
+	const remoteHome = "/home/alice"
+	const localHome = "/home/bob"
+
+	// Remote paths are joined and cleaned with path.Join.
+	remoteCases := []struct {
+		in, want string
+	}{
+		{"~", remoteHome},
+		{"~/", remoteHome},
+		{"~/docs", remoteHome + "/docs"},
+		{"~/a/b", remoteHome + "/a/b"},
+		{"~/./x", remoteHome + "/x"},
+		{"~/../x", "/home/x"}, // cleaned like a shell path
+		{"~user", "~user"},    // ~other users are not expanded
+		{"foo~", "foo~"},      // tilde not at the start is literal
+		{"~/docs", remoteHome + "/docs"},
+		{"sub/dir", "sub/dir"},
+		{"", ""},
+	}
+	for _, c := range remoteCases {
+		if got := expandTildePath(c.in, remoteHome); got != c.want {
+			t.Errorf("expandTildePath(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	// Local paths are joined and cleaned with filepath.Join.
+	localCases := []struct {
+		in, want string
+	}{
+		{"~", localHome},
+		{"~/", localHome},
+		{"~/docs", localHome + "/docs"},
+		{"~/a/b", localHome + "/a/b"},
+		{"~bob", "~bob"},
+		{"foo~", "foo~"},
+		{"", ""},
+	}
+	for _, c := range localCases {
+		if got := expandLocalTilde(c.in, localHome); got != c.want {
+			t.Errorf("expandLocalTilde(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	// An unknown home leaves the path untouched, so the command fails with
+	// the underlying error instead of silently pointing at an empty path.
+	if got := expandTildePath("~/x", ""); got != "~/x" {
+		t.Errorf("expandTildePath with empty home = %q, want %q", got, "~/x")
+	}
+	if got := expandLocalTilde("~", ""); got != "~" {
+		t.Errorf("expandLocalTilde with empty home = %q, want %q", got, "~")
+	}
+}
+
+func TestExpandCommandArgs(t *testing.T) {
+	const remoteHome = "/home/alice"
+	const localHome = "/home/bob"
+
+	cases := []struct {
+		name  string
+		parts []string
+		want  []string
+	}{
+		// Remote-only commands expand to the remote home.
+		{name: "ls bare tilde", parts: []string{"ls", "~"}, want: []string{"ls", remoteHome}},
+		{name: "ls tilde subdir", parts: []string{"ls", "~/docs"}, want: []string{"ls", remoteHome + "/docs"}},
+		{name: "ls tilde glob", parts: []string{"ls", "~/te*"}, want: []string{"ls", remoteHome + "/te*"}},
+		{name: "mkdir", parts: []string{"mkdir", "~/new"}, want: []string{"mkdir", remoteHome + "/new"}},
+		{name: "rm", parts: []string{"rm", "~/f.txt"}, want: []string{"rm", remoteHome + "/f.txt"}},
+		{name: "rmdir", parts: []string{"rmdir", "~/d"}, want: []string{"rmdir", remoteHome + "/d"}},
+		// Relative paths and non-tilde arguments are left alone.
+		{name: "ls relative", parts: []string{"ls", "docs"}, want: []string{"ls", "docs"}},
+		{name: "ls absolute", parts: []string{"ls", "/etc"}, want: []string{"ls", "/etc"}},
+		// Local commands expand to the local home.
+		{name: "lcd", parts: []string{"lcd", "~"}, want: []string{"lcd", localHome}},
+		{name: "lls", parts: []string{"lls", "~/pics"}, want: []string{"lls", localHome + "/pics"}},
+		// get: source is remote, target is local.
+		{name: "get remote source", parts: []string{"get", "~"}, want: []string{"get", remoteHome}},
+		{name: "get local target", parts: []string{"get", "f", "~"}, want: []string{"get", "f", localHome}},
+		{name: "get both", parts: []string{"get", "~/f", "~"}, want: []string{"get", remoteHome + "/f", localHome}},
+		{name: "get -r flags", parts: []string{"get", "-r", "~/f", "~"}, want: []string{"get", "-r", remoteHome + "/f", localHome}},
+		// put: source is local, target is remote.
+		{name: "put local source", parts: []string{"put", "~"}, want: []string{"put", localHome}},
+		{name: "put remote target", parts: []string{"put", "f", "~"}, want: []string{"put", "f", remoteHome}},
+		{name: "put both", parts: []string{"put", "~/f", "~"}, want: []string{"put", localHome + "/f", remoteHome}},
+		{name: "put --recursive", parts: []string{"put", "--recursive", "~/f", "~/d"},
+			want: []string{"put", "--recursive", localHome + "/f", remoteHome + "/d"}},
+		// cd resolves "~" itself and is left untouched here.
+		{name: "cd untouched", parts: []string{"cd", "~"}, want: []string{"cd", "~"}},
+		// Commands without path arguments are untouched.
+		{name: "pwd", parts: []string{"pwd"}, want: []string{"pwd"}},
+		{name: "lpwd", parts: []string{"lpwd"}, want: []string{"lpwd"}},
+		{name: "help", parts: []string{"help"}, want: []string{"help"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			parts := append([]string(nil), c.parts...)
+			expandCommandArgs(parts, remoteHome, localHome)
+			if len(parts) != len(c.want) {
+				t.Fatalf("expandCommandArgs(%v) = %v, want %v", c.parts, parts, c.want)
+			}
+			for i := range parts {
+				if parts[i] != c.want[i] {
+					t.Fatalf("expandCommandArgs(%v) = %v, want %v", c.parts, parts, c.want)
+				}
+			}
+		})
+	}
+}
+
+func TestTransferArgIndices(t *testing.T) {
+	if s, tg := transferArgIndices([]string{"get", "src"}); s != 1 || tg != 2 {
+		t.Errorf("no target: source=%d target=%d, want 1 and 2", s, tg)
+	}
+	if s, tg := transferArgIndices([]string{"get", "src", "dst"}); s != 1 || tg != 2 {
+		t.Errorf("with target: source=%d target=%d, want 1 and 2", s, tg)
+	}
+	if s, tg := transferArgIndices([]string{"get", "-r", "src", "dst"}); s != 2 || tg != 3 {
+		t.Errorf("with -r: source=%d target=%d, want 2 and 3", s, tg)
+	}
+	if s, tg := transferArgIndices([]string{"put", "--recursive", "src"}); s != 2 || tg != 3 {
+		t.Errorf("with --recursive: source=%d target=%d, want 2 and 3", s, tg)
+	}
+}
+
+// TestClientDoLsTildeExpandedAbsolute pins that an ls argument whose tilde
+// has been expanded at dispatch time (an absolute path) is sent to the server
+// as-is rather than being joined onto the remote working directory.
+func TestClientDoLsTildeExpandedAbsolute(t *testing.T) {
+	ch := newMockChannel(makeResponseMsg(&Response{OK: true, Entries: lsEntries("notes.txt")}))
+	// parts simulate the output of expandCommandArgs(["ls", "~"]) with a
+	// remote home of /home/alice.
+	if err := doLs(ch, "/remote", []string{"ls", "/home/alice"}); err != nil {
+		t.Fatalf("doLs error: %v", err)
+	}
+	var got Request
+	if len(ch.Writes) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(ch.Writes))
+	}
+	if err := decodeRequestFrame(ch.Writes[0], &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Cmd != "ls" || got.Path != "/home/alice" {
+		t.Fatalf("expected ls /home/alice, got %s %q", got.Cmd, got.Path)
+	}
+}

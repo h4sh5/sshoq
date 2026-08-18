@@ -244,6 +244,13 @@ To use sftp mode on the client, run this to drop into a SFTP shell:
 
 Type `help` in the `sftp>` prompt to see what commands are available.
 
+A leading `~` or `~/` in a path expands to the user's home directory, for
+every SFTP command: the *remote* user's home for remote arguments (`ls`,
+`mkdir`, `rm`, `rmdir`, the `get` source and `put` target) and the *local*
+user's home for local arguments (`lcd`, `lls`, the `get` target and `put`
+source). For example, `ls ~` lists the remote user's home and `lls ~` lists
+the local client user's home.
+
 Symbolic links are followed by default, both directions: `get` resolves
 server-side links (the server reports each link, the client follows it) and
 `put` resolves client-side links, including inside recursive transfers. Pass
