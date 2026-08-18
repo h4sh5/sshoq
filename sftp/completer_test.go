@@ -70,7 +70,7 @@ func TestCompleterRemote(t *testing.T) {
 	// three calls below issues an ls request.
 	ch := newMockChannel(resp, resp, resp)
 	localDir, remoteDir := "/local", "/remote"
-	c := newCompleter(ch, &localDir, &remoteDir)
+	c := newCompleter(ch, &localDir, &remoteDir, "/remote/home", "/local/home")
 
 	cands, start := c([]rune("cd fi"), 5)
 	if start != 3 {
@@ -116,7 +116,7 @@ func TestCompleterRemoteTrailingSlashListsDir(t *testing.T) {
 		FileInfo{Name: "util.go"},
 	)}))
 	localDir, remoteDir := "/local", "/remote"
-	c := newCompleter(ch, &localDir, &remoteDir)
+	c := newCompleter(ch, &localDir, &remoteDir, "/remote/home", "/local/home")
 
 	cands, start := c([]rune("cd docs/m"), 9)
 	if start != 3 {
@@ -141,7 +141,7 @@ func TestCompleterRemoteAbsolute(t *testing.T) {
 		FileInfo{Name: "usr", IsDir: true},
 	)}))
 	localDir, remoteDir := "/local", "/remote"
-	c := newCompleter(ch, &localDir, &remoteDir)
+	c := newCompleter(ch, &localDir, &remoteDir, "/remote/home", "/local/home")
 
 	cands, _ := c([]rune("ls /u"), 5)
 	if len(cands) != 1 || cands[0] != "/usr/" {
@@ -159,7 +159,7 @@ func TestCompleterRemoteAbsolute(t *testing.T) {
 func TestCompleterRemoteError(t *testing.T) {
 	ch := newMockChannel(makeResponseMsg(&Response{OK: false, Error: "no such file"}))
 	localDir, remoteDir := "/local", "/remote"
-	c := newCompleter(ch, &localDir, &remoteDir)
+	c := newCompleter(ch, &localDir, &remoteDir, "/remote/home", "/local/home")
 
 	if cands, _ := c([]rune("cd nope"), 7); cands != nil {
 		t.Errorf("error listing: got %v, want nil", cands)
@@ -175,7 +175,7 @@ func TestCompleterLocal(t *testing.T) {
 		t.Fatal(err)
 	}
 	localDir, remoteDir := dir, "/remote"
-	c := newCompleter(nil, &localDir, &remoteDir)
+	c := newCompleter(nil, &localDir, &remoteDir, "/remote/home", "/local/home")
 
 	cands, start := c([]rune("lls o"), 5)
 	if start != 4 {
@@ -208,7 +208,7 @@ func TestCompleterGetPutSides(t *testing.T) {
 		t.Fatal(err)
 	}
 	localDir, remoteDir := dir, "/remote"
-	c := newCompleter(ch, &localDir, &remoteDir)
+	c := newCompleter(ch, &localDir, &remoteDir, "/remote/home", "/local/home")
 
 	cands, _ := c([]rune("get r"), 5)
 	if len(cands) != 1 || cands[0] != "remote.txt" {
@@ -267,7 +267,7 @@ func TestEditorRemoteTabCompletion(t *testing.T) {
 		width:     80,
 		prompt:    "sftp> ",
 		histPos:   -1,
-		completer: newCompleter(q, &localDir, &remoteDir),
+		completer: newCompleter(q, &localDir, &remoteDir, "/remote/home", "/local/home"),
 	}
 	line := readWithTimeout(t, e, 5*time.Second)
 	if line != "cd src/main.go " {
@@ -318,5 +318,98 @@ func readWithTimeout(t *testing.T, e *lineEditor, d time.Duration) string {
 	case <-time.After(d):
 		t.Fatalf("line editor read timed out after %s", d)
 		return ""
+	}
+}
+
+// TestCompleterRemoteTilde verifies that a bare "~" completes to entries of
+// the remote home directory, rendered with the "~/" prefix the user typed.
+func TestCompleterRemoteTilde(t *testing.T) {
+	ch := newMockChannel(makeResponseMsg(&Response{OK: true, Entries: remoteEntries(
+		FileInfo{Name: "docs", IsDir: true},
+		FileInfo{Name: "id_rsa.pub"},
+	)}))
+	localDir, remoteDir := "/local", "/remote"
+	c := newCompleter(ch, &localDir, &remoteDir, "/home/alice", "/home/bob")
+
+	cands, start := c([]rune("ls ~"), 4)
+	if start != 3 {
+		t.Errorf("start = %d, want 3", start)
+	}
+	// A bare tilde lists the remote home, so the candidates carry the "~/"
+	// prefix and the request lists the expanded home directory.
+	if len(cands) != 2 || cands[0] != "~/docs/" || cands[1] != "~/id_rsa.pub" {
+		t.Errorf("candidates = %v, want [~/docs/ ~/id_rsa.pub]", cands)
+	}
+	var got Request
+	if err := decodeRequestFrame(ch.Writes[0], &got); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+	if got.Cmd != "ls" || got.Path != "/home/alice" {
+		t.Errorf("request = %s %q, want ls %q", got.Cmd, got.Path, "/home/alice")
+	}
+}
+
+// TestCompleterRemoteTildeSubdir verifies that completing a path under "~/"
+// lists the remote home and matches against the final component.
+func TestCompleterRemoteTildeSubdir(t *testing.T) {
+	ch := newMockChannel(makeResponseMsg(&Response{OK: true, Entries: remoteEntries(
+		FileInfo{Name: "doc.pdf"},
+		FileInfo{Name: "lib.go"},
+	)}))
+	localDir, remoteDir := "/local", "/remote"
+	c := newCompleter(ch, &localDir, &remoteDir, "/home/alice", "/home/bob")
+
+	cands, start := c([]rune("ls ~/do"), 6)
+	if start != 3 {
+		t.Errorf("start = %d, want 3", start)
+	}
+	if len(cands) != 1 || cands[0] != "~/doc.pdf" {
+		t.Errorf("candidates = %v, want [~/doc.pdf]", cands)
+	}
+	var got Request
+	if err := decodeRequestFrame(ch.Writes[0], &got); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+	if got.Path != "/home/alice" {
+		t.Errorf("request path = %q, want %q", got.Path, "/home/alice")
+	}
+}
+
+// TestCompleterGetTildeTarget verifies that a tilde target of get (the local
+// side) completes against the local home directory.
+func TestCompleterGetTildeTarget(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "local.txt"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	localDir, remoteDir := "/local", "/remote"
+	c := newCompleter(nil, &localDir, &remoteDir, "/home/alice", dir)
+
+	cands, _ := c([]rune("get remote.txt ~/l"), 17)
+	if len(cands) != 1 || cands[0] != "~/local.txt" {
+		t.Errorf("get tilde target candidates = %v, want [~/local.txt]", cands)
+	}
+}
+
+// TestCompletePathBareTilde verifies the completePath-level handling of a
+// bare tilde word: it lists the home directory and renders "~/"-prefixed
+// candidates, delegating the actual home resolution to the listDir closure.
+func TestCompletePathBareTilde(t *testing.T) {
+	listDir := func(dir string) ([]string, error) {
+		if dir == "~" {
+			return []string{"go/", "notes.txt"}, nil
+		}
+		t.Errorf("unexpected listDir(%q)", dir)
+		return nil, os.ErrNotExist
+	}
+	got := completePath("~", listDir)
+	want := []string{"~/go/", "~/notes.txt"}
+	if len(got) != len(want) {
+		t.Fatalf("completePath(~) = %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("completePath(~) = %v, want %v", got, want)
+		}
 	}
 }

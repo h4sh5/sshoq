@@ -30,6 +30,14 @@ func RunInteractiveClient(c *client.Client, follow bool) error {
 	}
 
 	localDir, _ := os.Getwd()
+	// The local user's home directory, for tilde expansion of local paths
+	// (lcd, lls, the get target and put source).
+	localHome, _ := os.UserHomeDir()
+	if localHome != "" && !filepath.IsAbs(localHome) {
+		if abs, err := filepath.Abs(localHome); err == nil {
+			localHome = abs
+		}
+	}
 	remoteDir := "."
 	// The server starts every SFTP session in the authenticated user's home
 	// directory, so the first pwd reveals it. It backs the `cd`/`cd ~` →
@@ -49,7 +57,7 @@ func RunInteractiveClient(c *client.Client, follow bool) error {
 	}
 	defer input.close()
 	if input.editor != nil {
-		input.editor.completer = newCompleter(channel, &localDir, &remoteDir)
+		input.editor.completer = newCompleter(channel, &localDir, &remoteDir, homeDir, localHome)
 	}
 
 	for {
@@ -78,6 +86,11 @@ func RunInteractiveClient(c *client.Client, follow bool) error {
 
 		cmd := strings.ToLower(parts[0])
 
+		// Expand a leading "~" or "~/" in path arguments to the appropriate
+		// home directory before dispatching: the remote user's home for remote
+		// arguments, the local user's home for local ones.
+		expandCommandArgs(parts, homeDir, localHome)
+
 		switch cmd {
 		case "exit", "quit":
 			return nil
@@ -96,7 +109,7 @@ func RunInteractiveClient(c *client.Client, follow bool) error {
 		case "lls":
 			target := localDir
 			if len(parts) > 1 {
-				target = filepath.Join(localDir, undoGlobEscape(parts[1]))
+				target = resolveLocalPath(localDir, undoGlobEscape(parts[1]))
 			}
 			entries, err := os.ReadDir(target)
 			if err != nil {
@@ -273,6 +286,80 @@ func resolveCDTarget(arg, remoteDir, homeDir, prevDir string, hasPrevDir bool) (
 	}
 }
 
+// expandCommandArgs applies tilde expansion to the argument list of an SFTP
+// command line, replacing a leading "~" or "~/" in each path argument with
+// the appropriate home directory: the remote user's home for remote arguments
+// (ls, mkdir, rm, rmdir, the get source and put target) and the local user's
+// home for local arguments (lcd, lls, the get target and put source). The cd
+// command resolves "~" itself via resolveCDTarget and is left untouched.
+// parts is the argument list produced by makeargv and is mutated in place.
+func expandCommandArgs(parts []string, remoteHome, localHome string) {
+	cmd := strings.ToLower(parts[0])
+	expand := func(i int, home string, join func(...string) string) {
+		if i >= len(parts) {
+			return
+		}
+		parts[i] = expandTilde(parts[i], home, join)
+	}
+	switch cmd {
+	case "lcd", "lls":
+		expand(1, localHome, filepath.Join)
+	case "ls", "mkdir", "rm", "rmdir":
+		expand(1, remoteHome, path.Join)
+	case "get":
+		source, target := transferArgIndices(parts)
+		expand(source, remoteHome, path.Join)
+		expand(target, localHome, filepath.Join)
+	case "put":
+		source, target := transferArgIndices(parts)
+		expand(source, localHome, filepath.Join)
+		expand(target, remoteHome, path.Join)
+	}
+}
+
+// transferArgIndices returns the indexes of the source and target arguments
+// of a get/put command line, skipping flag arguments such as -r.
+func transferArgIndices(parts []string) (source, target int) {
+	source = 1
+	for source < len(parts) && strings.HasPrefix(parts[source], "-") {
+		source++
+	}
+	return source, source + 1
+}
+
+// expandTildePath expands a leading "~" or "~/" in a remote path to the
+// remote user's home directory.
+func expandTildePath(p, home string) string {
+	return expandTilde(p, home, path.Join)
+}
+
+// expandLocalTilde expands a leading "~" or "~/" in a local path to the
+// local user's home directory.
+func expandLocalTilde(p, home string) string {
+	return expandTilde(p, home, filepath.Join)
+}
+
+// expandTilde expands a leading "~" or "~/" in p to home, mirroring shell
+// tilde expansion for the current user: "~" alone becomes home itself and
+// "~/x" becomes home/x. A tilde elsewhere in the path, or one followed by a
+// character other than "/" (e.g. "~other"), is left unchanged. join cleans
+// the joined path (path.Join for remote paths, filepath.Join for local ones),
+// so "~/" with nothing after it yields home. When home is unknown ("") the
+// path is left unchanged so the command fails with the underlying error
+// instead of silently pointing at an empty path.
+func expandTilde(p, home string, join func(...string) string) string {
+	if home == "" {
+		return p
+	}
+	if p == "~" {
+		return home
+	}
+	if strings.HasPrefix(p, "~/") {
+		return join(home, p[2:])
+	}
+	return p
+}
+
 // newCompleter builds the tab-completion callback for the interactive SFTP
 // shell. It completes remote paths (resolved against *remoteDir, listed over
 // the sftp channel) for commands that operate on the remote filesystem, and
@@ -280,8 +367,9 @@ func resolveCDTarget(arg, remoteDir, homeDir, prevDir string, hasPrevDir bool) (
 // source argument is completed on the source side and the target argument on
 // the target side. Candidates are full replacements for the word being edited,
 // with directories ending in "/".
-func newCompleter(channel ssh3.Channel, localDir, remoteDir *string) completeFunc {
+func newCompleter(channel ssh3.Channel, localDir, remoteDir *string, homeDir, localHome string) completeFunc {
 	listRemote := func(dir string) ([]string, error) {
+		dir = expandTildePath(dir, homeDir)
 		if dir == "." {
 			dir = *remoteDir
 		} else if dir != "/" && !path.IsAbs(dir) {
@@ -306,6 +394,7 @@ func newCompleter(channel ssh3.Channel, localDir, remoteDir *string) completeFun
 	}
 
 	listLocal := func(dir string) ([]string, error) {
+		dir = expandLocalTilde(dir, localHome)
 		if dir == "." {
 			dir = *localDir
 		} else if !filepath.IsAbs(dir) {
@@ -431,7 +520,15 @@ func completePath(word string, listDir func(dir string) ([]string, error)) []str
 	dir := "."
 	prefix := word
 	base := "" // the word up to and including its last "/"
-	if i := strings.LastIndex(word, "/"); i >= 0 {
+	if word == "~" {
+		// A bare tilde: list the home directory and render its entries with
+		// the "~/" prefix the user typed, so the completed line expands to
+		// the same path. The listDir closure expands "~" to the actual home
+		// directory for the side being completed.
+		dir = "~"
+		base = "~/"
+		prefix = ""
+	} else if i := strings.LastIndex(word, "/"); i >= 0 {
 		base = word[:i+1]
 		dir = word[:i]
 		if dir == "" {
@@ -1168,7 +1265,12 @@ Paths are parsed like OpenSSH sftp: single quotes ('...') and double quotes
 character (e.g. get 'Downloads/Test File.txt' or put Test\ File.txt).
 A '#' outside quotes starts a comment. Tab completes file paths: local paths
 for lcd/lls and for the source of put and target of get; remote paths for all
-other arguments.`)
+other arguments.
+
+A leading "~" or "~/" in a path expands to the user's home directory: the
+remote user's home for remote arguments (ls, mkdir, rm, rmdir, the source of
+get and the target of put) and the local user's home for local arguments
+(lcd, lls, the target of get and the source of put).`)
 }
 
 func printEntry(name string, info os.FileInfo) {

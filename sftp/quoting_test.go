@@ -638,7 +638,7 @@ func TestCompleterQuotedWord(t *testing.T) {
 		FileInfo{Name: "remote.txt"},
 	)}))
 	localDir, remoteDir := "/local", "/remote"
-	c := newCompleter(ch, &localDir, &remoteDir)
+	c := newCompleter(ch, &localDir, &remoteDir, "/remote/home", "/local/home")
 
 	cands, start := c([]rune("get 'rem"), 8)
 	if start != 4 {
@@ -657,7 +657,7 @@ func TestCompleterQuotedWordWithSpace(t *testing.T) {
 		FileInfo{Name: "foobar.txt"},
 	)}))
 	localDir, remoteDir := "/local", "/remote"
-	c := newCompleter(ch, &localDir, &remoteDir)
+	c := newCompleter(ch, &localDir, &remoteDir, "/remote/home", "/local/home")
 
 	cands, start := c([]rune("cd 'my dir/fo"), 13)
 	if start != 3 {
@@ -686,7 +686,7 @@ func TestCompleterQuotedWordSpecialChars(t *testing.T) {
 		}
 	}
 	localDir, remoteDir := dir, "/remote"
-	c := newCompleter(nil, &localDir, &remoteDir)
+	c := newCompleter(nil, &localDir, &remoteDir, "/remote/home", "/local/home")
 
 	// Unquoted completion escapes the space, quote and star.
 	cands, start := c([]rune("lls "), 4)
@@ -753,7 +753,7 @@ func TestCompleterUTF8Spans(t *testing.T) {
 		FileInfo{Name: "café.txt"},
 	)}))
 	localDir, remoteDir := "/local", "/remote"
-	c := newCompleter(ch, &localDir, &remoteDir)
+	c := newCompleter(ch, &localDir, &remoteDir, "/remote/home", "/local/home")
 
 	// "cd docé/ca" — the first argument starts at rune index 3.
 	buf := []rune("cd docé/ca")
