@@ -46,6 +46,16 @@ func homedir() string {
 	}
 }
 
+// resolveConfigDir returns the directory used to store client configuration
+// data (known_hosts, oidc_config.json, ...). When configDir is non-empty it
+// is used as-is, otherwise the default ~/.ssh3 directory is used.
+func resolveConfigDir(configDir string) string {
+	if configDir != "" {
+		return configDir
+	}
+	return path.Join(homedir(), ".ssh3")
+}
+
 // Prepares the QUIC connection that will be used by SSH3
 // If non-nil, use udpConn as transport (can be used for proxy jump)
 // Otherwise, create a UDPConn from udp://host:port
@@ -613,6 +623,7 @@ func ClientMain() int {
 	issuerUrl := flag.String("use-oidc", "", "if set, force the use of OpenID Connect with the specified issuer url as parameter (it opens a browser window)")
 	oidcConfigFileName := flag.String("oidc-config", "", "OpenID Connect json config file containing the \"client_id\" and \"client_secret\" fields needed for most identity providers")
 	verbose := flag.Bool("v", false, "if set, enable verbose mode")
+	configDir := flag.String("config-dir", "", "if set, use the specified directory for client configuration data (known_hosts, oidc_config.json, ...) instead of the default ~/.ssh3")
 	displayVersion := flag.Bool("version", false, "if set, displays the software version on standard output and exit")
 	noPKCE := flag.Bool("no-pkce", false, "if set perform PKCE challenge-response with oidc")
 	forcePTYAlloc := flag.Bool("force-pty", false, "if set, forces PTY allocation before command execution. Useful for interactive programs.")
@@ -674,7 +685,7 @@ func ClientMain() int {
 
 	useOIDC := *issuerUrl != ""
 
-	ssh3Dir := path.Join(homedir(), ".ssh3")
+	ssh3Dir := resolveConfigDir(*configDir)
 	os.MkdirAll(ssh3Dir, 0700)
 
 	if len(args) == 0 {
