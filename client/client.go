@@ -990,6 +990,40 @@ func parseRequestReverseHeader(channelID uint64, buf util.Reader) (net.IP, uint1
 	return localaddress, localport, remoteaddress, remoteport, nil
 }
 
+// channelRequestSender is the minimal channel surface needed to send
+// channel requests (it is implemented by ssh3.Channel).
+type channelRequestSender interface {
+	SendRequest(r *ssh3Messages.ChannelRequestMessage) error
+}
+
+// sendEnvRequests sends one "env" channel request per "NAME=VALUE" entry.
+// It must be called before the pty/shell/exec requests so that the server
+// can apply the variables to the process it will start. Malformed entries
+// (empty name, no '=') are logged and skipped.
+func sendEnvRequests(channel channelRequestSender, envVars []string) error {
+	for _, kv := range envVars {
+		name, value, found := strings.Cut(kv, "=")
+		if !found || name == "" {
+			log.Warn().Msgf("skipping invalid environment variable %q: expected a NAME=VALUE pair", kv)
+			continue
+		}
+		err := channel.SendRequest(
+			&ssh3Messages.ChannelRequestMessage{
+				WantReply: true,
+				ChannelRequest: &ssh3Messages.EnvRequest{
+					Name:  name,
+					Value: value,
+				},
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("could not send env request for %q: %w", name, err)
+		}
+		log.Debug().Msgf("sent env request: %s=%s", name, value)
+	}
+	return nil
+}
+
 // readFirstMsg returns (msgType, payload, err) from an ssh3.Channel.
 func readFirstMsg(ctx context.Context, ch ssh3.Channel) (byte, []byte, error) {
 	// Try a NextMessage-style API
@@ -1007,7 +1041,7 @@ func readFirstMsg(ctx context.Context, ch ssh3.Channel) (byte, []byte, error) {
 	return 0, nil, fmt.Errorf("channel doesn't expose a message-read method")
 }
 
-func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, forcePTYAlloc bool, command ...string) error {
+func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, forcePTYAlloc bool, envVars []string, command ...string) error {
 
 	ctx := c.Context()
 
@@ -1073,6 +1107,14 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, forcePTYAlloc bo
 	}
 
 	log.Debug().Msgf("opened new session channel")
+
+	// Environment variables (SetEnv/SendEnv from the ssh config) must be
+	// requested before the shell or command is started, as they define the
+	// environment of the process that will run on the server.
+	if err := sendEnvRequests(channel, envVars); err != nil {
+		fmt.Fprintf(os.Stderr, "Could not send environment variables: %+v\n", err)
+		return err
+	}
 
 	if forwardSSHAgent {
 		_, err := channel.WriteData([]byte("forward-agent"), ssh3Messages.SSH_EXTENDED_DATA_NONE)

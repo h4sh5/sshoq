@@ -1,0 +1,104 @@
+package client
+
+import (
+	"testing"
+
+	ssh3Messages "github.com/h4sh5/sshoq/message"
+)
+
+// recordingChannel records every request sent through it.
+type recordingChannel struct {
+	sentRequests []*ssh3Messages.ChannelRequestMessage
+}
+
+func (c *recordingChannel) SendRequest(r *ssh3Messages.ChannelRequestMessage) error {
+	c.sentRequests = append(c.sentRequests, r)
+	return nil
+}
+
+var _ channelRequestSender = &recordingChannel{}
+
+func TestSendEnvRequests_AllSent(t *testing.T) {
+	channel := &recordingChannel{}
+	err := sendEnvRequests(channel, []string{"foo=bar", "GREETING=hello world", "EMPTY="})
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if len(channel.sentRequests) != 3 {
+		t.Fatalf("expected 3 requests, got %d", len(channel.sentRequests))
+	}
+	for i, req := range channel.sentRequests {
+		if !req.WantReply {
+			t.Errorf("request %d: wantReply should be true", i)
+		}
+		envReq, ok := req.ChannelRequest.(*ssh3Messages.EnvRequest)
+		if !ok {
+			t.Fatalf("request %d: expected *EnvRequest, got %T", i, req.ChannelRequest)
+		}
+		switch i {
+		case 0:
+			if envReq.Name != "foo" || envReq.Value != "bar" {
+				t.Errorf("request %d: expected foo=bar, got %s=%s", i, envReq.Name, envReq.Value)
+			}
+		case 1:
+			if envReq.Name != "GREETING" || envReq.Value != "hello world" {
+				t.Errorf("request %d: expected GREETING=hello world, got %s=%s", i, envReq.Name, envReq.Value)
+			}
+		case 2:
+			// values may contain further '=' and may be empty; only the first
+			// '=' separates the name from the value
+			if envReq.Name != "EMPTY" || envReq.Value != "" {
+				t.Errorf("request %d: expected EMPTY=, got %s=%s", i, envReq.Name, envReq.Value)
+			}
+		}
+	}
+}
+
+func TestSendEnvRequests_ValueContainsEquals(t *testing.T) {
+	channel := &recordingChannel{}
+	err := sendEnvRequests(channel, []string{"A=B=C=D"})
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if len(channel.sentRequests) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(channel.sentRequests))
+	}
+	envReq, ok := channel.sentRequests[0].ChannelRequest.(*ssh3Messages.EnvRequest)
+	if !ok {
+		t.Fatalf("expected *EnvRequest, got %T", channel.sentRequests[0].ChannelRequest)
+	}
+	if envReq.Name != "A" || envReq.Value != "B=C=D" {
+		t.Errorf("expected A=B=C=D, got %s=%s", envReq.Name, envReq.Value)
+	}
+}
+
+// Malformed entries must be skipped (with a warning) instead of aborting the
+// whole session setup.
+func TestSendEnvRequests_MalformedSkipped(t *testing.T) {
+	channel := &recordingChannel{}
+	err := sendEnvRequests(channel, []string{"noequals", "=orphanvalue", "valid=yes"})
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if len(channel.sentRequests) != 1 {
+		t.Fatalf("expected only the valid entry to be sent, got %d requests", len(channel.sentRequests))
+	}
+	envReq, ok := channel.sentRequests[0].ChannelRequest.(*ssh3Messages.EnvRequest)
+	if !ok {
+		t.Fatalf("expected *EnvRequest, got %T", channel.sentRequests[0].ChannelRequest)
+	}
+	if envReq.Name != "valid" || envReq.Value != "yes" {
+		t.Errorf("expected valid=yes, got %s=%s", envReq.Name, envReq.Value)
+	}
+}
+
+// With no environment variable, no request must be sent and no error returned.
+func TestSendEnvRequests_EmptyList(t *testing.T) {
+	channel := &recordingChannel{}
+	if err := sendEnvRequests(channel, nil); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if len(channel.sentRequests) != 0 {
+		t.Fatalf("expected no requests, got %d", len(channel.sentRequests))
+	}
+}

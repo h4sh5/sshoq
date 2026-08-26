@@ -22,6 +22,7 @@ var ChannelRequestParseFuncs = map[string]func(util.Reader) (ChannelRequest, err
 	"exit-status":   ParseExitStatusRequest,
 	"exit-signal":   ParseExitSignalRequest,
 	"sftp":          ParseSftpRequest,
+	"env":           ParseEnvRequest,
 }
 
 type ChannelRequestMessage struct {
@@ -529,6 +530,59 @@ func (r *ExitSignalRequest) Write(buf []byte) (consumed int, err error) {
 	consumed += n
 
 	n, err = util.WriteSSHString(buf[consumed:], r.LanguageTag)
+	if err != nil {
+		return 0, err
+	}
+	consumed += n
+
+	return consumed, nil
+}
+
+// EnvRequest corresponds to the "env" channel request (cf. RFC 4254 Sec 6.10).
+// It sets a single environment variable name/value pair on the session.
+// It must be sent before a "shell" or "exec" request.
+type EnvRequest struct {
+	Name  string
+	Value string
+}
+
+var _ ChannelRequest = &EnvRequest{}
+
+func ParseEnvRequest(buf util.Reader) (ChannelRequest, error) {
+	name, err := util.ParseSSHString(buf)
+	if err != nil && err != io.EOF {
+		return nil, bufio.ErrAdvanceTooFar
+	}
+	value, err := util.ParseSSHString(buf)
+	if err != nil && err != io.EOF {
+		return nil, bufio.ErrAdvanceTooFar
+	}
+	return &EnvRequest{
+		Name:  name,
+		Value: value,
+	}, err
+}
+
+func (r *EnvRequest) Length() int {
+	return util.SSHStringLen(r.Name) +
+		util.SSHStringLen(r.Value)
+}
+
+func (r *EnvRequest) RequestTypeStr() string {
+	return "env"
+}
+
+func (r *EnvRequest) Write(buf []byte) (consumed int, err error) {
+	if len(buf) < r.Length() {
+		return 0, errors.New("buffer too small to write env request")
+	}
+	n, err := util.WriteSSHString(buf[consumed:], r.Name)
+	if err != nil {
+		return 0, err
+	}
+	consumed += n
+
+	n, err = util.WriteSSHString(buf[consumed:], r.Value)
 	if err != nil {
 		return 0, err
 	}

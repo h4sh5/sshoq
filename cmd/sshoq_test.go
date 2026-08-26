@@ -14,6 +14,18 @@ import (
 	"github.com/kevinburke/ssh_config"
 )
 
+// unsetEnvForTest ensures an environment variable is truly unset for the
+// duration of the test (restoring the previous value afterwards). It must be
+// used instead of t.Setenv(name, ""), which would *set* the variable to an
+// empty value rather than unsetting it.
+func unsetEnvForTest(t *testing.T, key string) {
+	t.Helper()
+	if prev, ok := os.LookupEnv(key); ok {
+		t.Cleanup(func() { os.Setenv(key, prev) })
+	}
+	os.Unsetenv(key)
+}
+
 func testOptionParsers() map[config.OptionName]config.OptionParser {
 	return map[config.OptionName]config.OptionParser{
 		client_pubkey_authentication.PRIVKEY_OPTION_NAME: &client_pubkey_authentication.PrivkeyOptionParser{},
@@ -205,6 +217,81 @@ func TestGetConnectionMaterialFromURL_ICLIOptionIsOnlyMethod(t *testing.T) {
 		default:
 			t.Errorf("unexpected option %s", name)
 		}
+	}
+}
+
+// SetEnv and SendEnv directives from the ssh config must end up in the
+// client config, to be sent to the server before the session starts.
+// Unset SendEnv variables must not appear, SetEnv duplicates are last-wins.
+func TestGetConnectionMaterialFromURL_SetEnvSendEnv(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("SSH_AUTH_SOCK", "") // no ssh agent in tests
+	t.Setenv("SSHOQ_TEST_CLI_SENDENV", "from-local-env")
+	unsetEnvForTest(t, "SSHOQ_TEST_CLI_UNSET")
+
+	configContent := "Host example.com\n" +
+		"  HostName example.com\n" +
+		"  Port 443\n" +
+		"  User testuser\n" +
+		"  URLPath /\n" +
+		"  SetEnv FOO=bar\n" +
+		"  SetEnv DUP=one\n" +
+		"  SetEnv DUP=two\n" +
+		"  SendEnv SSHOQ_TEST_CLI_SENDENV\n" +
+		"  SendEnv SSHOQ_TEST_CLI_UNSET\n"
+	sshCfg, err := ssh_config.DecodeBytes([]byte(configContent))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hostUrl, err := url.Parse("https://example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, options, err := getConnectionMaterialFromURL(hostUrl, sshCfg, nil, nil, testOptionParsers())
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+
+	got := options.EnvVars()
+	expected := []string{
+		"FOO=bar",
+		"DUP=two", // the last SetEnv entry for a name wins
+		"SSHOQ_TEST_CLI_SENDENV=from-local-env",
+	}
+	if len(got) != len(expected) {
+		t.Fatalf("expected %v, got %v", expected, got)
+	}
+	for i, kv := range expected {
+		if got[i] != kv {
+			t.Errorf("env var %d: expected %q, got %q", i, kv, got[i])
+		}
+	}
+}
+
+// With no SetEnv/SendEnv directives, no environment variable must be produced.
+func TestGetConnectionMaterialFromURL_NoEnvDirectives(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("SSH_AUTH_SOCK", "")
+
+	configContent := "Host example.com\n  HostName example.com\n  Port 443\n  User testuser\n  URLPath /\n"
+	sshCfg, err := ssh_config.DecodeBytes([]byte(configContent))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hostUrl, err := url.Parse("https://example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, options, err := getConnectionMaterialFromURL(hostUrl, sshCfg, nil, nil, testOptionParsers())
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if got := options.EnvVars(); len(got) != 0 {
+		t.Errorf("expected no env vars, got %v", got)
 	}
 }
 

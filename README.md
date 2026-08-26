@@ -179,9 +179,22 @@ with the following command:
       sshoq -use-password username@my-server.example.org/my-secret-path
 
 ### Config-based session establishment
-`sshoq` parses your OpenSSH config. Currently, it only handles the `Hostname`; `User`, `Port` and `IdentityFile` OpenSSH options.
+`sshoq` parses your OpenSSH config. It handles the `Hostname`, `User`, `Port`, `IdentityFile`, `SetEnv` and `SendEnv` OpenSSH options.
 It also adds new option only used by SSHOQ, such as `URLPath` or `UDPProxyJump`. `URLPath` allows you to omit the secret URL path in your
 SSHOQ command. `UDPProxyJump` allows you to perform SSHOQ (#proxy-jump)[Proxy Jump] and has the same meaning as the `-proxy-jump` command-line argument.
+
+The `SetEnv` and `SendEnv` directives are supported as well:
+
+```sh
+  SetEnv EDITOR=vim # set the EDITOR environment variable on the server
+  SendEnv EDITOR # send the value of the local EDITOR environment variable to the server
+```
+
+The `SetEnv` directive sets the environment variable `EDITOR` to `vim` in the environment of the processes running on the server,
+while `SendEnv` sends the value of the local `EDITOR` environment variable (if it is set) to the server. This allows for
+instance to propagate your `SSH_AUTH_SOCK` or `GPG_AGENT_INFO` so that forwarded agents and GnuPG sockets work on the remote host.
+Like OpenSSH, variables that are not set locally are silently ignored for `SendEnv`.
+
 Let's say you have the following lines in your OpenSSH config located in `~/.ssh/config` :
 ```
 IgnoreUnknown URLPath
@@ -190,6 +203,8 @@ Host my-server
   User username
   IdentityFile ~/.ssh/id_rsa
   URLPath /my-secret-path
+  SetEnv EDITOR=vim
+  SendEnv SSH_AUTH_SOCK
 ```
 
 Similarly to what OpenSSH does, the following `sshoq` command will connect you to the SSHOQ server running on 192.0.2.0 on UDP port 443 using public key authentication with the private key located in `.ssh/id_rsa` :

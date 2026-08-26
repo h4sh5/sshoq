@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/h4sh5/sshoq/auth/oidc"
@@ -293,7 +294,67 @@ func (i rawBearerTokenIdentity) String() string {
 	return "raw-bearer-identity"
 }
 
-func GetConfigForHost(host string, config *ssh_config.Config, pluginsOptionsParsers map[client_config.OptionName]client_config.OptionParser) (hostname string, port int, user string, urlPath string, authMethodsToTry []interface{}, pluginOptions map[client_config.OptionName]client_config.Option, err error) {
+// parseEnvConfigEntries returns "NAME=VALUE" pairs from the SetEnv and
+// SendEnv directives of the ssh config for the given host, following
+// OpenSSH's semantics:
+//   - SetEnv takes a single "name=value" argument (the value may be quoted
+//     and may contain further '=' characters). Entries without a name are
+//     silently skipped, like OpenSSH does.
+//   - SendEnv takes a variable name; its value is resolved from the local
+//     environment. If the variable is not set, the entry is silently skipped.
+//
+// SetEnv entries come first (in config order), then SendEnv entries.
+func parseEnvConfigEntries(host string, config *ssh_config.Config) []string {
+	// envVars preserves the first-occurrence order of the variable names;
+	// if the same name appears several times, the last value wins (like
+	// OpenSSH, where the last matching entry is the one that takes effect).
+	envIndex := make(map[string]int)
+	var envVars []string
+	addEnvVar := func(name, value string) {
+		kv := name + "=" + value
+		if idx, exists := envIndex[name]; exists {
+			envVars[idx] = kv
+		} else {
+			envIndex[name] = len(envVars)
+			envVars = append(envVars, kv)
+		}
+	}
+
+	setEnvs, err := config.GetAll(host, "SetEnv")
+	if err != nil {
+		log.Warn().Msgf("could not get SetEnv entries for %s from ssh config: %s", host, err)
+		return nil
+	}
+	for _, entry := range setEnvs {
+		name, value, ok := strings.Cut(entry, "=")
+		if !ok || name == "" {
+			log.Warn().Msgf("ignoring invalid SetEnv entry %q in ssh config for %s: expected a name=value argument, like OpenSSH", entry, host)
+			continue
+		}
+		addEnvVar(name, value)
+	}
+	sendEnvs, err := config.GetAll(host, "SendEnv")
+	if err != nil {
+		log.Warn().Msgf("could not get SendEnv entries for %s from ssh config: %s", host, err)
+		return envVars
+	}
+	for _, name := range sendEnvs {
+		if name == "" {
+			log.Warn().Msgf("ignoring empty SendEnv entry in ssh config for %s", host)
+			continue
+		}
+		value, ok := os.LookupEnv(name)
+		if !ok {
+			// same as OpenSSH: if the variable is not set locally,
+			// it is simply not sent
+			continue
+		}
+		addEnvVar(name, value)
+	}
+	return envVars
+}
+
+func GetConfigForHost(host string, config *ssh_config.Config, pluginsOptionsParsers map[client_config.OptionName]client_config.OptionParser) (hostname string, port int, user string, urlPath string, authMethodsToTry []interface{}, pluginOptions map[client_config.OptionName]client_config.Option, envVars []string, err error) {
 	pluginOptions = make(map[client_config.OptionName]client_config.Option)
 	port = -1
 	if config == nil {
@@ -361,7 +422,8 @@ func GetConfigForHost(host string, config *ssh_config.Config, pluginsOptionsPars
 		}
 	}
 
-	return hostname, port, user, urlPath, authMethodsToTry, pluginOptions, nil
+	envVars = parseEnvConfigEntries(host, config)
+	return hostname, port, user, urlPath, authMethodsToTry, pluginOptions, envVars, nil
 }
 
 func BuildJWTBearerToken(signingMethod jwt.SigningMethod, key interface{}, username string, conversation *Conversation) (string, error) {

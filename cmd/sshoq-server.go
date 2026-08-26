@@ -109,6 +109,7 @@ type runningSession struct {
 	pty                 *openPty
 	runningCmd          *runningCommand
 	authAgentSocketPath string
+	env                 map[string]string // env requests received while in LARVAL state
 }
 
 // var runningSessions = make(map[ssh3.Channel]*runningSession)
@@ -581,6 +582,11 @@ func newCommand(user *unix_util.User, channel ssh3.Channel, loginShell bool, com
 		stdinW:  stdinW,
 	}
 
+	// apply the environment variables requested by the client (SetEnv/SendEnv)
+	for name, value := range session.env {
+		runningCommand.Cmd.Env = append(runningCommand.Cmd.Env, name+"="+value)
+	}
+
 	session.runningCmd = runningCommand
 
 	session.channelState = OPEN
@@ -590,6 +596,31 @@ func newCommand(user *unix_util.User, channel ssh3.Channel, loginShell bool, com
 
 func newShellReq(user *unix_util.User, channel ssh3.Channel, wantReply bool) error {
 	return newCommand(user, channel, true, user.Shell)
+}
+
+// similar to OpenSSH: environment variables are only accepted while the
+// channel is still in LARVAL state, i.e. before a shell or a command has
+// been started. They are stored in the session and applied to the process
+// when it is started by newCommand.
+func newEnvReq(user *unix_util.User, channel ssh3.Channel, request ssh3Messages.EnvRequest, wantReply bool) error {
+	session, ok := runningSessions.Get(channel)
+	if !ok {
+		return fmt.Errorf("cannot find session for current channel")
+	}
+
+	if session.channelState != LARVAL {
+		return fmt.Errorf("cannot request a new environment variable on an already established session")
+	}
+
+	if request.Name == "" {
+		return fmt.Errorf("empty environment variable name")
+	}
+	if session.env == nil {
+		session.env = make(map[string]string)
+	}
+	session.env[request.Name] = request.Value
+	log.Debug().Msgf("added environment variable %s to session", request.Name)
+	return nil
 }
 
 // similar behaviour to OpenSSH; exec requests are just pasted in the user's shell
@@ -1307,6 +1338,8 @@ func ServerMain() int {
 							switch requestMessage := message.ChannelRequest.(type) {
 							case *ssh3Messages.PtyRequest:
 								err = newPtyReq(authenticatedUser, channel, *requestMessage, message.WantReply)
+							case *ssh3Messages.EnvRequest:
+								err = newEnvReq(authenticatedUser, channel, *requestMessage, message.WantReply)
 							case *ssh3Messages.X11Request:
 								err = newX11Req(authenticatedUser, channel, *requestMessage, message.WantReply)
 							case *ssh3Messages.ShellRequest:

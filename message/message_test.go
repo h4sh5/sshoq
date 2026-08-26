@@ -373,6 +373,26 @@ var _ = Describe("Messages", func() {
 			},
 		}
 
+		wantReply, wantReplyByte = generateSSHBool()
+		envName := largeString[:100]
+		envValue := largeString[100:500]
+		env_req_binary := util.AppendVarInt(nil, CHANNEL_REQUEST)
+		env_req_binary = util.AppendVarInt(env_req_binary, uint64(len("env")))
+		env_req_binary = append(env_req_binary, "env"...)
+		env_req_binary = append(env_req_binary, wantReplyByte)
+		env_req_binary = util.AppendVarInt(env_req_binary, uint64(len(envName)))
+		env_req_binary = append(env_req_binary, envName...)
+		env_req_binary = util.AppendVarInt(env_req_binary, uint64(len(envValue)))
+		env_req_binary = append(env_req_binary, envValue...)
+
+		env_req_message := &ChannelRequestMessage{
+			WantReply: wantReply,
+			ChannelRequest: &EnvRequest{
+				Name:  envName,
+				Value: envValue,
+			},
+		}
+
 		Context("Parsing", func() {
 			It("Parses a pty request", func() {
 				r := bytes.NewReader(pty_req_binary)
@@ -435,6 +455,13 @@ var _ = Describe("Messages", func() {
 				msg, err := ParseMessage(&util.BytesReadCloser{Reader: r})
 				Expect(err).To(BeNil())
 				Expect(msg).To(Equal(exit_signal_req_message))
+			})
+
+			It("Parses an env request", func() {
+				r := bytes.NewReader(env_req_binary)
+				msg, err := ParseMessage(&util.BytesReadCloser{Reader: r})
+				Expect(err).To(BeNil())
+				Expect(msg).To(Equal(env_req_message))
 			})
 		})
 
@@ -509,6 +536,14 @@ var _ = Describe("Messages", func() {
 				Expect(err).To(BeNil())
 				Expect(n).To(BeEquivalentTo(len(buf)))
 				Expect(buf).To(Equal(exit_signal_req_binary))
+			})
+
+			It("Writes an env request", func() {
+				buf := make([]byte, env_req_message.Length())
+				n, err := env_req_message.Write(buf)
+				Expect(err).To(BeNil())
+				Expect(n).To(BeEquivalentTo(len(buf)))
+				Expect(buf).To(Equal(env_req_binary))
 			})
 
 		})
