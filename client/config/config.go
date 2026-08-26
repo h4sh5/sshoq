@@ -13,13 +13,18 @@ type Config struct {
 	port     int
 	urlPath  string
 
+	envVars     []string // "NAME=VALUE" pairs (SetEnv/SendEnv from the ssh config)
 	options     map[OptionName]Option
 	authMethods []interface{} // soon deprecated or heaviy modified
 }
 
-func NewConfig(username string, hostname string, port int, urlPath string, authMethods []interface{}, options map[OptionName]Option) (*Config, error) {
+func NewConfig(username string, hostname string, port int, urlPath string, authMethods []interface{}, options map[OptionName]Option, envVars ...[]string) (*Config, error) {
 	if len(urlPath) == 0 || urlPath[0] != '/' {
 		urlPath = "/" + urlPath
+	}
+	var env []string
+	if len(envVars) > 0 {
+		env = envVars[0]
 	}
 	return &Config{
 		username:    username,
@@ -28,6 +33,7 @@ func NewConfig(username string, hostname string, port int, urlPath string, authM
 		urlPath:     urlPath,
 		authMethods: authMethods,
 		options:     options,
+		envVars:     env,
 	}, nil
 }
 
@@ -72,6 +78,13 @@ func (o *Config) CanonicalHostFormat() string {
 
 func (o *Config) AuthMethods() []interface{} {
 	return o.authMethods
+}
+
+// EnvVars returns the environment variables (as "NAME=VALUE" pairs) that the
+// session must expose on the server (from the SetEnv/SendEnv directives of
+// the OpenSSH config). The returned slice may be empty or nil.
+func (o *Config) EnvVars() []string {
+	return o.envVars
 }
 
 func (o *Config) Options() map[OptionName]Option {

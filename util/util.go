@@ -354,3 +354,7 @@ func (m *SyncMap[K, V]) Get(key K) (V, bool) {
 func (m *SyncMap[K, V]) Insert(key K, val V) {
 	m.inner.Store(key, val)
 }
+
+func (m *SyncMap[K, V]) Delete(key K) {
+	m.inner.Delete(key)
+}

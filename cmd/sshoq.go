@@ -399,7 +399,7 @@ func setupForwardings(ctx context.Context, c *client.Client, forwardTCP, reverse
 func getConfigOptions(hostUrl *url.URL, sshConfig *ssh_config.Config, optionParsers map[client_config.OptionName]client_config.OptionParser) (*client_config.Config, error) {
 	urlHostname, urlPort := hostUrl.Hostname(), hostUrl.Port()
 
-	configHostname, configPort, configUser, configUrlPath, configAuthMethods, pluginOptions, err := ssh3.GetConfigForHost(urlHostname, sshConfig, optionParsers)
+	configHostname, configPort, configUser, configUrlPath, configAuthMethods, pluginOptions, configEnvVars, err := ssh3.GetConfigForHost(urlHostname, sshConfig, optionParsers)
 	if err != nil {
 		log.Error().Msgf("Could not get config for %s: %s", urlHostname, err)
 		return nil, err
@@ -457,7 +457,7 @@ func getConfigOptions(hostUrl *url.URL, sshConfig *ssh_config.Config, optionPars
 		}
 
 	}
-	return client_config.NewConfig(username, hostname, port, urlPath, configAuthMethods, pluginOptions)
+	return client_config.NewConfig(username, hostname, port, urlPath, configAuthMethods, pluginOptions, configEnvVars)
 }
 
 func getConnectionMaterialFromURL(hostUrl *url.URL, sshConfig *ssh_config.Config, cliAuthMethods []interface{}, cliOptions map[client_config.OptionName]client_config.Option, optionParsers map[client_config.OptionName]client_config.OptionParser) (agent.ExtendedAgent, *client_config.Config, error) {
@@ -465,6 +465,9 @@ func getConnectionMaterialFromURL(hostUrl *url.URL, sshConfig *ssh_config.Config
 	if err != nil {
 		return nil, nil, fmt.Errorf("could not apply config to %s: %s", hostUrl, err)
 	}
+	// the environment variables (SetEnv/SendEnv) of the target host, to be
+	// sent to the server before the session starts
+	configEnvVars := configOptions.EnvVars()
 
 	var agentClient agent.ExtendedAgent
 	socketPath := os.Getenv("SSH_AUTH_SOCK")
@@ -513,7 +516,7 @@ func getConnectionMaterialFromURL(hostUrl *url.URL, sshConfig *ssh_config.Config
 		}
 	}
 
-	options, err := client_config.NewConfig(configOptions.Username(), configOptions.Hostname(), configOptions.Port(), configOptions.UrlPath(), authMethods, pluginOptionsFromConfig)
+	options, err := client_config.NewConfig(configOptions.Username(), configOptions.Hostname(), configOptions.Port(), configOptions.UrlPath(), authMethods, pluginOptionsFromConfig, configEnvVars)
 	if err != nil {
 		return nil, nil, fmt.Errorf("could not instantiate invalid options: %s", err)
 	}
@@ -970,7 +973,7 @@ func ClientMain() int {
 	} else if *scpMode {
 		err = sshoqsftp.RunScpClient(c, scpUpload, *scpRecursive, scpLocalPath, scpRemotePath)
 	} else {
-		err = c.RunSession(tty, *forwardSSHAgent, *forcePTYAlloc, command...)
+		err = c.RunSession(tty, *forwardSSHAgent, *forcePTYAlloc, options.EnvVars(), command...)
 	}
 	switch sessionError := err.(type) {
 	case client.ExitStatus:
