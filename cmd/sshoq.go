@@ -682,10 +682,13 @@ func ClientMain() int {
 	var forwardUDP stringSliceFlag
 	var reverseTCP stringSliceFlag
 	var reverseUDP stringSliceFlag
+	var forwardDynamic stringSliceFlag
 	flag.Var(&forwardTCP, "forward-tcp", "forward a remote TCP port to a local port. Syntax same as SSH2 but with @ instead of : (e.g. 8080@::1@80 or 8080@192.168.1.1@80). May be specified multiple times.")
 	flag.Var(&forwardUDP, "forward-udp", "forward a remote UDP port to a local port. Syntax same as SSH2 but with @ instead of : (e.g. 5353@::1@53). May be specified multiple times.")
 	flag.Var(&reverseTCP, "reverse-tcp", "reverse forward a local TCP port to a remote port. Syntax same as SSH2 but with @ instead of : (e.g. 80@127.0.0.1@8080). May be specified multiple times.")
 	flag.Var(&reverseUDP, "reverse-udp", "reverse forward a local UDP port to a remote port. Syntax same as SSH2 but with @ instead of : (e.g. 53@127.0.0.1@5353). May be specified multiple times.")
+	flag.Var(&forwardDynamic, "forward-dynamic", "bind a local SOCKS5 dynamic forwarding port. Like OpenSSH -D. May be specified multiple times.")
+	flag.Var(&forwardDynamic, "D", "alias for -forward-dynamic (may be specified multiple times)")
 	flag.Var(&forwardTCP, "L", "alias for -forward-tcp (may be specified multiple times)")
 	flag.Var(&reverseTCP, "R", "alias for -reverse-tcp (may be specified multiple times)")
 	proxyJump := flag.String("proxy-jump", "", "if set, performs a proxy jump using the specified remote host as proxy (requires server with version >= 0.1.5)")
@@ -1007,8 +1010,13 @@ func ClientMain() int {
 		return -1
 	}
 	// Set up all requested local and remote port forwardings. Multiple -L, -R,
-	// -forward-tcp, -forward-udp, -reverse-tcp and -reverse-udp flags can now
-	// be combined freely, including a mix of TCP and UDP.
+	// -D, -forward-tcp, -forward-udp, -reverse-tcp, -reverse-udp and
+	// -forward-dynamic flags can now be combined freely, including a mix of
+	// TCP, UDP and SOCKS5 dynamic forwarding.
+	if err := setupDynamicForwardings(ctx, c, forwardDynamic); err != nil {
+		log.Error().Msgf("%s", err)
+		return -1
+	}
 	fwUDPmulticonn, err = setupForwardings(ctx, c, forwardTCP, reverseTCP, forwardUDP, reverseUDP, fwUDPmulticonn)
 	if err != nil {
 		log.Error().Msgf("%s", err)

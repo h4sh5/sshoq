@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -845,6 +846,118 @@ func (c *Client) ForwardTCP(ctx context.Context, localTCPAddr *net.TCPAddr, remo
 		}
 	}()
 	return conn.Addr().(*net.TCPAddr), nil
+}
+
+func socks5Reply(code byte) []byte {
+	return []byte{0x05, code, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+}
+
+func handleSOCKS5Conn(ctx context.Context, c *Client, conn net.Conn) {
+	defer conn.Close()
+
+	buf := make([]byte, 256)
+	if _, err := io.ReadFull(conn, buf[:2]); err != nil {
+		return
+	}
+	if buf[0] != 0x05 {
+		return
+	}
+	methodCount := int(buf[1])
+	if methodCount < 0 || methodCount > len(buf)-2 {
+		return
+	}
+	if _, err := io.ReadFull(conn, buf[:methodCount]); err != nil {
+		return
+	}
+	if _, err := conn.Write([]byte{0x05, 0x00}); err != nil {
+		return
+	}
+	if _, err := io.ReadFull(conn, buf[:4]); err != nil {
+		return
+	}
+	if buf[0] != 0x05 {
+		return
+	}
+	cmd := buf[1]
+	if cmd != 0x01 {
+		_, _ = conn.Write(socks5Reply(0x07))
+		return
+	}
+	atyp := buf[3]
+	var host string
+	var port int
+	switch atyp {
+	case 0x01:
+		if _, err := io.ReadFull(conn, buf[:6]); err != nil {
+			return
+		}
+		host = net.IP(buf[:4]).String()
+		port = int(binary.BigEndian.Uint16(buf[4:6]))
+	case 0x03:
+		if _, err := io.ReadFull(conn, buf[:1]); err != nil {
+			return
+		}
+		domainLen := int(buf[0])
+		if domainLen == 0 || domainLen > 255 {
+			_, _ = conn.Write(socks5Reply(0x04))
+			return
+		}
+		if _, err := io.ReadFull(conn, buf[:domainLen+2]); err != nil {
+			return
+		}
+		host = string(buf[:domainLen])
+		port = int(binary.BigEndian.Uint16(buf[domainLen : domainLen+2]))
+	case 0x04:
+		if _, err := io.ReadFull(conn, buf[:18]); err != nil {
+			return
+		}
+		host = net.IP(buf[:16]).String()
+		port = int(binary.BigEndian.Uint16(buf[16:18]))
+	default:
+		_, _ = conn.Write(socks5Reply(0x08))
+		return
+	}
+
+	target := &net.TCPAddr{IP: net.ParseIP(host), Port: port}
+	if target.IP == nil {
+		resolved, err := net.ResolveTCPAddr("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+		if err != nil {
+			_, _ = conn.Write(socks5Reply(0x04))
+			return
+		}
+		target = resolved
+	}
+	if _, err := conn.Write(socks5Reply(0x00)); err != nil {
+		return
+	}
+	channel, err := c.OpenTCPForwardingChannel(30000, 10, &net.TCPAddr{IP: net.IPv4zero, Port: 0}, target)
+	if err != nil {
+		log.Error().Msgf("could not open SOCKS5 TCP forwarding channel: %s", err)
+		_, _ = conn.Write(socks5Reply(0x05))
+		return
+	}
+	forwardTCPInBackground(ctx, channel, conn.(*net.TCPConn))
+}
+
+func (c *Client) DynamicForward(ctx context.Context, localTCPAddr *net.TCPAddr) error {
+	listener, err := net.ListenTCP("tcp", localTCPAddr)
+	if err != nil {
+		return err
+	}
+	go func() {
+		for {
+			conn, err := listener.AcceptTCP()
+			if err != nil {
+				if errors.Is(err, net.ErrClosed) || ctx.Err() != nil {
+					return
+				}
+				log.Error().Msgf("could not accept SOCKS5 connection: %s", err)
+				return
+			}
+			go handleSOCKS5Conn(ctx, c, conn)
+		}
+	}()
+	return nil
 }
 
 func (c *Client) ReverseTCP(ctx context.Context, localTCPAddr *net.TCPAddr, remoteTCPAddr *net.TCPAddr) (*net.TCPAddr, error) {
