@@ -485,3 +485,62 @@ func TestParseAddrPort(t *testing.T) {
 		}
 	})
 }
+
+func TestParseDynamicForwardingSpec(t *testing.T) {
+	t.Run("accepts bare port", func(t *testing.T) {
+		bindAddr, port, err := parseDynamicForwardingSpec("8080")
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+		if bindAddr != "127.0.0.1" {
+			t.Fatalf("expected default loopback bind address, got %q", bindAddr)
+		}
+		if port != 8080 {
+			t.Fatalf("expected port 8080, got %d", port)
+		}
+	})
+
+	t.Run("accepts explicit bind host and port", func(t *testing.T) {
+		bindAddr, port, err := parseDynamicForwardingSpec("0.0.0.0:9000")
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+		if bindAddr != "0.0.0.0" {
+			t.Fatalf("expected bind address 0.0.0.0, got %q", bindAddr)
+		}
+		if port != 9000 {
+			t.Fatalf("expected port 9000, got %d", port)
+		}
+	})
+
+	t.Run("accepts ipv6 bind host with brackets", func(t *testing.T) {
+		bindAddr, port, err := parseDynamicForwardingSpec("[::1]:8123")
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+		if bindAddr != "::1" {
+			t.Fatalf("expected bind address ::1, got %q", bindAddr)
+		}
+		if port != 8123 {
+			t.Fatalf("expected port 8123, got %d", port)
+		}
+	})
+
+	t.Run("rejects empty spec", func(t *testing.T) {
+		if _, _, err := parseDynamicForwardingSpec(""); err == nil {
+			t.Fatal("expected an error for an empty dynamic forwarding spec")
+		}
+	})
+
+	t.Run("rejects invalid contents", func(t *testing.T) {
+		if _, _, err := parseDynamicForwardingSpec("not-a-port"); err == nil {
+			t.Fatal("expected an error for an invalid dynamic forwarding spec")
+		}
+	})
+
+	t.Run("rejects ports out of range", func(t *testing.T) {
+		if _, _, err := parseDynamicForwardingSpec("70000"); err == nil {
+			t.Fatal("expected an error for an out-of-range port")
+		}
+	})
+}
