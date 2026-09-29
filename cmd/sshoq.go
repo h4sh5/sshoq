@@ -339,6 +339,53 @@ func splitForwardingSpecs(groups []string) []string {
 	return specs
 }
 
+func parseDynamicForwardingSpec(spec string) (bindAddr string, port int, err error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return "", 0, fmt.Errorf("empty dynamic forwarding spec")
+	}
+
+	if p, err := strconv.Atoi(spec); err == nil {
+		if p < 1 || p > 0xFFFF {
+			return "", 0, fmt.Errorf("port out of range %d", p)
+		}
+		return "127.0.0.1", p, nil
+	}
+
+	if strings.Contains(spec, ":") {
+		host, portStr, err := net.SplitHostPort(spec)
+		if err != nil {
+			return "", 0, fmt.Errorf("invalid dynamic forwarding address %q: %w", spec, err)
+		}
+		p, err := strconv.Atoi(portStr)
+		if err != nil {
+			return "", 0, fmt.Errorf("invalid port %q: %w", portStr, err)
+		}
+		if p < 1 || p > 0xFFFF {
+			return "", 0, fmt.Errorf("port out of range %d", p)
+		}
+		if host == "" {
+			host = "127.0.0.1"
+		}
+		return host, p, nil
+	}
+
+	return "", 0, fmt.Errorf("invalid dynamic forwarding spec %q", spec)
+}
+
+func setupDynamicForwardings(ctx context.Context, c *client.Client, forwardDynamic []string) error {
+	for _, spec := range splitForwardingSpecs(forwardDynamic) {
+		bindAddr, port, err := parseDynamicForwardingSpec(spec)
+		if err != nil {
+			return fmt.Errorf("dynamic forwarding parsing error for %q: %s", spec, err)
+		}
+		if err := c.DynamicForward(ctx, &net.TCPAddr{IP: net.ParseIP(bindAddr), Port: port}); err != nil {
+			return fmt.Errorf("could not bind dynamic forwarding socket %s:%d: %s", bindAddr, port, err)
+		}
+	}
+	return nil
+}
+
 // setupForwardings starts every local and remote port forwarding that was
 // requested on the command line. Multiple -L, -R, -forward-tcp, -forward-udp,
 // -reverse-tcp and -reverse-udp flags can be freely combined, in any order, and
