@@ -170,6 +170,10 @@ func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net
 				if message.DataType == ssh3Messages.SSH_EXTENDED_DATA_NONE {
 					_, err := conn.Write([]byte(message.Data))
 					if err != nil {
+						if errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.EINVAL) {
+							log.Debug().Msgf("TCP forwarding socket closed while writing on channel %d: %s", channel.ChannelID(), err)
+							return
+						}
 						log.Error().Msgf("could not write data on TCP socket: %s", err)
 						// signal the write error to the peer
 						channel.CancelRead()
@@ -195,7 +199,11 @@ func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net
 			default:
 			}
 			n, err := conn.Read(buf)
-			if err != nil && err != io.EOF {
+			if err != nil {
+				if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+					log.Debug().Msgf("TCP forwarding socket closed normally on channel %d: %v", channel.ChannelID(), err)
+					return
+				}
 				log.Error().Msgf("could read data on TCP socket: %s", err)
 				return
 			}
@@ -211,9 +219,6 @@ func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net
 				default:
 					log.Error().Msgf("could send data on channel: %s", errWrite)
 				}
-				return
-			}
-			if err == io.EOF {
 				return
 			}
 		}
@@ -854,32 +859,42 @@ func socks5Reply(code byte) []byte {
 
 func handleSOCKS5Conn(ctx context.Context, c *Client, conn net.Conn) {
 	defer conn.Close()
+	log.Debug().Msgf("SOCKS5 connection accepted from %s", conn.RemoteAddr())
 
 	buf := make([]byte, 256)
 	if _, err := io.ReadFull(conn, buf[:2]); err != nil {
+		log.Debug().Msgf("SOCKS5 client greeting read failed from %s: %v", conn.RemoteAddr(), err)
 		return
 	}
 	if buf[0] != 0x05 {
+		log.Debug().Msgf("SOCKS5 unsupported version from %s: 0x%02x", conn.RemoteAddr(), buf[0])
 		return
 	}
 	methodCount := int(buf[1])
 	if methodCount < 0 || methodCount > len(buf)-2 {
+		log.Debug().Msgf("SOCKS5 invalid method count from %s: %d", conn.RemoteAddr(), methodCount)
 		return
 	}
+	log.Debug().Msgf("SOCKS5 client greeting: version=0x%02x methods=%d", buf[0], methodCount)
 	if _, err := io.ReadFull(conn, buf[:methodCount]); err != nil {
+		log.Debug().Msgf("SOCKS5 auth methods read failed from %s: %v", conn.RemoteAddr(), err)
 		return
 	}
 	if _, err := conn.Write([]byte{0x05, 0x00}); err != nil {
+		log.Debug().Msgf("SOCKS5 auth reply write failed to %s: %v", conn.RemoteAddr(), err)
 		return
 	}
 	if _, err := io.ReadFull(conn, buf[:4]); err != nil {
+		log.Debug().Msgf("SOCKS5 CONNECT request read failed from %s: %v", conn.RemoteAddr(), err)
 		return
 	}
 	if buf[0] != 0x05 {
+		log.Debug().Msgf("SOCKS5 CONNECT version mismatch from %s: 0x%02x", conn.RemoteAddr(), buf[0])
 		return
 	}
 	cmd := buf[1]
 	if cmd != 0x01 {
+		log.Debug().Msgf("SOCKS5 unsupported command %d from %s", cmd, conn.RemoteAddr())
 		_, _ = conn.Write(socks5Reply(0x07))
 		return
 	}
@@ -889,47 +904,57 @@ func handleSOCKS5Conn(ctx context.Context, c *Client, conn net.Conn) {
 	switch atyp {
 	case 0x01:
 		if _, err := io.ReadFull(conn, buf[:6]); err != nil {
+			log.Debug().Msgf("SOCKS5 IPv4 CONNECT address read failed from %s: %v", conn.RemoteAddr(), err)
 			return
 		}
 		host = net.IP(buf[:4]).String()
 		port = int(binary.BigEndian.Uint16(buf[4:6]))
 	case 0x03:
 		if _, err := io.ReadFull(conn, buf[:1]); err != nil {
+			log.Debug().Msgf("SOCKS5 domain CONNECT address length read failed from %s: %v", conn.RemoteAddr(), err)
 			return
 		}
 		domainLen := int(buf[0])
 		if domainLen == 0 || domainLen > 255 {
+			log.Debug().Msgf("SOCKS5 invalid domain length %d from %s", domainLen, conn.RemoteAddr())
 			_, _ = conn.Write(socks5Reply(0x04))
 			return
 		}
 		if _, err := io.ReadFull(conn, buf[:domainLen+2]); err != nil {
+			log.Debug().Msgf("SOCKS5 domain CONNECT address read failed from %s: %v", conn.RemoteAddr(), err)
 			return
 		}
 		host = string(buf[:domainLen])
 		port = int(binary.BigEndian.Uint16(buf[domainLen : domainLen+2]))
 	case 0x04:
 		if _, err := io.ReadFull(conn, buf[:18]); err != nil {
+			log.Debug().Msgf("SOCKS5 IPv6 CONNECT address read failed from %s: %v", conn.RemoteAddr(), err)
 			return
 		}
 		host = net.IP(buf[:16]).String()
 		port = int(binary.BigEndian.Uint16(buf[16:18]))
 	default:
+		log.Debug().Msgf("SOCKS5 unsupported address type 0x%02x from %s", atyp, conn.RemoteAddr())
 		_, _ = conn.Write(socks5Reply(0x08))
 		return
 	}
+	log.Debug().Msgf("SOCKS5 CONNECT target resolved to %s:%d (atyp=0x%02x)", host, port, atyp)
 
 	target := &net.TCPAddr{IP: net.ParseIP(host), Port: port}
 	if target.IP == nil {
 		resolved, err := net.ResolveTCPAddr("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 		if err != nil {
+			log.Debug().Msgf("SOCKS5 target resolution failed for %s:%d: %v", host, port, err)
 			_, _ = conn.Write(socks5Reply(0x04))
 			return
 		}
 		target = resolved
 	}
 	if _, err := conn.Write(socks5Reply(0x00)); err != nil {
+		log.Debug().Msgf("SOCKS5 success reply write failed to %s: %v", conn.RemoteAddr(), err)
 		return
 	}
+	log.Debug().Msgf("SOCKS5 opening SSH3 forwarding channel to %s", target)
 	channel, err := c.OpenTCPForwardingChannel(30000, 10, &net.TCPAddr{IP: net.IPv4zero, Port: 0}, target)
 	if err != nil {
 		log.Error().Msgf("could not open SOCKS5 TCP forwarding channel: %s", err)
@@ -944,16 +969,19 @@ func (c *Client) DynamicForward(ctx context.Context, localTCPAddr *net.TCPAddr) 
 	if err != nil {
 		return err
 	}
+	log.Debug().Msgf("SOCKS5 dynamic forward listening on %s", listener.Addr())
 	go func() {
 		for {
 			conn, err := listener.AcceptTCP()
 			if err != nil {
 				if errors.Is(err, net.ErrClosed) || ctx.Err() != nil {
+					log.Debug().Msgf("SOCKS5 dynamic forward listener closed: %v", err)
 					return
 				}
 				log.Error().Msgf("could not accept SOCKS5 connection: %s", err)
 				return
 			}
+			log.Debug().Msgf("SOCKS5 dynamic forward accepted %s", conn.RemoteAddr())
 			go handleSOCKS5Conn(ctx, c, conn)
 		}
 	}()
