@@ -1,8 +1,12 @@
 package client
 
 import (
+	"errors"
+	"io"
+	"net"
 	"testing"
 
+	"github.com/quic-go/quic-go"
 	ssh3Messages "github.com/h4sh5/sshoq/message"
 )
 
@@ -100,5 +104,23 @@ func TestSendEnvRequests_EmptyList(t *testing.T) {
 	}
 	if len(channel.sentRequests) != 0 {
 		t.Fatalf("expected no requests, got %d", len(channel.sentRequests))
+	}
+}
+
+func TestIsExpectedTCPForwardCloseError(t *testing.T) {
+	if !isExpectedTCPForwardCloseError(io.EOF) {
+		t.Fatal("expected io.EOF to be treated as a normal close")
+	}
+	if !isExpectedTCPForwardCloseError(net.ErrClosed) {
+		t.Fatal("expected net.ErrClosed to be treated as a normal close")
+	}
+	if !isExpectedTCPForwardCloseError(&quic.StreamError{Remote: true}) {
+		t.Fatal("expected remote quic stream cancel to be treated as a normal close")
+	}
+	if isExpectedTCPForwardCloseError(&quic.StreamError{Remote: false}) {
+		t.Fatal("expected local stream errors to remain abnormal")
+	}
+	if isExpectedTCPForwardCloseError(errors.New("boom")) {
+		t.Fatal("expected non-close errors to remain abnormal")
 	}
 }

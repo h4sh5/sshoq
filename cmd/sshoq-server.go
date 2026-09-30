@@ -137,6 +137,20 @@ func setupEnv(user *unix_util.User, runningCommand *runningCommand, authAgentSoc
 	}
 }
 
+func isExpectedForwardingStreamClose(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	var streamErr *quic.StreamError
+	if errors.As(err, &streamErr) {
+		return streamErr.Remote
+	}
+	return false
+}
+
 func forwardUDPInBackground(ctx context.Context, channel ssh3.Channel, conn *net.UDPConn) {
 	go func() {
 		defer conn.Close()
@@ -236,12 +250,20 @@ func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net
 			default:
 			}
 			n, err := conn.Read(buf)
-			if err != nil && !errors.Is(err, io.EOF) {
+			if err != nil {
+				if isExpectedForwardingStreamClose(err) {
+					log.Debug().Msgf("TCP forwarding socket closed normally on server channel %d: %v", channel.ChannelID(), err)
+					return
+				}
 				log.Error().Msgf("could read data on TCP socket: %s", err)
 				return
 			}
 			_, errWrite := channel.WriteData(buf[:n], ssh3Messages.SSH_EXTENDED_DATA_NONE)
 			if errWrite != nil {
+				if isExpectedForwardingStreamClose(errWrite) {
+					log.Debug().Msgf("server TCP forwarding channel closed normally while writing on channel %d: %v", channel.ChannelID(), errWrite)
+					return
+				}
 				switch quicErr := errWrite.(type) {
 				case *quic.StreamError:
 					if quicErr.Remote && quicErr.ErrorCode == 42 {
@@ -252,9 +274,6 @@ func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net
 				default:
 					log.Error().Msgf("could send data on channel: %s", errWrite)
 				}
-				return
-			}
-			if errors.Is(err, io.EOF) {
 				return
 			}
 		}
