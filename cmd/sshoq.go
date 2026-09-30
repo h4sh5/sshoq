@@ -373,14 +373,55 @@ func parseDynamicForwardingSpec(spec string) (bindAddr string, port int, err err
 	return "", 0, fmt.Errorf("invalid dynamic forwarding spec %q", spec)
 }
 
-func setupDynamicForwardings(ctx context.Context, c *client.Client, forwardDynamic []string) error {
+// dynamicForwardAddr resolves a -D bind address into a numerical IP: a host name
+// must not reach net.TCPAddr as a nil IP, which would silently bind every
+// interface instead of the requested loopback.
+func dynamicForwardAddr(bindAddr string) (net.IP, error) {
+	if ip := net.ParseIP(bindAddr); ip != nil {
+		return ip, nil
+	}
+	ips, err := net.LookupIP(bindAddr)
+	if err != nil || len(ips) == 0 {
+		return nil, fmt.Errorf("could not resolve dynamic forwarding address %q", bindAddr)
+	}
+	return ips[0], nil
+}
+
+// dynamicForwardingAddrs parses and resolves every -D spec into the local TCP
+// addresses the SOCKS5 proxies must listen on. Duplicates are rejected before
+// anything is bound: without this check the second bind of the same port fails
+// with "bind: address already in use", which reads as though another process was
+// holding the port.
+func dynamicForwardingAddrs(forwardDynamic []string) ([]*net.TCPAddr, error) {
+	localAddrs := make([]*net.TCPAddr, 0, len(forwardDynamic))
+	requested := make(map[string]struct{}, len(forwardDynamic))
 	for _, spec := range splitForwardingSpecs(forwardDynamic) {
 		bindAddr, port, err := parseDynamicForwardingSpec(spec)
 		if err != nil {
-			return fmt.Errorf("dynamic forwarding parsing error for %q: %s", spec, err)
+			return nil, fmt.Errorf("dynamic forwarding parsing error for %q: %s", spec, err)
 		}
-		if err := c.DynamicForward(ctx, &net.TCPAddr{IP: net.ParseIP(bindAddr), Port: port}); err != nil {
-			return fmt.Errorf("could not bind dynamic forwarding socket %s:%d: %s", bindAddr, port, err)
+		ip, err := dynamicForwardAddr(bindAddr)
+		if err != nil {
+			return nil, fmt.Errorf("dynamic forwarding error for %q: %s", spec, err)
+		}
+		local := &net.TCPAddr{IP: ip, Port: port}
+		if _, alreadyRequested := requested[local.String()]; alreadyRequested {
+			return nil, fmt.Errorf("dynamic forwarding socket %s requested more than once", local)
+		}
+		requested[local.String()] = struct{}{}
+		localAddrs = append(localAddrs, local)
+	}
+	return localAddrs, nil
+}
+
+func setupDynamicForwardings(ctx context.Context, c *client.Client, forwardDynamic []string) error {
+	localAddrs, err := dynamicForwardingAddrs(forwardDynamic)
+	if err != nil {
+		return err
+	}
+	for _, local := range localAddrs {
+		if err := c.DynamicForward(ctx, local); err != nil {
+			return fmt.Errorf("could not bind dynamic forwarding socket %s: %s", local, err)
 		}
 	}
 	return nil
@@ -1009,15 +1050,22 @@ func ClientMain() int {
 		log.Error().Msgf("could not dial %s: %s", options.CanonicalHostFormat(), err)
 		return -1
 	}
+	// The forwardings bind local (or remote) sockets: they live on a context of
+	// their own, cancelled when the session ends, so that the ports they hold are
+	// given back to the system as soon as the forwarding stops instead of being
+	// held until the process exits.
+	forwardingCtx, stopForwardings := context.WithCancel(ctx)
+	defer stopForwardings()
+
 	// Set up all requested local and remote port forwardings. Multiple -L, -R,
 	// -D, -forward-tcp, -forward-udp, -reverse-tcp, -reverse-udp and
 	// -forward-dynamic flags can now be combined freely, including a mix of
 	// TCP, UDP and SOCKS5 dynamic forwarding.
-	if err := setupDynamicForwardings(ctx, c, forwardDynamic); err != nil {
+	if err := setupDynamicForwardings(forwardingCtx, c, forwardDynamic); err != nil {
 		log.Error().Msgf("%s", err)
 		return -1
 	}
-	fwUDPmulticonn, err = setupForwardings(ctx, c, forwardTCP, reverseTCP, forwardUDP, reverseUDP, fwUDPmulticonn)
+	fwUDPmulticonn, err = setupForwardings(forwardingCtx, c, forwardTCP, reverseTCP, forwardUDP, reverseUDP, fwUDPmulticonn)
 	if err != nil {
 		log.Error().Msgf("%s", err)
 		return -1

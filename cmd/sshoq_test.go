@@ -544,3 +544,91 @@ func TestParseDynamicForwardingSpec(t *testing.T) {
 		}
 	})
 }
+
+// A -D bind address must reach the listener as a numerical IP: a nil IP inside a
+// net.TCPAddr means "any interface", so a host name which is not an address
+// literal has to be resolved explicitly instead of silently binding everything.
+func TestDynamicForwardAddr(t *testing.T) {
+	t.Run("numerical IPv4 address is kept as-is", func(t *testing.T) {
+		ip, err := dynamicForwardAddr("127.0.0.1")
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+		if !ip.Equal(net.IPv4(127, 0, 0, 1)) {
+			t.Fatalf("expected 127.0.0.1, got %v", ip)
+		}
+	})
+
+	t.Run("numerical IPv6 address is kept as-is", func(t *testing.T) {
+		ip, err := dynamicForwardAddr("::1")
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+		if ip == nil || !ip.IsLoopback() {
+			t.Fatalf("expected the IPv6 loopback address, got %v", ip)
+		}
+	})
+
+	t.Run("host name is resolved", func(t *testing.T) {
+		ip, err := dynamicForwardAddr("localhost")
+		if err != nil {
+			t.Skipf("no host name resolution in this environment: %s", err)
+		}
+		if ip == nil || !ip.IsLoopback() {
+			t.Fatalf("expected a loopback address for localhost, got %v", ip)
+		}
+	})
+
+	t.Run("unresolved host is an error", func(t *testing.T) {
+		if _, err := dynamicForwardAddr("sshoq-does-not-exist.invalid"); err == nil {
+			t.Fatal("expected an error for an address which cannot be resolved")
+		}
+	})
+}
+
+func TestDynamicForwardingAddrs(t *testing.T) {
+	t.Run("several -D specs are all returned", func(t *testing.T) {
+		addrs, err := dynamicForwardingAddrs([]string{"8080", "127.0.0.2:8081"})
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+		if len(addrs) != 2 {
+			t.Fatalf("expected 2 dynamic forwardings, got %d", len(addrs))
+		}
+		if addrs[0].String() != "127.0.0.1:8080" {
+			t.Fatalf("expected 127.0.0.1:8080, got %s", addrs[0])
+		}
+		if addrs[1].String() != "127.0.0.2:8081" {
+			t.Fatalf("expected 127.0.0.2:8081, got %s", addrs[1])
+		}
+	})
+
+	t.Run("comma separated specs are expanded", func(t *testing.T) {
+		addrs, err := dynamicForwardingAddrs([]string{"8080,8081"})
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+		if len(addrs) != 2 {
+			t.Fatalf("expected 2 dynamic forwardings, got %d", len(addrs))
+		}
+	})
+
+	t.Run("the same socket requested twice is rejected", func(t *testing.T) {
+		// both spellings bind 127.0.0.1:8080: the second bind would fail with
+		// "bind: address already in use" and look like an external process holding
+		// the port
+		_, err := dynamicForwardingAddrs([]string{"8080", "127.0.0.1:8080"})
+		if err == nil {
+			t.Fatal("expected an error when the same socket is requested twice")
+		}
+		if !strings.Contains(err.Error(), "more than once") {
+			t.Fatalf("expected a duplicate socket error, got %s", err)
+		}
+	})
+
+	t.Run("an invalid spec is reported", func(t *testing.T) {
+		if _, err := dynamicForwardingAddrs([]string{"8080", "not-a-port"}); err == nil {
+			t.Fatal("expected an error for an invalid dynamic forwarding spec")
+		}
+	})
+}
