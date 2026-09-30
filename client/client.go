@@ -153,8 +153,9 @@ func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net
 			default:
 			}
 			genericMessage, err := channel.NextMessage()
-			if err == io.EOF {
-				log.Info().Msgf("eof on tcp-forwarding channel %d", channel.ChannelID())
+			if errors.Is(err, io.EOF) || isExpectedTCPForwardCloseError(err) {
+				log.Debug().Msgf("tcp-forwarding channel %d closed normally: %v", channel.ChannelID(), err)
+				return
 			} else if err != nil {
 				log.Error().Msgf("could get message from tcp forwarding channel: %s", err)
 				return
@@ -170,7 +171,7 @@ func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net
 				if message.DataType == ssh3Messages.SSH_EXTENDED_DATA_NONE {
 					_, err := conn.Write([]byte(message.Data))
 					if err != nil {
-						if errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.EINVAL) {
+						if errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.EINVAL) || isExpectedTCPForwardCloseError(err) {
 							log.Debug().Msgf("TCP forwarding socket closed while writing on channel %d: %s", channel.ChannelID(), err)
 							return
 						}
@@ -200,7 +201,7 @@ func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net
 			}
 			n, err := conn.Read(buf)
 			if err != nil {
-				if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+				if isExpectedTCPForwardCloseError(err) {
 					log.Debug().Msgf("TCP forwarding socket closed normally on channel %d: %v", channel.ChannelID(), err)
 					return
 				}
@@ -209,6 +210,10 @@ func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net
 			}
 			_, errWrite := channel.WriteData(buf[:n], ssh3Messages.SSH_EXTENDED_DATA_NONE)
 			if errWrite != nil {
+				if isExpectedTCPForwardCloseError(errWrite) {
+					log.Debug().Msgf("TCP forwarding channel closed normally while writing on channel %d: %v", channel.ChannelID(), errWrite)
+					return
+				}
 				switch quicErr := errWrite.(type) {
 				case *quic.StreamError:
 					if quicErr.Remote && quicErr.ErrorCode == 42 {
@@ -855,6 +860,20 @@ func (c *Client) ForwardTCP(ctx context.Context, localTCPAddr *net.TCPAddr, remo
 
 func socks5Reply(code byte) []byte {
 	return []byte{0x05, code, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+}
+
+func isExpectedTCPForwardCloseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	var streamErr *quic.StreamError
+	if errors.As(err, &streamErr) {
+		return streamErr.Remote
+	}
+	return false
 }
 
 func handleSOCKS5Conn(ctx context.Context, c *Client, conn net.Conn) {

@@ -193,8 +193,9 @@ func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net
 			default:
 			}
 			genericMessage, err := channel.NextMessage()
-			if errors.Is(err, io.EOF) {
-				log.Info().Msgf("eof on tcp-forwarding channel %d", channel.ChannelID())
+			if errors.Is(err, io.EOF) || isExpectedForwardingStreamClose(err) {
+				log.Debug().Msgf("tcp-forwarding channel %d closed normally: %v", channel.ChannelID(), err)
+				return
 			} else if err != nil {
 				log.Error().Msgf("could get message from tcp forwarding channel: %s", err)
 				return
