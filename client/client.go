@@ -891,9 +891,27 @@ func newSSH3TCPConn(channel ssh3.Channel, localAddr, remoteAddr net.Addr) net.Co
 }
 
 func (c *ssh3TCPConn) Read(p []byte) (int, error) {
-	for len(c.readBuf) == c.readOffset {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	for {
+		if len(c.readBuf) > c.readOffset {
+			count := copy(p, c.readBuf[c.readOffset:])
+			c.readOffset += count
+			if c.readOffset == len(c.readBuf) {
+				c.readBuf = nil
+				c.readOffset = 0
+			}
+			if count > 0 {
+				return count, nil
+			}
+		}
+
 		genericMessage, err := c.channel.NextMessage()
 		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return 0, io.EOF
+			}
 			return 0, err
 		}
 		if genericMessage == nil {
@@ -903,19 +921,18 @@ func (c *ssh3TCPConn) Read(p []byte) (int, error) {
 		if !ok || message.DataType != ssh3Messages.SSH_EXTENDED_DATA_NONE {
 			continue
 		}
+		if len(message.Data) == 0 {
+			continue
+		}
 		c.readBuf = []byte(message.Data)
 		c.readOffset = 0
 	}
-	count := copy(p, c.readBuf[c.readOffset:])
-	c.readOffset += count
-	if c.readOffset == len(c.readBuf) {
-		c.readBuf = nil
-		c.readOffset = 0
-	}
-	return count, nil
 }
 
 func (c *ssh3TCPConn) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
 	return c.channel.WriteData(p, ssh3Messages.SSH_EXTENDED_DATA_NONE)
 }
 

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/quic-go/quic-go"
+	ssh3 "github.com/h4sh5/sshoq"
 	ssh3Messages "github.com/h4sh5/sshoq/message"
 )
 
@@ -122,5 +123,32 @@ func TestIsExpectedTCPForwardCloseError(t *testing.T) {
 	}
 	if isExpectedTCPForwardCloseError(errors.New("boom")) {
 		t.Fatal("expected non-close errors to remain abnormal")
+	}
+}
+
+func TestSSH3TCPConnReadIgnoresEmptyDataFrames(t *testing.T) {
+	channel := ssh3.NewMockChannel(
+		&ssh3Messages.DataOrExtendedDataMessage{DataType: ssh3Messages.SSH_EXTENDED_DATA_NONE, Data: ""},
+		&ssh3Messages.DataOrExtendedDataMessage{DataType: ssh3Messages.SSH_EXTENDED_DATA_NONE, Data: "hello"},
+	)
+	conn := newSSH3TCPConn(channel, nil, nil)
+
+	buf := make([]byte, 5)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("expected read to succeed, got %v", err)
+	}
+	if n != 5 {
+		t.Fatalf("expected 5 bytes, got %d", n)
+	}
+	if string(buf[:n]) != "hello" {
+		t.Fatalf("expected hello payload, got %q", string(buf[:n]))
+	}
+
+	if got, err := conn.Write([]byte("world")); err != nil || got != 5 {
+		t.Fatalf("expected 5-byte write to succeed, got n=%d err=%v", got, err)
+	}
+	if got := string(channel.Writes[0]); got != "world" {
+		t.Fatalf("expected write payload world, got %q", got)
 	}
 }
