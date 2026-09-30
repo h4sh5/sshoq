@@ -624,6 +624,124 @@ var _ = Describe("Testing the sshoq cli", func() {
 							{"-reverse-tcp", 8303, 9303, "hello to local 2", "hello from local 2"},
 						})
 					})
+
+					// testDynamicTCPPortForwarding starts a client with a dynamic forwarding
+					// (-D) and, through the SOCKS5 proxy it exposes, reaches remoteAddr. The
+					// response must come back whole: the SOCKS5 server copies both ways with
+					// io.Copy, so a channel write reporting more bytes than it was handed (the
+					// message framing used to be counted in) failed the copy and tore down the
+					// tunnel, and the SOCKS5 client got an empty reply.
+					testDynamicTCPPortForwarding := func(localPort uint16, remoteAddr *net.TCPAddr, messageFromClient string, messageFromServer string) {
+						serverStarted := make(chan struct{})
+						done := make(chan struct{})
+						go func() {
+							defer close(done)
+							defer close(serverStarted)
+							defer GinkgoRecover()
+							listener, err := net.ListenTCP("tcp", remoteAddr)
+							Expect(err).ToNot(HaveOccurred())
+							defer listener.Close()
+
+							serverStarted <- struct{}{}
+
+							conn, err := listener.Accept()
+							Expect(err).ToNot(HaveOccurred())
+							defer conn.Close()
+
+							// Read message from client
+							buffer := make([]byte, len(messageFromClient))
+							_, err = conn.Read(buffer)
+							Expect(err).ToNot(HaveOccurred())
+							Expect(string(buffer)).To(Equal(messageFromClient))
+
+							// Send message back to the client through the tunnel
+							_, err = conn.Write([]byte(messageFromServer))
+							Expect(err).ToNot(HaveOccurred())
+							conn.(*net.TCPConn).CloseWrite()
+
+							n, err := conn.Read(buffer)
+							Expect(err).To(Equal(io.EOF))
+							Expect(n).To(Equal(0))
+						}()
+
+						Eventually(serverStarted).Should(Receive())
+
+						clientArgs := getClientArgs(rsaPrivKeyPath, "-D", fmt.Sprintf("%d", localPort))
+						command := exec.Command(ssh3Path, clientArgs...)
+						session, err := Start(command, GinkgoWriter, GinkgoWriter)
+						Expect(err).ToNot(HaveOccurred())
+						defer session.Terminate()
+
+						// wait for the SOCKS5 proxy to listen before dialing it
+						proxyAddr := fmt.Sprintf("127.0.0.1:%d", localPort)
+						Eventually(func() error {
+							probe, err := net.Dial("tcp", proxyAddr)
+							if err != nil {
+								return err
+							}
+							return probe.Close()
+						}, 5*time.Second).Should(Succeed())
+
+						conn, err := net.Dial("tcp", proxyAddr)
+						Expect(err).ToNot(HaveOccurred())
+						defer conn.Close()
+
+						// SOCKS5 greeting: version 5 offering a single method (no authentication)
+						_, err = conn.Write([]byte{0x05, 0x01, 0x00})
+						Expect(err).ToNot(HaveOccurred())
+						reply := make([]byte, 2)
+						_, err = io.ReadFull(conn, reply)
+						Expect(err).ToNot(HaveOccurred())
+						Expect(reply).To(Equal([]byte{0x05, 0x00}))
+
+						// CONNECT to the target through the proxy
+						port := remoteAddr.Port
+						request := append([]byte{0x05, 0x01, 0x00, 0x01}, remoteAddr.IP.To4()...)
+						request = append(request, byte(port>>8), byte(port&0xff))
+						_, err = conn.Write(request)
+						Expect(err).ToNot(HaveOccurred())
+						// reply: version, status, reserved, address type, 4 bytes address, 2 bytes port
+						reply = make([]byte, 10)
+						_, err = io.ReadFull(conn, reply)
+						Expect(err).ToNot(HaveOccurred())
+						Expect(reply[0]).To(BeEquivalentTo(0x05))
+						Expect(reply[1]).To(BeEquivalentTo(0x00))
+
+						_, err = conn.Write([]byte(messageFromClient))
+						Expect(err).ToNot(HaveOccurred())
+						buffer := make([]byte, len(messageFromServer))
+						_, err = io.ReadFull(conn, buffer)
+						Expect(err).ToNot(HaveOccurred())
+						Expect(string(buffer)).To(Equal(messageFromServer))
+
+						// once the response has been read, closing the client side must give a
+						// clean EOF on the target, like a directly connected socket would
+						conn.(*net.TCPConn).CloseWrite()
+						n, err := conn.Read(buffer)
+						Expect(n).To(Equal(0))
+						Expect(err).To(MatchError(io.EOF))
+
+						// wait for the target goroutine to finish: it holds the shared
+						// target port, which the next sub-test reuses
+						Eventually(done).Should(BeClosed())
+					}
+
+					It("works with a SOCKS5 proxy (-D)", func() {
+						testDynamicTCPPortForwarding(8083, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, "hello through socks5", "hello back through socks5")
+					})
+
+					It("works with a SOCKS5 proxy and messages larger than a typical MTU (-D)", func() {
+						rng := rand.New(rand.NewSource(GinkgoRandomSeed()))
+						messageFromClient := make([]byte, 20000)
+						messageFromServer := make([]byte, 20000)
+						n, err := rng.Read(messageFromClient)
+						Expect(n).To(Equal(len(messageFromClient)))
+						Expect(err).ToNot(HaveOccurred())
+						n, err = rng.Read(messageFromServer)
+						Expect(n).To(Equal(len(messageFromServer)))
+						Expect(err).ToNot(HaveOccurred())
+						testDynamicTCPPortForwarding(8084, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, string(messageFromClient), string(messageFromServer))
+					})
 				})
 			})
 
