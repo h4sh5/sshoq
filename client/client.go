@@ -835,27 +835,39 @@ func (c *Client) ForwardUDP(ctx context.Context, localUDPAddr *net.UDPAddr, remo
 
 func (c *Client) ForwardTCP(ctx context.Context, localTCPAddr *net.TCPAddr, remoteTCPAddr *net.TCPAddr) (*net.TCPAddr, error) {
 	log.Debug().Msgf("start TCP forwarding from %s to %s", localTCPAddr, remoteTCPAddr)
-	conn, err := net.ListenTCP("tcp", localTCPAddr)
+	listener, err := net.ListenTCP("tcp", localTCPAddr)
 	if err != nil {
-		log.Error().Msgf("could listen on TCP socket: %s", err)
+		log.Error().Msgf("could not listen on TCP socket %s: %s", localTCPAddr, err)
 		return nil, err
 	}
+	// Release the local socket as soon as the forwarding is stopped: a bound port
+	// which is kept until the process exits makes any later bind on the same port
+	// (another -L, a restart, an integration test) fail with
+	// "bind: address already in use".
+	closeListenerOnContextDone(ctx, listener)
 	go func() {
 		for {
-			conn, err := conn.AcceptTCP()
+			conn, err := listener.AcceptTCP()
 			if err != nil {
-				log.Error().Msgf("could read on UDP socket: %s", err)
+				if isExpectedListenerCloseError(err) {
+					log.Debug().Msgf("TCP forwarding %s stopped: %s", localTCPAddr, err)
+					return
+				}
+				log.Error().Msgf("could not accept TCP connection on %s: %s", localTCPAddr, err)
 				return
 			}
 			forwardingChannel, err := c.OpenTCPForwardingChannel(30000, 10, localTCPAddr, remoteTCPAddr)
 			if err != nil {
-				log.Error().Msgf("could open new UDP forwarding channel: %s", err)
+				log.Error().Msgf("could not open new TCP forwarding channel for %s: %s", remoteTCPAddr, err)
+				// the session cannot carry a tunnel any more: drop the pending
+				// connection instead of leaving it hanging without a response
+				_ = conn.Close()
 				return
 			}
 			forwardTCPInBackground(ctx, forwardingChannel, conn)
 		}
 	}()
-	return conn.Addr().(*net.TCPAddr), nil
+	return listener.Addr().(*net.TCPAddr), nil
 }
 
 func isExpectedTCPForwardCloseError(err error) bool {
@@ -959,8 +971,33 @@ func (c *ssh3TCPConn) SetDeadline(time.Time) error { return nil }
 func (c *ssh3TCPConn) SetReadDeadline(time.Time) error { return nil }
 func (c *ssh3TCPConn) SetWriteDeadline(time.Time) error { return nil }
 
+// closeListenerOnContextDone closes the listener when ctx is cancelled, so that
+// the TCP port it holds is given back to the system while the process is still
+// running. It is safe to call Close more than once on a net.Listener.
+func closeListenerOnContextDone(ctx context.Context, listener net.Listener) {
+	go func() {
+		<-ctx.Done()
+		_ = listener.Close()
+	}()
+}
+
+// isExpectedListenerCloseError tells whether err comes from the listener being
+// closed or the context being cancelled, which is the normal way a forwarding
+// accept loop ends, and must not be reported as an error.
+func isExpectedListenerCloseError(err error) bool {
+	return err == nil ||
+		errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, context.Canceled) ||
+		strings.Contains(err.Error(), "use of closed network connection")
+}
+
 func handleSOCKS5Conn(ctx context.Context, c *Client, conn net.Conn) {
 	defer conn.Close()
+	if ctx.Err() != nil {
+		// The dynamic forwarding is being stopped: do not start serving a request
+		// whose tunnel could not be established anyway.
+		return
+	}
 	log.Debug().Msgf("SOCKS5 connection accepted from %s", conn.RemoteAddr())
 
 	srv := socks5.NewServer(
@@ -983,17 +1020,23 @@ func handleSOCKS5Conn(ctx context.Context, c *Client, conn net.Conn) {
 	}
 }
 
+// DynamicForward binds a local SOCKS5 proxy and tunnels the connections asked
+// for by the SOCKS5 clients through the SSH session. The bound port is released
+// when ctx is cancelled: the socket must not outlive the forwarding it belongs
+// to, otherwise binding the same port again fails with
+// "bind: address already in use".
 func (c *Client) DynamicForward(ctx context.Context, localTCPAddr *net.TCPAddr) error {
 	listener, err := net.ListenTCP("tcp", localTCPAddr)
 	if err != nil {
 		return err
 	}
+	closeListenerOnContextDone(ctx, listener)
 	log.Debug().Msgf("SOCKS5 dynamic forward listening on %s", listener.Addr())
 	go func() {
 		for {
 			conn, err := listener.AcceptTCP()
 			if err != nil {
-				if errors.Is(err, net.ErrClosed) || ctx.Err() != nil {
+				if isExpectedListenerCloseError(err) {
 					log.Debug().Msgf("SOCKS5 dynamic forward listener closed: %v", err)
 					return
 				}

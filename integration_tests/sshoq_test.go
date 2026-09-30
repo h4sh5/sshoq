@@ -1,6 +1,7 @@
 package integration_tests
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -9,6 +10,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -58,6 +60,46 @@ func IPv6LoopbackAvailable(addrs []net.Addr) bool {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return !os.IsNotExist(err)
+}
+
+// terminateClient stops a client process and waits until it is really gone.
+// Killing the process is what releases the sockets it bound (-L, -R and -D all
+// bind a local port): a spec which only signals the process and returns lets the
+// next spec bind the same port while the old process still holds it, and that
+// bind fails with "bind: address already in use". It does not use a Gomega
+// matcher on purpose, so that it is safe to call from a deferred cleanup while a
+// failure is unwinding.
+func terminateClient(session *Session) {
+	if session == nil || session.ExitCode() != -1 {
+		return
+	}
+	session.Terminate()
+	if err := session.Wait(5 * time.Second); err != nil {
+		// The process ignored SIGTERM: insist with SIGKILL.
+		session.Kill()
+		_ = session.Wait(5 * time.Second)
+	}
+}
+
+// portReleased reports whether a socket can be bound on the given address. A
+// port is free only once the process which bound it has exited and closed its
+// socket, which does not happen at the very instant its successor starts.
+func portReleased(network string, addr string) error {
+	listener, err := net.Listen(network, addr)
+	if err != nil {
+		return err
+	}
+	return listener.Close()
+}
+
+// expectPortReleased waits for a port to be available before a spec has the
+// client bind it: the clients of the previous specs are separate processes and
+// their sockets are only released once they have exited, so a port can briefly
+// remain taken after a spec ended. Without this wait the client dies with
+// "bind: address already in use" and the spec fails for the wrong reason.
+func expectPortReleased(network string, addr string) {
+	Eventually(func() error { return portReleased(network, addr) }, "10s", "100ms").Should(Succeed(),
+		fmt.Sprintf("port %s/%s is still in use: a previous process has not released it", network, addr))
 }
 
 var _ = BeforeSuite(func() {
@@ -371,11 +413,19 @@ var _ = Describe("Testing the sshoq cli", func() {
 						} else {
 							additionalArgs = append(additionalArgs, forwardingType, fmt.Sprintf("%d@%s@%d", localPort, remoteAddr.IP, remoteAddr.Port))
 						}
+						// A local forwarding binds the port in the client process, and several
+						// specs reuse the same one: wait for the port to be free instead of
+						// failing this spec while the previous client still holds it. A reverse
+						// forwarding is bound by the server, a process which outlives the specs,
+						// so its port is left alone.
+						if forwardingType != "-reverse-tcp" {
+							expectPortReleased("tcp", fmt.Sprintf("%s:%d", localIP, localPort))
+						}
 						clientArgs := getClientArgs(rsaPrivKeyPath, additionalArgs...)
 						command := exec.Command(ssh3Path, clientArgs...)
 						session, err := Start(command, GinkgoWriter, GinkgoWriter)
 						Expect(err).ToNot(HaveOccurred())
-						defer session.Terminate()
+						defer terminateClient(session)
 
 						// Try to connect to the local forwarded port
 						localAddr := fmt.Sprintf("%s:%d", localIP, localPort)
@@ -546,7 +596,7 @@ var _ = Describe("Testing the sshoq cli", func() {
 						command := exec.Command(ssh3Path, clientArgs...)
 						session, err := Start(command, GinkgoWriter, GinkgoWriter)
 						Expect(err).ToNot(HaveOccurred())
-						defer session.Terminate()
+						defer terminateClient(session)
 
 						// Connect to every forwarded port and exchange messages through each tunnel
 						for _, fwd := range forwardings {
@@ -632,25 +682,48 @@ var _ = Describe("Testing the sshoq cli", func() {
 					// message framing used to be counted in) failed the copy and tore down the
 					// tunnel, and the SOCKS5 client got an empty reply.
 					testDynamicTCPPortForwarding := func(localPort uint16, remoteAddr *net.TCPAddr, messageFromClient string, messageFromServer string) {
-						serverStarted := make(chan struct{})
+						proxyAddr := fmt.Sprintf("127.0.0.1:%d", localPort)
+
+						// Every forwarding spec binds a port of the same range, and the port is
+						// only free once the client which bound it has really exited: wait for
+						// the port instead of letting the client fail its bind with
+						// "bind: address already in use".
+						expectPortReleased("tcp", proxyAddr)
+
+						expectPortReleased("tcp", remoteAddr.String())
+
+						// Bind the forwarding target here instead of doing it in the goroutine:
+						// a bind failure must be attributed to this spec, and the socket must be
+						// released when the spec ends, even half-way through a failure (the
+						// target port is shared with the other forwarding specs).
+						listener, err := net.ListenTCP("tcp", remoteAddr)
+						Expect(err).ToNot(HaveOccurred())
+						defer listener.Close()
+
 						done := make(chan struct{})
 						go func() {
 							defer close(done)
-							defer close(serverStarted)
 							defer GinkgoRecover()
-							listener, err := net.ListenTCP("tcp", remoteAddr)
-							Expect(err).ToNot(HaveOccurred())
-							defer listener.Close()
-
-							serverStarted <- struct{}{}
-
 							conn, err := listener.Accept()
-							Expect(err).ToNot(HaveOccurred())
+							if err != nil {
+								// The spec is over and closed the listener: the only case where
+								// accepting may fail without meaning anything is broken.
+								if errors.Is(err, net.ErrClosed) {
+									return
+								}
+								Expect(err).ToNot(HaveOccurred())
+								return
+							}
 							defer conn.Close()
+							// Never block forever: a stalled tunnel must fail the spec with the
+							// error below, and must not hold the target socket.
+							conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 
-							// Read message from client
+							// Read the whole message from the client: a single Read may return
+							// less than what was sent, which for a message larger than the MTU
+							// would compare a partially filled buffer.
 							buffer := make([]byte, len(messageFromClient))
-							_, err = conn.Read(buffer)
+							_, err = io.ReadFull(conn, buffer)
 							Expect(err).ToNot(HaveOccurred())
 							Expect(string(buffer)).To(Equal(messageFromClient))
 
@@ -664,27 +737,42 @@ var _ = Describe("Testing the sshoq cli", func() {
 							Expect(n).To(Equal(0))
 						}()
 
-						Eventually(serverStarted).Should(Receive())
-
 						clientArgs := getClientArgs(rsaPrivKeyPath, "-D", fmt.Sprintf("%d", localPort))
 						command := exec.Command(ssh3Path, clientArgs...)
 						session, err := Start(command, GinkgoWriter, GinkgoWriter)
 						Expect(err).ToNot(HaveOccurred())
-						defer session.Terminate()
+						// Reap the client and wait for it to be gone: the SOCKS5 port stays
+						// bound as long as the process lives, and the next spec binds the same
+						// range of ports.
+						defer terminateClient(session)
 
-						// wait for the SOCKS5 proxy to listen before dialing it
-						proxyAddr := fmt.Sprintf("127.0.0.1:%d", localPort)
+						// Wait for the client process itself to report the SOCKS5 socket, rather
+						// than probing the port: a probe also succeeds against a stale socket
+						// left by a previous client which is still shutting down, and that
+						// connection then dies while the SOCKS5 greeting is in flight, which is
+						// reported as a bare "EOF" below. Waiting for the log line fails with the
+						// client's own message when it could not bind the port.
+						listening := fmt.Sprintf("SOCKS5 dynamic forward listening on %s", proxyAddr)
 						Eventually(func() error {
-							probe, err := net.Dial("tcp", proxyAddr)
-							if err != nil {
-								return err
+							clientLog := string(session.Err.Contents())
+							if strings.Contains(clientLog, listening) {
+								return nil
 							}
-							return probe.Close()
-						}, 5*time.Second).Should(Succeed())
+							if status := session.ExitCode(); status != -1 {
+								// The client gave up: report its own message (a port it could not
+								// bind, an authentication failure, ...) instead of a puzzling
+								// connection error a few lines below.
+								return fmt.Errorf("the client exited with status %d, its log says:\n%s", status, clientLog)
+							}
+							return fmt.Errorf("the client has not started its SOCKS5 proxy on %s yet", proxyAddr)
+						}, "10s").Should(Succeed())
 
 						conn, err := net.Dial("tcp", proxyAddr)
 						Expect(err).ToNot(HaveOccurred())
 						defer conn.Close()
+						// A stalled proxy must fail the spec below with a timeout instead of
+						// hanging the whole suite.
+						conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 
 						// SOCKS5 greeting: version 5 offering a single method (no authentication)
 						_, err = conn.Write([]byte{0x05, 0x01, 0x00})
@@ -721,8 +809,8 @@ var _ = Describe("Testing the sshoq cli", func() {
 						Expect(n).To(Equal(0))
 						Expect(err).To(MatchError(io.EOF))
 
-						// wait for the target goroutine to finish: it holds the shared
-						// target port, which the next sub-test reuses
+						// wait for the target goroutine to finish: it holds the target port,
+						// which the next sub-test reuses
 						Eventually(done).Should(BeClosed())
 					}
 
@@ -740,7 +828,7 @@ var _ = Describe("Testing the sshoq cli", func() {
 						n, err = rng.Read(messageFromServer)
 						Expect(n).To(Equal(len(messageFromServer)))
 						Expect(err).ToNot(HaveOccurred())
-						testDynamicTCPPortForwarding(8084, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9090}, string(messageFromClient), string(messageFromServer))
+						testDynamicTCPPortForwarding(8084, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9091}, string(messageFromClient), string(messageFromServer))
 					})
 				})
 			})
@@ -974,7 +1062,7 @@ var _ = Describe("Testing the sshoq cli", func() {
 					command := exec.Command(ssh3Path, clientArgs...)
 					session, err := Start(command, GinkgoWriter, GinkgoWriter)
 					Expect(err).ToNot(HaveOccurred())
-					defer session.Terminate()
+					defer terminateClient(session)
 
 					// Wait for some time to ensure that the client has established the forwarding
 					time.Sleep(2 * time.Second)
