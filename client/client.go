@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -26,6 +25,7 @@ import (
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/rs/zerolog/log"
+	"github.com/things-go/go-socks5"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/term"
@@ -858,10 +858,6 @@ func (c *Client) ForwardTCP(ctx context.Context, localTCPAddr *net.TCPAddr, remo
 	return conn.Addr().(*net.TCPAddr), nil
 }
 
-func socks5Reply(code byte) []byte {
-	return []byte{0x05, code, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
-}
-
 func isExpectedTCPForwardCloseError(err error) bool {
 	if err == nil {
 		return false
@@ -876,111 +872,98 @@ func isExpectedTCPForwardCloseError(err error) bool {
 	return false
 }
 
+type socks5Logger struct{}
+
+func (socks5Logger) Errorf(format string, args ...interface{}) {
+	log.Error().Msgf(format, args...)
+}
+
+type ssh3TCPConn struct {
+	channel    ssh3.Channel
+	readBuf    []byte
+	readOffset int
+	remoteAddr net.Addr
+	localAddr  net.Addr
+}
+
+func newSSH3TCPConn(channel ssh3.Channel, localAddr, remoteAddr net.Addr) net.Conn {
+	return &ssh3TCPConn{channel: channel, localAddr: localAddr, remoteAddr: remoteAddr}
+}
+
+func (c *ssh3TCPConn) Read(p []byte) (int, error) {
+	for len(c.readBuf) == c.readOffset {
+		genericMessage, err := c.channel.NextMessage()
+		if err != nil {
+			return 0, err
+		}
+		if genericMessage == nil {
+			return 0, io.EOF
+		}
+		message, ok := genericMessage.(*ssh3Messages.DataOrExtendedDataMessage)
+		if !ok || message.DataType != ssh3Messages.SSH_EXTENDED_DATA_NONE {
+			continue
+		}
+		c.readBuf = []byte(message.Data)
+		c.readOffset = 0
+	}
+	count := copy(p, c.readBuf[c.readOffset:])
+	c.readOffset += count
+	if c.readOffset == len(c.readBuf) {
+		c.readBuf = nil
+		c.readOffset = 0
+	}
+	return count, nil
+}
+
+func (c *ssh3TCPConn) Write(p []byte) (int, error) {
+	return c.channel.WriteData(p, ssh3Messages.SSH_EXTENDED_DATA_NONE)
+}
+
+func (c *ssh3TCPConn) Close() error {
+	c.channel.Close()
+	return nil
+}
+
+func (c *ssh3TCPConn) LocalAddr() net.Addr {
+	if c.localAddr != nil {
+		return c.localAddr
+	}
+	return &net.TCPAddr{IP: net.IPv4zero, Port: 0}
+}
+
+func (c *ssh3TCPConn) RemoteAddr() net.Addr {
+	if c.remoteAddr != nil {
+		return c.remoteAddr
+	}
+	return &net.TCPAddr{IP: net.IPv4zero, Port: 0}
+}
+
+func (c *ssh3TCPConn) SetDeadline(time.Time) error { return nil }
+func (c *ssh3TCPConn) SetReadDeadline(time.Time) error { return nil }
+func (c *ssh3TCPConn) SetWriteDeadline(time.Time) error { return nil }
+
 func handleSOCKS5Conn(ctx context.Context, c *Client, conn net.Conn) {
 	defer conn.Close()
 	log.Debug().Msgf("SOCKS5 connection accepted from %s", conn.RemoteAddr())
 
-	buf := make([]byte, 256)
-	if _, err := io.ReadFull(conn, buf[:2]); err != nil {
-		log.Debug().Msgf("SOCKS5 client greeting read failed from %s: %v", conn.RemoteAddr(), err)
-		return
+	srv := socks5.NewServer(
+		socks5.WithLogger(socks5Logger{}),
+		socks5.WithDialAndRequest(func(ctx context.Context, network, addr string, request *socks5.Request) (net.Conn, error) {
+			log.Debug().Msgf("SOCKS5 CONNECT target=%s", addr)
+			parsed, err := net.ResolveTCPAddr("tcp", addr)
+			if err != nil {
+				return nil, err
+			}
+			channel, err := c.OpenTCPForwardingChannel(30000, 10, &net.TCPAddr{IP: net.IPv4zero, Port: 0}, parsed)
+			if err != nil {
+				return nil, err
+			}
+			return newSSH3TCPConn(channel, conn.LocalAddr(), parsed), nil
+		}),
+	)
+	if err := srv.ServeConn(conn); err != nil {
+		log.Debug().Msgf("SOCKS5 server closed %s: %v", conn.RemoteAddr(), err)
 	}
-	if buf[0] != 0x05 {
-		log.Debug().Msgf("SOCKS5 unsupported version from %s: 0x%02x", conn.RemoteAddr(), buf[0])
-		return
-	}
-	methodCount := int(buf[1])
-	if methodCount < 0 || methodCount > len(buf)-2 {
-		log.Debug().Msgf("SOCKS5 invalid method count from %s: %d", conn.RemoteAddr(), methodCount)
-		return
-	}
-	log.Debug().Msgf("SOCKS5 client greeting: version=0x%02x methods=%d", buf[0], methodCount)
-	if _, err := io.ReadFull(conn, buf[:methodCount]); err != nil {
-		log.Debug().Msgf("SOCKS5 auth methods read failed from %s: %v", conn.RemoteAddr(), err)
-		return
-	}
-	if _, err := conn.Write([]byte{0x05, 0x00}); err != nil {
-		log.Debug().Msgf("SOCKS5 auth reply write failed to %s: %v", conn.RemoteAddr(), err)
-		return
-	}
-	if _, err := io.ReadFull(conn, buf[:4]); err != nil {
-		log.Debug().Msgf("SOCKS5 CONNECT request read failed from %s: %v", conn.RemoteAddr(), err)
-		return
-	}
-	if buf[0] != 0x05 {
-		log.Debug().Msgf("SOCKS5 CONNECT version mismatch from %s: 0x%02x", conn.RemoteAddr(), buf[0])
-		return
-	}
-	cmd := buf[1]
-	if cmd != 0x01 {
-		log.Debug().Msgf("SOCKS5 unsupported command %d from %s", cmd, conn.RemoteAddr())
-		_, _ = conn.Write(socks5Reply(0x07))
-		return
-	}
-	atyp := buf[3]
-	var host string
-	var port int
-	switch atyp {
-	case 0x01:
-		if _, err := io.ReadFull(conn, buf[:6]); err != nil {
-			log.Debug().Msgf("SOCKS5 IPv4 CONNECT address read failed from %s: %v", conn.RemoteAddr(), err)
-			return
-		}
-		host = net.IP(buf[:4]).String()
-		port = int(binary.BigEndian.Uint16(buf[4:6]))
-	case 0x03:
-		if _, err := io.ReadFull(conn, buf[:1]); err != nil {
-			log.Debug().Msgf("SOCKS5 domain CONNECT address length read failed from %s: %v", conn.RemoteAddr(), err)
-			return
-		}
-		domainLen := int(buf[0])
-		if domainLen == 0 || domainLen > 255 {
-			log.Debug().Msgf("SOCKS5 invalid domain length %d from %s", domainLen, conn.RemoteAddr())
-			_, _ = conn.Write(socks5Reply(0x04))
-			return
-		}
-		if _, err := io.ReadFull(conn, buf[:domainLen+2]); err != nil {
-			log.Debug().Msgf("SOCKS5 domain CONNECT address read failed from %s: %v", conn.RemoteAddr(), err)
-			return
-		}
-		host = string(buf[:domainLen])
-		port = int(binary.BigEndian.Uint16(buf[domainLen : domainLen+2]))
-	case 0x04:
-		if _, err := io.ReadFull(conn, buf[:18]); err != nil {
-			log.Debug().Msgf("SOCKS5 IPv6 CONNECT address read failed from %s: %v", conn.RemoteAddr(), err)
-			return
-		}
-		host = net.IP(buf[:16]).String()
-		port = int(binary.BigEndian.Uint16(buf[16:18]))
-	default:
-		log.Debug().Msgf("SOCKS5 unsupported address type 0x%02x from %s", atyp, conn.RemoteAddr())
-		_, _ = conn.Write(socks5Reply(0x08))
-		return
-	}
-	log.Debug().Msgf("SOCKS5 CONNECT target resolved to %s:%d (atyp=0x%02x)", host, port, atyp)
-
-	target := &net.TCPAddr{IP: net.ParseIP(host), Port: port}
-	if target.IP == nil {
-		resolved, err := net.ResolveTCPAddr("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
-		if err != nil {
-			log.Debug().Msgf("SOCKS5 target resolution failed for %s:%d: %v", host, port, err)
-			_, _ = conn.Write(socks5Reply(0x04))
-			return
-		}
-		target = resolved
-	}
-	if _, err := conn.Write(socks5Reply(0x00)); err != nil {
-		log.Debug().Msgf("SOCKS5 success reply write failed to %s: %v", conn.RemoteAddr(), err)
-		return
-	}
-	log.Debug().Msgf("SOCKS5 opening SSH3 forwarding channel to %s", target)
-	channel, err := c.OpenTCPForwardingChannel(30000, 10, &net.TCPAddr{IP: net.IPv4zero, Port: 0}, target)
-	if err != nil {
-		log.Error().Msgf("could not open SOCKS5 TCP forwarding channel: %s", err)
-		_, _ = conn.Write(socks5Reply(0x05))
-		return
-	}
-	forwardTCPInBackground(ctx, channel, conn.(*net.TCPConn))
 }
 
 func (c *Client) DynamicForward(ctx context.Context, localTCPAddr *net.TCPAddr) error {
