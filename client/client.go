@@ -26,6 +26,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"github.com/rs/zerolog/log"
 	"github.com/things-go/go-socks5"
+	"github.com/things-go/go-socks5/statute"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/term"
@@ -143,9 +144,31 @@ func forwardAgent(parent context.Context, channel ssh3.Channel) error {
 	}
 }
 
+// forwardingDrainTimeout bounds for how long the local socket may still be
+// read after the channel direction ended, so that a half-closed connection
+// keeps working while a peer answers, without letting a never-closing socket
+// park the forwarding goroutine and the QUIC channel forever.
+const forwardingDrainTimeout = 30 * time.Second
+
 func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net.TCPConn) {
+	var directions sync.WaitGroup
+	directions.Add(2)
+	// half-closing both directions does not release the socket: a TCP file
+	// descriptor is only freed by an explicit Close, otherwise every forwarded
+	// connection keeps one descriptor for the lifetime of the session
 	go func() {
-		defer conn.CloseWrite()
+		directions.Wait()
+		conn.Close()
+	}()
+	go func() {
+		defer directions.Done()
+		defer func() {
+			// half-close the socket - the peer may still have an answer on the
+			// way - and bound the remaining read with a deadline, so a socket
+			// which never closes cannot hold the channel indefinitely
+			conn.CloseWrite()
+			conn.SetReadDeadline(time.Now().Add(forwardingDrainTimeout))
+		}()
 		for {
 			select {
 			case <-ctx.Done():
@@ -190,6 +213,7 @@ func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net
 	}()
 
 	go func() {
+		defer directions.Done()
 		defer channel.Close()
 		defer conn.CloseRead()
 		buf := make([]byte, channel.MaxPacketSize())
@@ -203,6 +227,12 @@ func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net
 			if err != nil {
 				if isExpectedTCPForwardCloseError(err) {
 					log.Debug().Msgf("TCP forwarding socket closed normally on channel %d: %v", channel.ChannelID(), err)
+					return
+				}
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					// the other direction ended and this socket did not produce
+					// anything within the grace period: release the channel
+					log.Debug().Msgf("TCP forwarding socket timed out while draining channel %d: %s", channel.ChannelID(), err)
 					return
 				}
 				log.Error().Msgf("could read data on TCP socket: %s", err)
@@ -231,7 +261,15 @@ func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net
 }
 
 func forwardReverseTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net.TCPConn) {
+	var directions sync.WaitGroup
+	directions.Add(2)
+	// same as forwardTCPInBackground: the descriptor is only released by Close
 	go func() {
+		directions.Wait()
+		conn.Close()
+	}()
+	go func() {
+		defer directions.Done()
 		defer conn.CloseWrite()
 		for {
 			select {
@@ -272,6 +310,7 @@ func forwardReverseTCPInBackground(ctx context.Context, channel ssh3.Channel, co
 	}()
 
 	go func() {
+		defer directions.Done()
 		defer channel.Close()
 		defer conn.CloseRead()
 		buf := make([]byte, channel.MaxPacketSize())
@@ -1002,22 +1041,75 @@ func handleSOCKS5Conn(ctx context.Context, c *Client, conn net.Conn) {
 
 	srv := socks5.NewServer(
 		socks5.WithLogger(socks5Logger{}),
-		socks5.WithDialAndRequest(func(ctx context.Context, network, addr string, request *socks5.Request) (net.Conn, error) {
-			log.Debug().Msgf("SOCKS5 CONNECT target=%s", addr)
-			parsed, err := net.ResolveTCPAddr("tcp", addr)
-			if err != nil {
-				return nil, err
-			}
-			channel, err := c.OpenTCPForwardingChannel(30000, 10, &net.TCPAddr{IP: net.IPv4zero, Port: 0}, parsed)
-			if err != nil {
-				return nil, err
-			}
-			return newSSH3TCPConn(channel, conn.LocalAddr(), parsed), nil
+		// The connect command is handled explicitely, instead of letting the library
+		// dial and proxy: the tunnel must be torn down as soon as either side ends
+		// (the SOCKS client aborting a blocked request included), which the default
+		// handler does not do - it waits for the target to answer before closing
+		// anything, so an aborted request kept its channel, file descriptor and QUIC
+		// stream alive until the target finally spoke.
+		socks5.WithConnectHandle(func(_ context.Context, writer io.Writer, request *socks5.Request) error {
+			return serveSocks5Connect(c, conn, writer, request)
 		}),
 	)
 	if err := srv.ServeConn(conn); err != nil {
 		log.Debug().Msgf("SOCKS5 server closed %s: %v", conn.RemoteAddr(), err)
 	}
+}
+
+// serveSocks5Connect tunnels a SOCKS5 CONNECT request through a SSH forwarding
+// channel. The two copy directions run until the first one ends; the tunnel is
+// then closed immediately, which releases the other direction as well. This
+// keeps a failed or blocked request contained inside its own connection.
+func serveSocks5Connect(c *Client, clientConn net.Conn, writer io.Writer, request *socks5.Request) error {
+	// the library resolved the FQDN (socks5 "remote resolve") into DestAddr.IP
+	// already; String() prefers the IP and falls back to the host name
+	target := request.DestAddr.String()
+	log.Debug().Msgf("SOCKS5 CONNECT target=%s", target)
+	parsed, err := net.ResolveTCPAddr("tcp", target)
+	if err != nil {
+		_ = socks5.SendReply(writer, statute.RepHostUnreachable, nil)
+		return err
+	}
+	channel, err := c.OpenTCPForwardingChannel(30000, 10, &net.TCPAddr{IP: net.IPv4zero, Port: 0}, parsed)
+	if err != nil {
+		log.Error().Msgf("could not open TCP forwarding channel for %s: %s", target, err)
+		// the session cannot carry the tunnel: answer the SOCKS client instead of
+		// leaving it hanging without a response
+		_ = socks5.SendReply(writer, statute.RepHostUnreachable, nil)
+		return err
+	}
+	defer channel.Close()
+	tunnel := newSSH3TCPConn(channel, clientConn.LocalAddr(), parsed)
+	if err := socks5.SendReply(writer, statute.RepSuccess, clientConn.LocalAddr()); err != nil {
+		return err
+	}
+
+	copiesDone := make(chan error, 2)
+	// from the SOCKS client to the tunnel
+	go func() {
+		_, err := io.Copy(tunnel, request.Reader)
+		copiesDone <- err
+	}()
+	// from the tunnel to the SOCKS client
+	go func() {
+		_, err := io.Copy(writer, tunnel)
+		copiesDone <- err
+	}()
+	// the first direction to end (EOF, reset, error) closes both the tunnel and
+	// the client connection: the tunnel dying (a refused target for instance) must
+	// be reported to the SOCKS client at once instead of letting it wait for a
+	// response, and closing the client socket unblocks the other copy in turn
+	firstErr := <-copiesDone
+	channel.Close()
+	clientConn.Close()
+	secondErr := <-copiesDone
+	if firstErr != nil && !isExpectedTCPForwardCloseError(firstErr) {
+		log.Debug().Msgf("SOCKS5 tunnel to %s closed: %v", target, firstErr)
+	}
+	if secondErr != nil && !isExpectedTCPForwardCloseError(secondErr) && !errors.Is(secondErr, io.EOF) {
+		log.Trace().Msgf("SOCKS5 tunnel to %s second direction: %v", target, secondErr)
+	}
+	return nil
 }
 
 // DynamicForward binds a local SOCKS5 proxy and tunnels the connections asked
