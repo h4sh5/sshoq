@@ -9,3 +9,4 @@ sshoq-server
 .proxymirror/
 .gomodcache/
 .gocache/
+.gopath/

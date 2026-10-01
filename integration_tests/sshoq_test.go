@@ -3,6 +3,7 @@ package integration_tests
 import (
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"math/rand"
 	"net"
@@ -10,6 +11,8 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -116,6 +119,87 @@ func portReleased(network string, addr string) error {
 func expectPortReleased(network string, addr string) {
 	Eventually(func() error { return portReleased(network, addr) }, "10s", "100ms").Should(Succeed(),
 		fmt.Sprintf("port %s/%s is still in use: a previous process has not released it", network, addr))
+}
+
+// Ports of the forwarding specs are chosen in this window: above the privileged
+// ports (no root required to bind them) and below 32768, the default lower
+// bound of the ephemeral port range, so that they cannot collide with the
+// ports the kernel hands out to the tests' own connections. They are also
+// deliberately away from the 8080/9090 cluster where local development servers
+// like to live.
+const (
+	specPortMin = 2048
+	specPortMax = 7936 // exclusive: the window holds specPortMax-specPortMin values
+)
+
+var (
+	specPortsOnce sync.Once
+	specPorts     map[string]uint16
+)
+
+// specPort maps a logical port written in a forwarding spec to the port the
+// suite actually binds for it, in "network" ("tcp" or "udp").
+//
+// The logical numbers are fixed and consecutive (8080, 8081, 8082, ...), which
+// is exactly what makes two runs of the suite on one machine - or a previous
+// run whose processes had not all gone away, or an unrelated process on the
+// host - collide on the very same port. Instead, every run works on a set of
+// ports mixed from GinkgoRandomSeed, spread over the whole window instead of
+// sitting next to each other, while staying deterministic for a given seed so
+// that a failing run can be replayed. A logical port always maps to the same
+// real port during a run (several specs reuse it), and two logical ports never
+// map to the same real one.
+func specPort(network string, logical uint16) uint16 {
+	specPortsOnce.Do(func() { specPorts = make(map[string]uint16) })
+	key := fmt.Sprintf("%s/%d", network, logical)
+	if port, ok := specPorts[key]; ok {
+		return port
+	}
+	seed := uint64(GinkgoRandomSeed())
+	h := fnv.New64a()
+	_, _ = fmt.Fprintf(h, "sshoq/%s", key)
+	state := h.Sum64() ^ seed
+	for attempt := 0; ; attempt++ {
+		// xorshift64* avalanche: one bit of change in the seed or in the logical
+		// port scatters the result over the whole window, so consecutive logical
+		// ports end up far apart from each other
+		state ^= state >> 12
+		state ^= state << 25
+		state ^= state >> 27
+		state *= 2685821657736338717
+		port := specPortMin + uint16(state%uint64(specPortMax-specPortMin))
+		if taken := takenSpecPort(network, port); taken == "" || taken == key {
+			specPorts[key] = port
+			return port
+		}
+		if attempt < 1000 {
+			continue
+		}
+		// extremely unlikely; never let a port clash silently break two specs
+		panic(fmt.Sprintf("could not allocate a test port for %s", key))
+	}
+}
+
+// takenSpecPort returns which logical key of the given network already uses
+// the port, or the empty string when the port is unassigned.
+func takenSpecPort(network string, port uint16) string {
+	for k, p := range specPorts {
+		if p == port && strings.HasPrefix(k, network+"/") {
+			return k
+		}
+	}
+	return ""
+}
+
+// remapTCPPort returns a copy of addr whose port is the run-local port of the
+// given network (the IP is kept as it was).
+func remapTCPPort(network string, addr *net.TCPAddr) *net.TCPAddr {
+	return &net.TCPAddr{IP: addr.IP, Port: int(specPort(network, uint16(addr.Port))), Zone: addr.Zone}
+}
+
+// remapUDPPort is the UDP counterpart of remapTCPPort.
+func remapUDPPort(network string, addr *net.UDPAddr) *net.UDPAddr {
+	return &net.UDPAddr{IP: addr.IP, Port: int(specPort(network, uint16(addr.Port))), Zone: addr.Zone}
 }
 
 var _ = BeforeSuite(func() {
@@ -377,6 +461,9 @@ var _ = Describe("Testing the sshoq cli", func() {
 				// for both cases.
 				Context("TCP port forwarding", func() {
 					testTCPPortForwarding := func(localPort uint16, proxyJump bool, remoteAddr *net.TCPAddr, messageFromClient string, messageFromServer string, forwardingType string) {
+						// work on the run-local ports of the two logical ones
+						localPort = specPort("tcp", localPort)
+						remoteAddr = remapTCPPort("tcp", remoteAddr)
 						localIP := "[::1]"
 						if remoteAddr.IP.To4() != nil {
 							localIP = "127.0.0.1"
@@ -545,6 +632,11 @@ var _ = Describe("Testing the sshoq cli", func() {
 					// works concurrently.
 					testMultipleTCPPortForwardings := func(forwardings []tcpForwardingSpec) {
 						const bindIP = "127.0.0.1"
+						// replace the logical ports of the specs by the run-local ones
+						for i := range forwardings {
+							forwardings[i].localPort = specPort("tcp", forwardings[i].localPort)
+							forwardings[i].remotePort = specPort("tcp", forwardings[i].remotePort)
+						}
 
 						serverStarted := make(chan struct{}, len(forwardings))
 						done := make(chan struct{}, len(forwardings))
@@ -698,6 +790,9 @@ var _ = Describe("Testing the sshoq cli", func() {
 					// message framing used to be counted in) failed the copy and tore down the
 					// tunnel, and the SOCKS5 client got an empty reply.
 					testDynamicTCPPortForwarding := func(localPort uint16, remoteAddr *net.TCPAddr, messageFromClient string, messageFromServer string) {
+						// work on the run-local ports of the two logical ones
+						localPort = specPort("tcp", localPort)
+						remoteAddr = remapTCPPort("tcp", remoteAddr)
 						proxyAddr := fmt.Sprintf("127.0.0.1:%d", localPort)
 
 						// Every forwarding spec binds a port of the same range, and the port is
@@ -1052,6 +1147,9 @@ var _ = Describe("Testing the sshoq cli", func() {
 			// for both cases.
 			Context("UDP port forwarding", func() {
 				testUDPPortForwarding := func(localPort uint16, proxyJump bool, remoteAddr *net.UDPAddr, messageFromClient, messageFromServer string, forwardingType string) {
+					// work on the run-local ports of the two logical ones
+					localPort = specPort("udp", localPort)
+					remoteAddr = remapUDPPort("udp", remoteAddr)
 					localIP := "[::1]"
 					localIPWithoutBrackets := "::1"
 					if remoteAddr.IP.To4() != nil {
