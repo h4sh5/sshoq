@@ -339,6 +339,94 @@ func splitForwardingSpecs(groups []string) []string {
 	return specs
 }
 
+func parseDynamicForwardingSpec(spec string) (bindAddr string, port int, err error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return "", 0, fmt.Errorf("empty dynamic forwarding spec")
+	}
+
+	if p, err := strconv.Atoi(spec); err == nil {
+		if p < 1 || p > 0xFFFF {
+			return "", 0, fmt.Errorf("port out of range %d", p)
+		}
+		return "127.0.0.1", p, nil
+	}
+
+	if strings.Contains(spec, ":") {
+		host, portStr, err := net.SplitHostPort(spec)
+		if err != nil {
+			return "", 0, fmt.Errorf("invalid dynamic forwarding address %q: %w", spec, err)
+		}
+		p, err := strconv.Atoi(portStr)
+		if err != nil {
+			return "", 0, fmt.Errorf("invalid port %q: %w", portStr, err)
+		}
+		if p < 1 || p > 0xFFFF {
+			return "", 0, fmt.Errorf("port out of range %d", p)
+		}
+		if host == "" {
+			host = "127.0.0.1"
+		}
+		return host, p, nil
+	}
+
+	return "", 0, fmt.Errorf("invalid dynamic forwarding spec %q", spec)
+}
+
+// dynamicForwardAddr resolves a -D bind address into a numerical IP: a host name
+// must not reach net.TCPAddr as a nil IP, which would silently bind every
+// interface instead of the requested loopback.
+func dynamicForwardAddr(bindAddr string) (net.IP, error) {
+	if ip := net.ParseIP(bindAddr); ip != nil {
+		return ip, nil
+	}
+	ips, err := net.LookupIP(bindAddr)
+	if err != nil || len(ips) == 0 {
+		return nil, fmt.Errorf("could not resolve dynamic forwarding address %q", bindAddr)
+	}
+	return ips[0], nil
+}
+
+// dynamicForwardingAddrs parses and resolves every -D spec into the local TCP
+// addresses the SOCKS5 proxies must listen on. Duplicates are rejected before
+// anything is bound: without this check the second bind of the same port fails
+// with "bind: address already in use", which reads as though another process was
+// holding the port.
+func dynamicForwardingAddrs(forwardDynamic []string) ([]*net.TCPAddr, error) {
+	localAddrs := make([]*net.TCPAddr, 0, len(forwardDynamic))
+	requested := make(map[string]struct{}, len(forwardDynamic))
+	for _, spec := range splitForwardingSpecs(forwardDynamic) {
+		bindAddr, port, err := parseDynamicForwardingSpec(spec)
+		if err != nil {
+			return nil, fmt.Errorf("dynamic forwarding parsing error for %q: %s", spec, err)
+		}
+		ip, err := dynamicForwardAddr(bindAddr)
+		if err != nil {
+			return nil, fmt.Errorf("dynamic forwarding error for %q: %s", spec, err)
+		}
+		local := &net.TCPAddr{IP: ip, Port: port}
+		if _, alreadyRequested := requested[local.String()]; alreadyRequested {
+			return nil, fmt.Errorf("dynamic forwarding socket %s requested more than once", local)
+		}
+		requested[local.String()] = struct{}{}
+		localAddrs = append(localAddrs, local)
+	}
+	return localAddrs, nil
+}
+
+func setupDynamicForwardings(ctx context.Context, c *client.Client, forwardDynamic []string) error {
+	localAddrs, err := dynamicForwardingAddrs(forwardDynamic)
+	if err != nil {
+		return err
+	}
+	for _, local := range localAddrs {
+		if err := c.DynamicForward(ctx, local); err != nil {
+			return fmt.Errorf("could not bind dynamic forwarding socket %s: %s", local, err)
+		}
+	}
+	return nil
+}
+
 // setupForwardings starts every local and remote port forwarding that was
 // requested on the command line. Multiple -L, -R, -forward-tcp, -forward-udp,
 // -reverse-tcp and -reverse-udp flags can be freely combined, in any order, and
@@ -635,10 +723,13 @@ func ClientMain() int {
 	var forwardUDP stringSliceFlag
 	var reverseTCP stringSliceFlag
 	var reverseUDP stringSliceFlag
+	var forwardDynamic stringSliceFlag
 	flag.Var(&forwardTCP, "forward-tcp", "forward a remote TCP port to a local port. Syntax same as SSH2 but with @ instead of : (e.g. 8080@::1@80 or 8080@192.168.1.1@80). May be specified multiple times.")
 	flag.Var(&forwardUDP, "forward-udp", "forward a remote UDP port to a local port. Syntax same as SSH2 but with @ instead of : (e.g. 5353@::1@53). May be specified multiple times.")
 	flag.Var(&reverseTCP, "reverse-tcp", "reverse forward a local TCP port to a remote port. Syntax same as SSH2 but with @ instead of : (e.g. 80@127.0.0.1@8080). May be specified multiple times.")
 	flag.Var(&reverseUDP, "reverse-udp", "reverse forward a local UDP port to a remote port. Syntax same as SSH2 but with @ instead of : (e.g. 53@127.0.0.1@5353). May be specified multiple times.")
+	flag.Var(&forwardDynamic, "forward-dynamic", "bind a local SOCKS5 dynamic forwarding port. Like OpenSSH -D. May be specified multiple times.")
+	flag.Var(&forwardDynamic, "D", "alias for -forward-dynamic (may be specified multiple times)")
 	flag.Var(&forwardTCP, "L", "alias for -forward-tcp (may be specified multiple times)")
 	flag.Var(&reverseTCP, "R", "alias for -reverse-tcp (may be specified multiple times)")
 	proxyJump := flag.String("proxy-jump", "", "if set, performs a proxy jump using the specified remote host as proxy (requires server with version >= 0.1.5)")
@@ -959,10 +1050,22 @@ func ClientMain() int {
 		log.Error().Msgf("could not dial %s: %s", options.CanonicalHostFormat(), err)
 		return -1
 	}
+	// The forwardings bind local (or remote) sockets: they live on a context of
+	// their own, cancelled when the session ends, so that the ports they hold are
+	// given back to the system as soon as the forwarding stops instead of being
+	// held until the process exits.
+	forwardingCtx, stopForwardings := context.WithCancel(ctx)
+	defer stopForwardings()
+
 	// Set up all requested local and remote port forwardings. Multiple -L, -R,
-	// -forward-tcp, -forward-udp, -reverse-tcp and -reverse-udp flags can now
-	// be combined freely, including a mix of TCP and UDP.
-	fwUDPmulticonn, err = setupForwardings(ctx, c, forwardTCP, reverseTCP, forwardUDP, reverseUDP, fwUDPmulticonn)
+	// -D, -forward-tcp, -forward-udp, -reverse-tcp, -reverse-udp and
+	// -forward-dynamic flags can now be combined freely, including a mix of
+	// TCP, UDP and SOCKS5 dynamic forwarding.
+	if err := setupDynamicForwardings(forwardingCtx, c, forwardDynamic); err != nil {
+		log.Error().Msgf("%s", err)
+		return -1
+	}
+	fwUDPmulticonn, err = setupForwardings(forwardingCtx, c, forwardTCP, reverseTCP, forwardUDP, reverseUDP, fwUDPmulticonn)
 	if err != nil {
 		log.Error().Msgf("%s", err)
 		return -1

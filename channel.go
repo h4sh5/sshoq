@@ -520,6 +520,12 @@ func (c *channelImpl) WriteData(dataBuf []byte, dataType ssh3.SSHDataType) (int,
 	if err != nil {
 		return 0, err
 	}
+	// written counts the bytes of the caller buffer which have been handed to the
+	// channel, as required by the io.Writer contract. The framing bytes added to
+	// each message (message type and data length varints) must not be counted:
+	// reporting more bytes than were given to Write breaks io.Writer users, e.g.
+	// io.Copy fails with "invalid write result", which used to tear down the whole
+	// dynamic (SOCKS5) forwarding tunnel as soon as the client sent a request.
 	written := 0
 	for len(dataBuf) > 0 {
 		dataMsg := &ssh3.DataOrExtendedDataMessage{
@@ -538,10 +544,15 @@ func (c *channelImpl) WriteData(dataBuf []byte, dataType ssh3.SSHDataType) (int,
 			return written, err
 		}
 		n, err := c.send.Write(msgBuf)
-		written += n
 		if err != nil {
 			return written, err
 		}
+		if n < len(msgBuf) {
+			// the message was only partially written on the stream: the data of that
+			// message cannot be considered as sent
+			return written, io.ErrShortWrite
+		}
+		written += int(msgLen)
 	}
 	return written, nil
 }

@@ -10,13 +10,14 @@ require (
 	github.com/onsi/gomega v1.29.0
 	github.com/quic-go/quic-go v0.40.1-0.20240102075208-1083d1fb8f98
 	github.com/rs/zerolog v1.31.0
+	github.com/things-go/go-socks5 v0.1.3
 	go.uber.org/zap v1.24.0
-	golang.org/x/crypto v0.17.0
+	golang.org/x/crypto v0.52.0
 	golang.org/x/exp v0.0.0-20221205204356-47842c84f3db
-	golang.org/x/net v0.17.0
+	golang.org/x/net v0.54.0
 	golang.org/x/oauth2 v0.13.0
-	golang.org/x/sys v0.15.0
-	golang.org/x/term v0.15.0
+	golang.org/x/sys v0.45.0
+	golang.org/x/term v0.43.0
 )
 
 require (
@@ -38,12 +39,13 @@ require (
 	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/mock v0.3.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	golang.org/x/mod v0.12.0 // indirect
-	golang.org/x/text v0.14.0 // indirect
-	golang.org/x/tools v0.12.0 // indirect
+	golang.org/x/mod v0.35.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
+	golang.org/x/tools v0.44.0 // indirect
 	google.golang.org/appengine v1.6.8 // indirect
 	google.golang.org/protobuf v1.31.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-go 1.25
+go 1.25.0

@@ -1,6 +1,12 @@
 bin/
+*.tar.gz
 *.log
 sshoq
 sshoq-server
 *.pem
 *.key
+.gotoolchain/
+.proxymirror/
+.gomodcache/
+.gocache/
+.gopath/

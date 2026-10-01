@@ -15,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -137,6 +138,20 @@ func setupEnv(user *unix_util.User, runningCommand *runningCommand, authAgentSoc
 	}
 }
 
+func isExpectedForwardingStreamClose(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	var streamErr *quic.StreamError
+	if errors.As(err, &streamErr) {
+		return streamErr.Remote
+	}
+	return false
+}
+
 func forwardUDPInBackground(ctx context.Context, channel ssh3.Channel, conn *net.UDPConn) {
 	go func() {
 		defer conn.Close()
@@ -183,9 +198,37 @@ func forwardUDPInBackground(ctx context.Context, channel ssh3.Channel, conn *net
 	}()
 }
 
+// forwardingDrainTimeout bounds for how long a forwarding target may still
+// answer after the other direction has been closed. Half-close semantics are
+// preserved (the target gets an EOF on its input and keeps its output until it
+// answered), but a read which stays blocked longer than this grace is killed:
+// otherwise one silent, never-closing target would park the forwarding
+// goroutine, the socket and the QUIC channel forever.
+const forwardingDrainTimeout = 30 * time.Second
+
 func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net.TCPConn) {
+	var directions sync.WaitGroup
+	directions.Add(2)
+	// both directions being half-closed is not enough for the operating system
+	// to release the socket: the file descriptor of a TCP connection is only
+	// freed by an explicit Close. Without it, every forwarded connection would
+	// keep one descriptor for the lifetime of the whole session, until the
+	// process runs out of file descriptors and no new forwarding - dynamic or
+	// not - can be served anymore
 	go func() {
-		defer conn.CloseWrite()
+		directions.Wait()
+		conn.Close()
+	}()
+	go func() {
+		defer directions.Done()
+		defer func() {
+			// half-close the socket, so the target still may answer what it was
+			// asked - but bound that chance: a goroutine blocked in conn.Read on a
+			// target which neither answers nor closes is woken up by the expiring
+			// deadline, instead of leaking one stream per such connection
+			conn.CloseWrite()
+			conn.SetReadDeadline(time.Now().Add(forwardingDrainTimeout))
+		}()
 		for {
 			select {
 			case <-ctx.Done():
@@ -193,8 +236,9 @@ func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net
 			default:
 			}
 			genericMessage, err := channel.NextMessage()
-			if errors.Is(err, io.EOF) {
-				log.Info().Msgf("eof on tcp-forwarding channel %d", channel.ChannelID())
+			if errors.Is(err, io.EOF) || isExpectedForwardingStreamClose(err) {
+				log.Debug().Msgf("tcp-forwarding channel %d closed normally: %v", channel.ChannelID(), err)
+				return
 			} else if err != nil {
 				log.Error().Msgf("could get message from tcp forwarding channel: %s", err)
 				return
@@ -225,6 +269,7 @@ func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net
 	}()
 
 	go func() {
+		defer directions.Done()
 		defer channel.Close()
 		defer conn.CloseRead()
 		buf := make([]byte, channel.MaxPacketSize())
@@ -235,12 +280,26 @@ func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net
 			default:
 			}
 			n, err := conn.Read(buf)
-			if err != nil && !errors.Is(err, io.EOF) {
+			if err != nil {
+				if isExpectedForwardingStreamClose(err) {
+					log.Debug().Msgf("TCP forwarding socket closed normally on server channel %d: %v", channel.ChannelID(), err)
+					return
+				}
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					// the other direction was closed and the target did not answer
+					// within the grace period: give up on it
+					log.Debug().Msgf("TCP forwarding to %s timed out while draining channel %d: %s", conn.RemoteAddr(), channel.ChannelID(), err)
+					return
+				}
 				log.Error().Msgf("could read data on TCP socket: %s", err)
 				return
 			}
 			_, errWrite := channel.WriteData(buf[:n], ssh3Messages.SSH_EXTENDED_DATA_NONE)
 			if errWrite != nil {
+				if isExpectedForwardingStreamClose(errWrite) {
+					log.Debug().Msgf("server TCP forwarding channel closed normally while writing on channel %d: %v", channel.ChannelID(), errWrite)
+					return
+				}
 				switch quicErr := errWrite.(type) {
 				case *quic.StreamError:
 					if quicErr.Remote && quicErr.ErrorCode == 42 {
@@ -253,15 +312,21 @@ func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net
 				}
 				return
 			}
-			if errors.Is(err, io.EOF) {
-				return
-			}
 		}
 	}()
 }
 
 func forwardReverseTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net.TCPConn) {
+	var directions sync.WaitGroup
+	directions.Add(2)
+	// same as forwardTCPInBackground: half-closing both directions does not free
+	// the file descriptor, only Close does
 	go func() {
+		directions.Wait()
+		conn.Close()
+	}()
+	go func() {
+		defer directions.Done()
 		defer channel.Close()
 		defer conn.CloseRead()
 		buf := make([]byte, channel.MaxPacketSize())
@@ -297,6 +362,7 @@ func forwardReverseTCPInBackground(ctx context.Context, channel ssh3.Channel, co
 	}()
 
 	go func() {
+		defer directions.Done()
 		defer conn.CloseWrite()
 		for {
 			select {
@@ -696,15 +762,35 @@ func handleUDPForwardingChannel(ctx context.Context, user *unix_util.User, conv 
 	return nil
 }
 
+// forwardingConnectTimeout bounds the connection attempt to a forwarding
+// target. Without a timeout, dialing an unreachable address (SYN dropped by a
+// firewall for instance) hangs for the whole kernel TCP timeout, and every
+// request behind such a target used to stop the whole forwarding machinery.
+const forwardingConnectTimeout = 30 * time.Second
+
 func handleTCPForwardingChannel(ctx context.Context, user *unix_util.User, conv *ssh3.Conversation, channel *ssh3.TCPForwardingChannelImpl) error {
 	// TODO: currently, the rights for socket creation are not checked. The socket is opened with the process's uid and gid
 	// Not sure how to handled that in go since we cannot temporarily change the uid/gid without potentially impacting every
 	// other goroutine
-	conn, err := net.DialTCP("tcp", nil, channel.RemoteAddr)
-	if err != nil {
-		return err
-	}
-	forwardTCPInBackground(ctx, channel, conn)
+	//
+	// The connection to the target is established in the background: the conversation
+	// channel accept loop must never block on it, otherwise one request to a dead or
+	// firewalled target stalls every other forwarding of the same session (the proxy
+	// appears to "eventually stop responding": channels are queued until the blocked
+	// dial finally fails, then all the stale queued requests hit their targets at once).
+	go func() {
+		dialer := net.Dialer{Timeout: forwardingConnectTimeout}
+		conn, err := dialer.DialContext(ctx, "tcp", channel.RemoteAddr.String())
+		if err != nil {
+			log.Error().Msgf("could not dial TCP target %s on channel %d: %s", channel.RemoteAddr, channel.ChannelID(), err)
+			// the channel was already confirmed: closing it is how the failure is
+			// signalled to the client, which then aborts the tunneled connection
+			// instead of waiting forever for a response that will never come
+			channel.Close()
+			return
+		}
+		forwardTCPInBackground(ctx, channel, conn.(*net.TCPConn))
+	}()
 	return nil
 }
 
