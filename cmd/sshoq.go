@@ -38,20 +38,19 @@ import (
 )
 
 func homedir() string {
-	user, err := osuser.Current()
-	if err == nil {
-		return user.HomeDir
-	} else {
-		return os.Getenv("HOME")
-	}
+	// HOME takes precedence over the home directory declared in the password
+	// database, so ~/.ssh (config, keys, ...) resolves against $HOME
+	return util.HomeDir()
 }
 
 // resolveConfigDir returns the directory used to store client configuration
-// data (known_hosts, oidc_config.json, ...). When configDir is non-empty it
-// is used as-is, otherwise the default ~/.ssh3 directory is used.
+// data (known_hosts, oidc_config.json, ...). When configDir is non-empty it is
+// used (after "~"/"$HOME" expansion), otherwise the default ~/.ssh3 directory
+// is used.
 func resolveConfigDir(configDir string) string {
 	if configDir != "" {
-		return configDir
+		// the directory may be given as "~/.ssh3" on the command line
+		return util.ExpandPath(configDir)
 	}
 	return path.Join(homedir(), ".ssh3")
 }
@@ -857,6 +856,7 @@ func ClientMain() int {
 	// default to oidc if no password or privkey
 	var oidcConfig oidc.OIDCIssuerConfig = nil
 	var oidcConfigFile *os.File = nil
+	*oidcConfigFileName = util.ExpandPath(*oidcConfigFileName)
 	if *oidcConfigFileName == "" {
 		defaultFileName := path.Join(ssh3Dir, "oidc_config.json")
 		log.Debug().Msgf("no OIDC config file specified, use default file: %s", defaultFileName)
@@ -889,6 +889,7 @@ func ClientMain() int {
 	}
 
 	var keyLog io.Writer
+	*keyLogFile = util.ExpandPath(*keyLogFile)
 	if len(*keyLogFile) > 0 {
 		f, err := os.Create(*keyLogFile)
 		if err != nil {

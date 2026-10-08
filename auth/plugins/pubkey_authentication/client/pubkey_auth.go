@@ -52,14 +52,26 @@ func (*PubkeyOptionParser) OptionConfigName() string {
 	return "IdentityFile"
 }
 
+// expandPaths expands the identity paths parsed from the SSH config file or
+// from the command line (see util.ExpandPath).
+func expandPaths(values []string) []string {
+	filenames := make([]string, 0, len(values))
+	for _, value := range values {
+		filenames = append(filenames, util.ExpandPath(value))
+	}
+	return filenames
+}
+
 // Parse implements config.OptionParser.
 func (*PubkeyOptionParser) Parse(values []string) (config.Option, error) {
+	filenames := expandPaths(values)
+
 	if os.Getenv("SSH_AUTH_SOCK") == "" {
-		log.Warn().Msgf("specified a public key (%s) but no agent is running", values)
+		log.Warn().Msgf("specified a public key (%v) but no agent is running", filenames)
 	}
 
 	return PubkeyAuthOption{
-		filenames: values,
+		filenames: filenames,
 	}, nil
 }
 
@@ -158,7 +170,7 @@ var pubkeyPluginFunc auth.GetClientAuthMethodsFunc = func(request *http.Request,
 			}
 			var methods []auth.ClientAuthMethod
 			for _, filename := range o.Filenames() {
-				keyBytes, err := os.ReadFile(util.ExpandTildeWithHomeDir(filename))
+				keyBytes, err := os.ReadFile(util.ExpandPath(filename))
 				if err != nil {
 					log.Error().Msgf("could not read public key located at %s: %s", filename, err)
 					return nil, err

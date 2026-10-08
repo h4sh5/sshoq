@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/h4sh5/sshoq"
+	client_config "github.com/h4sh5/sshoq/client/config"
 )
 
 func TestPrepareRequestForAuth_NonExistentKey(t *testing.T) {
@@ -85,5 +86,92 @@ func TestPrepareRequestForAuth_ValidKey(t *testing.T) {
 	authHeader := req.Header.Get("Authorization")
 	if authHeader == "" {
 		t.Fatalf("expected Authorization header to be set, got empty")
+	}
+}
+
+// Identity paths coming from the SSH config file must be expanded the way
+// OpenSSH expands them ("~/...", "~user/..." and "$HOME/...").
+func TestPrivkeyOptionParserExpandsIdentityPaths(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	parser := &PrivkeyOptionParser{}
+	option, err := parser.Parse([]string{
+		"~/.ssh/id_example",
+		"$HOME/.ssh/id_example2",
+		`"~/.ssh/id_example3"`,
+		"/etc/ssh/id_static",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	expected := []string{
+		filepath.Join(home, ".ssh/id_example"),
+		filepath.Join(home, ".ssh/id_example2"),
+		filepath.Join(home, ".ssh/id_example3"),
+		"/etc/ssh/id_static",
+	}
+	got := option.(*PrivkeyAuthOption).Filenames()
+	if len(got) != len(expected) {
+		t.Fatalf("expected %v, got %v", expected, got)
+	}
+	for i := range expected {
+		if got[i] != expected[i] {
+			t.Errorf("identity %d: expected %q, got %q", i, expected[i], got[i])
+		}
+	}
+}
+
+// The auth methods built by the plugin from the config-derived option must use
+// expanded paths, otherwise the key files are never found.
+func TestPrivkeyPluginFuncUsesExpandedPaths(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(sshDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	option, err := (&PrivkeyOptionParser{}).Parse([]string{"~/.ssh/id_example"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	clientConfig, err := client_config.NewConfig(
+		"testuser", "example.com", 443, "/",
+		nil,
+		map[client_config.OptionName]client_config.Option{PRIVKEY_OPTION_NAME: option},
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	req := &http.Request{Header: make(http.Header), URL: &url.URL{Path: "/"}}
+	methods, err := privkeyPluginFunc(req, nil, clientConfig, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(methods) != 1 {
+		t.Fatalf("expected 1 auth method, got %d", len(methods))
+	}
+	authMethod, ok := methods[0].(*PrivkeyFileAuthMethod)
+	if !ok {
+		t.Fatalf("unexpected auth method type %T", methods[0])
+	}
+	if want := filepath.Join(home, ".ssh/id_example"); authMethod.Filename() != want {
+		t.Errorf("expected filename %q, got %q", want, authMethod.Filename())
+	}
+}
+
+// A "~" in an identity path must never reach the filesystem untouched.
+func TestNewPrivkeyFileAuthMethodExpandsTilde(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	if got, want := NewPrivkeyFileAuthMethod("~/.ssh/id_example").Filename(), filepath.Join(home, ".ssh/id_example"); got != want {
+		t.Errorf("expected %q, got %q", want, got)
+	}
+	if got, want := NewPrivkeyFileAuthMethod("$HOME/.ssh/id_example").Filename(), filepath.Join(home, ".ssh/id_example"); got != want {
+		t.Errorf("expected %q, got %q", want, got)
 	}
 }
