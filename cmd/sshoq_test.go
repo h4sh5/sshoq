@@ -632,3 +632,102 @@ func TestDynamicForwardingAddrs(t *testing.T) {
 		}
 	})
 }
+
+// IdentityFile entries of the SSH config that use the "~" or "$HOME"
+// constructs must resolve against the real home directory, both for the
+// plugin-based auth options and for the legacy auth methods.
+func TestGetConnectionMaterialFromURL_IdentityFileTildeExpansion(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("SSH_AUTH_SOCK", "")
+	sshDir := path.Join(tmpDir, ".ssh")
+	if err := os.MkdirAll(sshDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	configContent := "Host example.com\n" +
+		"  HostName example.com\n" +
+		"  Port 443\n" +
+		"  User testuser\n" +
+		"  URLPath /\n" +
+		"  IdentityFile ~/.ssh/id_example\n" +
+		"  IdentityFile $HOME/.ssh/id_example2\n" +
+		"  IdentityFile \"~/.ssh/id_example3\"\n"
+	sshCfg, err := ssh_config.DecodeBytes([]byte(configContent))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hostUrl, err := url.Parse("https://example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, options, err := getConnectionMaterialFromURL(hostUrl, sshCfg, nil, nil, testOptionParsers())
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+
+	expected := []string{
+		path.Join(sshDir, "id_example"),
+		path.Join(sshDir, "id_example2"),
+		path.Join(sshDir, "id_example3"),
+	}
+
+	opt, ok := options.Options()[client_pubkey_authentication.PRIVKEY_OPTION_NAME]
+	if !ok {
+		t.Fatalf("expected a %s option, got %v", client_pubkey_authentication.PRIVKEY_OPTION_NAME, options.Options())
+	}
+	got := opt.(*client_pubkey_authentication.PrivkeyAuthOption).Filenames()
+	if len(got) != len(expected) {
+		t.Fatalf("expected %v, got %v", expected, got)
+	}
+	for i := range expected {
+		if got[i] != expected[i] {
+			t.Errorf("identity %d: expected %q, got %q", i, expected[i], got[i])
+		}
+	}
+
+	if len(options.AuthMethods()) != len(expected) {
+		t.Fatalf("expected %d auth methods, got %d", len(expected), len(options.AuthMethods()))
+	}
+	for i, method := range options.AuthMethods() {
+		authMethod, ok := method.(*ssh3.PrivkeyFileAuthMethod)
+		if !ok {
+			t.Fatalf("unexpected auth method type %T", method)
+		}
+		if authMethod.Filename() != expected[i] {
+			t.Errorf("auth method %d: expected %q, got %q", i, expected[i], authMethod.Filename())
+		}
+	}
+}
+
+// -i on the command line must support the "~" construct too (e.g. when it is
+// quoted so the shell does not expand it).
+func TestGetConnectionMaterialFromURL_CLIIdentityFileTilde(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("SSH_AUTH_SOCK", "")
+
+	cliPrivkeyOption, err := (&client_pubkey_authentication.PrivkeyOptionParser{}).Parse([]string{"~/.ssh/id_cli"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cliOptions := map[config.OptionName]config.Option{
+		client_pubkey_authentication.PRIVKEY_OPTION_NAME: cliPrivkeyOption,
+	}
+
+	hostUrl, err := url.Parse("https://example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, options, err := getConnectionMaterialFromURL(hostUrl, nil, nil, cliOptions, testOptionParsers())
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+
+	want := path.Join(tmpDir, ".ssh/id_cli")
+	got := options.Options()[client_pubkey_authentication.PRIVKEY_OPTION_NAME].(*client_pubkey_authentication.PrivkeyAuthOption).Filenames()
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("expected %q, got %v", want, got)
+	}
+}

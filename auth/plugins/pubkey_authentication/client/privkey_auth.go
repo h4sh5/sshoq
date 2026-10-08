@@ -59,9 +59,13 @@ func (*PrivkeyOptionParser) OptionConfigName() string {
 }
 
 // Parse implements config.OptionParser.
+// The filenames are expanded the way OpenSSH does ("~", "~user" and "$HOME"
+// constructs), as the values are taken verbatim from the SSH config file or
+// from the command line.
 func (*PrivkeyOptionParser) Parse(values []string) (config.Option, error) {
+	filenames := expandPaths(values)
 	return &PrivkeyAuthOption{
-		filenames: values,
+		filenames: filenames,
 	}, nil
 }
 
@@ -199,7 +203,10 @@ var privkeyPluginFunc auth.GetClientAuthMethodsFunc = func(request *http.Request
 		if o, ok := opt.(*PrivkeyAuthOption); ok {
 			var methods []auth.ClientAuthMethod
 			for _, filename := range o.Filenames() {
-				methods = append(methods, &PrivkeyFileAuthMethod{filename: filename})
+				// NewPrivkeyFileAuthMethod expands "~" and "$HOME" constructs,
+				// so identity paths coming from the SSH config are resolved
+				// against the real home directory
+				methods = append(methods, NewPrivkeyFileAuthMethod(filename))
 			}
 			return methods, nil
 		}

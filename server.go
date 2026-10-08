@@ -113,8 +113,14 @@ func NewServer(maxPacketSize uint64, defaultDatagramQueueSize uint64, h3Server *
 
 			newChannel = &UDPReverseForwardingChannelImpl{Channel: newChannel, RemoteAddr: tcpAddrRemote, LocalAddr: tcpAddrLocal}
 		}
-		if conversation.channelOpenHandler != nil {
-			err := conversation.channelOpenHandler(newChannel)
+		// The conversation handler installs its channel open handler from its own goroutine,
+		// and the client is free to open a channel as soon as it got the CONNECT response: wait
+		// until that handler is set (or the conversation is gone) before deciding the fate of
+		// this channel, otherwise a channel racing the setup - typically an SFTP channel opened
+		// right after authenticating - is accepted behind the handler's back.
+		conversation.awaitChannelOpenHandler()
+		if openHandler := conversation.channelOpenHandlerFunc(); openHandler != nil {
+			err := openHandler(newChannel)
 			if err != nil {
 				var openFailure ChannelOpenFailure
 				if errors.As(err, &openFailure) {
@@ -214,6 +220,9 @@ func (s *Server) GetHTTPHandlerFunc(ctx context.Context) AuthenticatedHandlerFun
 				defer newConv.Close()
 				defer conversationsManager.removeConversation(newConv)
 				defer s.removeConnection(streamCreator)
+				// the conversation handler is over, it will not set a channel open handler anymore:
+				// stop the incoming channels waiting for it
+				defer newConv.releaseChannelHandlerGate()
 				if err := s.conversationHandler(authenticatedUsername, newConv); err != nil {
 					if errors.Is(err, context.Canceled) {
 						log.Info().Msgf("conversation canceled for conversation id %s, user %s", newConv.ConversationID(), authenticatedUsername)

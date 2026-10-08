@@ -17,6 +17,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	osuser "os/user"
 	"path"
 	"strings"
 	"sync"
@@ -77,12 +78,122 @@ func ConfigureLogger(logLevel string) {
 	}
 }
 
-func ExpandTildeWithHomeDir(filepath string) string {
-	if strings.HasPrefix(filepath, "~/") {
-		dirname, _ := os.UserHomeDir()
-		filepath = path.Join(dirname, filepath[2:])
+// HomeDir returns the current user's home directory.
+// The HOME environment variable takes precedence; if it is unset or empty,
+// the home directory declared for the current user in the password database
+// is used, like OpenSSH does. It returns an empty string if the home
+// directory cannot be determined.
+func HomeDir() string {
+	if home := os.Getenv("HOME"); home != "" {
+		return home
 	}
-	return filepath
+	if user, err := osuser.Current(); err == nil {
+		return user.HomeDir
+	}
+	return ""
+}
+
+// expandEnvVars expands the "$VAR" and "${VAR}" constructs of the provided
+// string using the process environment. Variables that are not set are left
+// untouched, so a value containing an unrelated "$" is never silently turned
+// into an empty path component.
+func expandEnvVars(value string) string {
+	if !strings.Contains(value, "$") {
+		return value
+	}
+	return os.Expand(value, func(name string) string {
+		if expanded, ok := os.LookupEnv(name); ok {
+			return expanded
+		}
+		return "${" + name + "}"
+	})
+}
+
+// expandTilde expands the leading "~" construct of a path, as documented in
+// ssh_config(5):
+//   - "~" and "~/..." expand to the current user's home directory
+//   - "~user" and "~user/..." expand to the home directory of the given user
+//
+// If the path does not start with a "~", or if the requested home directory
+// cannot be determined, the path is returned unchanged.
+func expandTilde(filepath string) string {
+	if filepath == "" || filepath[0] != '~' {
+		return filepath
+	}
+	rest := filepath[1:]
+	if rest == "" || rest[0] == '/' || rest[0] == '\\' {
+		return joinHomeDir(HomeDir(), strings.TrimLeft(rest, "/\\"))
+	}
+	// "~user" or "~user/...": look up the requested user
+	username := rest
+	rest = ""
+	if idx := strings.IndexAny(username, "/\\"); idx >= 0 {
+		username, rest = username[:idx], username[idx+1:]
+	}
+	user, err := osuser.Lookup(username)
+	if err != nil {
+		// unknown user: leave the path untouched rather than breaking it
+		log.Warn().Msgf("could not resolve home directory of user %s when expanding %s", username, filepath)
+		return filepath
+	}
+	return joinHomeDir(user.HomeDir, strings.TrimLeft(rest, "/\\"))
+}
+
+// joinHomeDir joins a home directory and a relative path, returning the home
+// directory itself when there is nothing left to append.
+func joinHomeDir(homeDir string, relative string) string {
+	if homeDir == "" {
+		// no home directory available: strip the "~" separator and keep the
+		// remaining path as-is, so the caller reports a meaningful error
+		if relative == "" {
+			return homeDir
+		}
+		return relative
+	}
+	if relative == "" {
+		return homeDir
+	}
+	return path.Join(homeDir, relative)
+}
+
+// ExpandPath expands a file path coming from the OpenSSH configuration file
+// (~/.ssh/config) or from the command line, the way OpenSSH does it:
+//   - surrounding single or double quotes are removed (kevinburke/ssh_config
+//     keeps them in the parsed values)
+//   - a leading "~", "~/...", "~user" or "~user/..." is replaced by the
+//     relevant home directory
+//   - "$HOME/.ssh/id_ed25519"-like environment variable references are
+//     expanded
+//
+// Examples, with HOME=/home/alice:
+//
+//	"~/.ssh/id_example"        -> "/home/alice/.ssh/id_example"
+//	"~"                        -> "/home/alice"
+//	"$HOME/.ssh/id_example"    -> "/home/alice/.ssh/id_example"
+//	"\"~/.ssh/id_example\""    -> "/home/alice/.ssh/id_example"
+//	"/etc/ssh/ssh_host_rsa_key" -> unchanged
+func ExpandPath(filepath string) string {
+	trimmed := strings.TrimSpace(filepath)
+	if len(trimmed) > 1 && (strings.HasPrefix(trimmed, `"`) && strings.HasSuffix(trimmed, `"`) ||
+		strings.HasPrefix(trimmed, "'") && strings.HasSuffix(trimmed, "'")) {
+		trimmed = trimmed[1 : len(trimmed)-1]
+	}
+	if trimmed == "" {
+		return trimmed
+	}
+	if trimmed[0] == '~' {
+		// expand the env vars of the remaining path, but never the home
+		// directory itself, which must be substituted literally
+		expanded := expandEnvVars(trimmed[1:])
+		return expandTilde(trimmed[:1] + expanded)
+	}
+	return expandEnvVars(trimmed)
+}
+
+// ExpandTildeWithHomeDir expands the "~" construct of the provided path using
+// the current user's home directory (see ExpandPath).
+func ExpandTildeWithHomeDir(filepath string) string {
+	return ExpandPath(filepath)
 }
 
 // Accept queue copied from https://github.com/quic-go/webtransport-go/blob/master/session.go

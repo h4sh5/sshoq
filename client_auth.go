@@ -62,9 +62,13 @@ func (m *OidcAuthMethod) IntoIdentity(bearerToken string) Identity {
 	return rawBearerTokenIdentity(bearerToken)
 }
 
+// NewPrivkeyFileAuthMethod returns an auth method using the private key stored
+// at filename. The path is expanded the way OpenSSH expands it (see
+// util.ExpandPath), so that "~/.ssh/id_example", "~user/.ssh/id_example" and
+// "$HOME/.ssh/id_example" all point to the right file.
 func NewPrivkeyFileAuthMethod(filename string) *PrivkeyFileAuthMethod {
 	return &PrivkeyFileAuthMethod{
-		filename: util.ExpandTildeWithHomeDir(filename),
+		filename: util.ExpandPath(filename),
 	}
 }
 
