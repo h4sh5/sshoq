@@ -9,6 +9,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/h4sh5/sshoq/util"
 	"golang.org/x/exp/slices"
@@ -39,7 +41,16 @@ type Conversation struct {
 	peerVersion               Version
 
 	channelsAcceptQueue *util.AcceptQueue[Channel]
-	channelOpenHandler  func(Channel) error
+
+	// channelOpenHandler is written by the conversation handler goroutine and read by the
+	// goroutine which hijacks each incoming channel stream, so it needs a lock of its own.
+	// channelHandlerGate is closed as soon as the conversation handler has had the chance to
+	// install an open handler (see SetChannelOpenHandler), which is what tells an incoming
+	// channel whether it may decide to accept the channel or not.
+	channelHandlerMutex    sync.Mutex
+	channelOpenHandler     func(Channel) error
+	channelHandlerGate     chan struct{}
+	channelHandlerGateOnce sync.Once
 }
 
 func GenerateConversationID(tls *tls.ConnectionState) (convID ConversationID, err error) {
@@ -369,6 +380,9 @@ func (c *Conversation) OpenUDPReverseForwardingChannel(maxPacketSize uint64, dat
 }
 
 func (c *Conversation) AcceptChannel(ctx context.Context) (Channel, error) {
+	// reaching AcceptChannel means the conversation handler is past its setup, whether it
+	// installed an open handler or not: let the pending channels be decided.
+	c.releaseChannelHandlerGate()
 	for {
 		if channel := c.channelsAcceptQueue.Next(); channel != nil {
 			channel.confirmChannel(c.maxPacketSize)
@@ -405,11 +419,70 @@ func (c *Conversation) AddDatagram(ctx context.Context, datagram []byte) error {
 func (c *Conversation) Close() {
 	c.controlStream.Close()
 	c.cancelContext(nil)
+	c.releaseChannelHandlerGate()
 }
 
+// SetChannelOpenHandler sets the handler called for every channel opened by the peer, before
+// it is handed over to AcceptChannel. It must be called before the conversation handler blocks
+// accepting channels: a channel opened right after the CONNECT request may otherwise be
+// accepted - or rejected - based on a handler which is not installed yet.
 func (c *Conversation) SetChannelOpenHandler(handler func(Channel) error) {
+	c.channelHandlerMutex.Lock()
 	c.channelOpenHandler = handler
+	c.channelHandlerMutex.Unlock()
+	c.releaseChannelHandlerGate()
 }
+
+// channelOpenHandlerFunc returns the current channel open handler, nil if none was set.
+func (c *Conversation) channelOpenHandlerFunc() func(Channel) error {
+	c.channelHandlerMutex.Lock()
+	defer c.channelHandlerMutex.Unlock()
+	return c.channelOpenHandler
+}
+
+// channelHandlerGateChan lazily creates the gate, so that a Conversation built without its
+// constructors (a zero value, as done in some tests) still works.
+func (c *Conversation) channelHandlerGateChan() chan struct{} {
+	c.channelHandlerMutex.Lock()
+	defer c.channelHandlerMutex.Unlock()
+	if c.channelHandlerGate == nil {
+		c.channelHandlerGate = make(chan struct{})
+	}
+	return c.channelHandlerGate
+}
+
+// releaseChannelHandlerGate unblocks the channels waiting for the conversation handler setup.
+// It is idempotent: it is called when the open handler is set, when the conversation handler
+// returns, when the conversation handler starts accepting channels, and when the conversation
+// is closed.
+func (c *Conversation) releaseChannelHandlerGate() {
+	c.channelHandlerGateOnce.Do(func() {
+		close(c.channelHandlerGateChan())
+	})
+}
+
+// awaitChannelOpenHandler waits until the conversation handler has had the chance to install a
+// channel open handler, so that a channel opened immediately after the conversation was set up
+// is not accepted behind its back. It returns when the conversation goes away, and, as a last
+// resort, after openHandlerSetupTimeout so that a conversation handler which never installs a
+// handler - and never returns - cannot wedge its channels.
+func (c *Conversation) awaitChannelOpenHandler() {
+	var ctxDone <-chan struct{}
+	if c.context != nil {
+		ctxDone = c.context.Done()
+	}
+	select {
+	case <-c.channelHandlerGateChan():
+	case <-ctxDone:
+	case <-time.After(openHandlerSetupTimeout):
+		log.Warn().Msgf("conversation %s has not set up its channel open handler after %s, accepting incoming channels unchecked", c.conversationID, openHandlerSetupTimeout)
+		c.releaseChannelHandlerGate()
+	}
+}
+
+// openHandlerSetupTimeout bounds the time a new channel waits for the conversation handler to
+// install its channel open handler.
+const openHandlerSetupTimeout = 5 * time.Second
 
 func (c *Conversation) Context() context.Context {
 	return c.context
