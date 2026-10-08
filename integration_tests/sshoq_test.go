@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +38,11 @@ var ecdsaPrivKeyPath string
 var attackerPrivKeyPath string
 var username string
 var ecdsaUsername string
+
+// supplementaryGroup is the group setup_integration_tests.sh adds the test user
+// to: every session of that user must run with it, on top of its primary group
+// (a login applies the whole group list of the user, not only its primary one).
+var supplementaryGroup string
 
 const serverBind = "127.0.0.1:4433"
 const serverBindSFTPDisabled = "127.0.0.1:4434"
@@ -297,6 +303,7 @@ var _ = BeforeSuite(func() {
 		ecdsaUsername = os.Getenv("ECDSATESTUSER_USERNAME")
 		Expect(fileExists(rsaPrivKeyPath)).To(BeTrue())
 		Expect(fileExists(attackerPrivKeyPath)).To(BeTrue())
+		supplementaryGroup = fmt.Sprintf("%s-suppgroup", username)
 		err = os.WriteFile(fmt.Sprintf("/home/%s/.profile", username), []byte("echo 'hello from .profile'"), 0777)
 		Expect(err).ToNot(HaveOccurred())
 	}
@@ -450,6 +457,48 @@ var _ = Describe("Testing the sshoq cli", func() {
 					_, err = stdin.Write([]byte("exit\n")) // 0x04 = EOT character, closing the bash session
 					Expect(err).ToNot(HaveOccurred())
 					Eventually(session).Should(Exit(0))
+				})
+
+				It("Should run the interactive login shell with all the groups of the user", func() {
+					clientArgs = getClientArgs(rsaPrivKeyPath)
+					command := exec.Command(ssh3Path, clientArgs...)
+					stdin, err := command.StdinPipe()
+					Expect(err).ToNot(HaveOccurred())
+					session, err := Start(command, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session.Out).Should(Say("hello from .profile"))
+					_, err = stdin.Write([]byte("id -Gn\nexit\n"))
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session.Out).Should(Say(regexp.QuoteMeta(supplementaryGroup)))
+					Eventually(session).Should(Exit(0))
+				})
+
+				// a command is run in a non-login shell (shell -c "command"), but it must
+				// still run with the whole group list of the user
+				It("Should run the remote commands with all the groups of the user", func() {
+					clientArgs = append(getClientArgs(rsaPrivKeyPath), "id", "-Gn")
+					command := exec.Command(ssh3Path, clientArgs...)
+					session, err := Start(command, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session).Should(Exit(0))
+					groups := strings.Fields(string(session.Out.Contents()))
+					// the primary group alone is not enough: a login must apply the
+					// whole group list of the user, as initgroups(3) does
+					Expect(groups).To(ContainElement(username), fmt.Sprintf("expected the primary group %s in %v", username, groups))
+					Expect(groups).To(ContainElement(supplementaryGroup), fmt.Sprintf("expected the supplementary group %s in %v", supplementaryGroup, groups))
+				})
+
+				// same as above, with a pty attached to the command: the process is then
+				// started by another code path, and must get the same group list
+				It("Should run the remote commands with a pty and all the groups of the user", func() {
+					clientArgs = append(getClientArgs(rsaPrivKeyPath, "-force-pty"), "id", "-Gn")
+					command := exec.Command(ssh3Path, clientArgs...)
+					session, err := Start(command, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session).Should(Exit(0))
+					groups := strings.Fields(string(session.Out.Contents()))
+					Expect(groups).To(ContainElement(username), fmt.Sprintf("expected the primary group %s in %v", username, groups))
+					Expect(groups).To(ContainElement(supplementaryGroup), fmt.Sprintf("expected the supplementary group %s in %v", supplementaryGroup, groups))
 				})
 
 				// It checks the client with the -forward-tcp or -reverse-tcp forwarding options.

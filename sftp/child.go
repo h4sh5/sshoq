@@ -225,7 +225,34 @@ func userFromEnv() (*unix_util.User, error) {
 		Gid:      gid,
 		Dir:      os.Getenv(sftpHomeEnv),
 		Shell:    os.Getenv(sftpShellEnv),
+		// the parent already computed the group list it applied to this child,
+		// reuse it instead of looking it up again
+		Groups: parseGroups(os.Getenv(sftpGroupsEnv)),
 	}, nil
+}
+
+// parseGroups parses the comma-separated group list built by formatGroups.
+// Malformed entries are ignored; an empty or missing list yields nil so that
+// the group list is looked up on demand instead.
+func parseGroups(groups string) []uint32 {
+	if groups == "" {
+		return nil
+	}
+
+	parts := strings.Split(groups, ",")
+	parsed := make([]uint32, 0, len(parts))
+	for _, part := range parts {
+		gid, err := strconv.ParseUint(part, 10, 32)
+		if err != nil {
+			continue
+		}
+		parsed = append(parsed, uint32(gid))
+	}
+
+	if len(parsed) == 0 {
+		return nil
+	}
+	return parsed
 }
 
 // stdioChannel implements ssh3.Channel over stdin/stdout using a simple

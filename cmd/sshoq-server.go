@@ -131,6 +131,8 @@ func setupEnv(user *unix_util.User, runningCommand *runningCommand, authAgentSoc
 	runningCommand.Cmd.Env = append(runningCommand.Cmd.Env,
 		fmt.Sprintf("HOME=%s", user.Dir),
 		fmt.Sprintf("USER=%s", user.Username),
+		fmt.Sprintf("LOGNAME=%s", user.Username),
+		fmt.Sprintf("SHELL=%s", user.Shell),
 		fmt.Sprintf("PATH=%s", "/usr/bin:/bin:/usr/sbin:/sbin"),
 	)
 	if authAgentSocketPath != "" {

@@ -109,25 +109,10 @@ func buildGroupSet(user *unix_util.User) map[uint32]bool {
 		return groups
 	}
 
-	groups[uint32(user.Gid)] = true
-	lookupUser, err := osuser.Lookup(user.Username)
-	if err != nil {
-		log.Warn().Msgf("sftp: failed to lookup groups for user %s: %s", user.Username, err)
-		return groups
-	}
-
-	groupIDs, err := lookupUser.GroupIds()
-	if err != nil {
-		log.Warn().Msgf("sftp: failed to read supplementary groups for user %s: %s", user.Username, err)
-		return groups
-	}
-
-	for _, gid := range groupIDs {
-		parsed, err := strconv.ParseUint(gid, 10, 32)
-		if err != nil {
-			continue
-		}
-		groups[uint32(parsed)] = true
+	// same group list as the one applied to the processes and to the SFTP child,
+	// so that permission checks match what the user really belongs to
+	for _, gid := range user.GroupList() {
+		groups[gid] = true
 	}
 
 	return groups
@@ -725,28 +710,14 @@ func (s *ServerSession) checkAncestorExecute(path string) error {
 	return nil
 }
 
+// buildGroupIDs returns the group list to apply to the SFTP child process: the
+// primary group of the user followed by the groups it is a member of, exactly
+// like the credentials of a login shell (see unix_util.User.GroupList).
 func buildGroupIDs(user *unix_util.User) ([]int, error) {
-	lookupUser, err := osuser.Lookup(user.Username)
-	if err != nil {
-		return []int{int(user.Gid)}, nil
-	}
-
-	gidStrs, err := lookupUser.GroupIds()
-	if err != nil {
-		return []int{int(user.Gid)}, nil
-	}
-
-	seen := map[int]bool{int(user.Gid): true}
-	groupIDs := []int{int(user.Gid)}
-	for _, gidStr := range gidStrs {
-		gid, err := strconv.Atoi(gidStr)
-		if err != nil {
-			continue
-		}
-		if !seen[gid] {
-			seen[gid] = true
-			groupIDs = append(groupIDs, gid)
-		}
+	gids := user.GroupList()
+	groupIDs := make([]int, 0, len(gids))
+	for _, gid := range gids {
+		groupIDs = append(groupIDs, int(gid))
 	}
 
 	return groupIDs, nil
