@@ -323,6 +323,28 @@ Download a remote folder recursively to the local directory:
 
 `sshoq -scp -r user@remote:443/sshoq-server%/etc/nginx .`
 
+Both arguments can be remote, in which case the copy goes from the first host to
+the second one:
+
+`sshoq -scp user@server1:443/sshoq-server%data.csv user@server2:4433/sshoq-server%backup/data.csv`
+
+The client keeps one connection to each host and streams the data through itself,
+like OpenSSH's `scp -3`: neither host is asked to reach the other one, and each
+only ever serves its own filesystem with the privileges of the user authenticated
+on it. Both hosts are therefore authenticated separately, so a copy needs
+credentials for each, and the data travels through the machine the client runs
+on.
+
+Each side resolves the home-directory forms of its own argument, so ending the
+second argument with `%` copies into the home directory of the user on
+`server2`. A directory needs `-r` as usual, and a symbolic link is read on the
+host it lives on and copied as the file it points at (a link to a directory
+inside a copied tree is reported and skipped, so a link pointing back up the tree
+cannot make the copy never end). Copying a file onto itself is refused, since the
+destination is opened truncated. `-proxy-jump` is not supported with two remote
+arguments: only one of the two hosts could be reached through the jump host, so
+the copy is refused instead of silently dialling the other one directly.
+
 ### Local port forwarding
 
 As a SSH compatibility shortcut, `-L` is the same as `-forward-tcp`

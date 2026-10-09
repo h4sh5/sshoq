@@ -626,6 +626,75 @@ func cliIdentityOptionNames(cliOptions map[client_config.OptionName]client_confi
 	return identityOptions
 }
 
+// remoteDialer carries everything needed to open a conversation with an sshoq
+// server: the same options, certificate authorities and authentication material
+// can then be used to dial more than one host. A copy between two remote hosts
+// (-scp server1%file1 server2%file2) needs one conversation per host, since
+// neither of them is able to read the other one's filesystem.
+type remoteDialer struct {
+	ctx            context.Context
+	insecure       bool
+	keyLog         io.Writer
+	ssh3Dir        string
+	certPool       *x509.CertPool
+	knownHostsPath string
+	sshConfig      *ssh_config.Config
+	cliAuthMethods []interface{}
+	cliOptions     map[client_config.OptionName]client_config.Option
+	optionParsers  map[client_config.OptionName]client_config.OptionParser
+	oidcConfig     []*oidc.OIDCConfig
+	tty            *os.File
+}
+
+// dial opens a conversation with the sshoq server at urlParam, given either as
+// a bare user@host:port/url-path or with its https:// scheme. The known hosts
+// file is read again before retrying the connection when the server's
+// certificate was unknown and has just been added to it, as the main connection
+// of the client does.
+func (d *remoteDialer) dial(urlParam string) (*client.Client, error) {
+	if !strings.HasPrefix(urlParam, "https://") {
+		urlParam = fmt.Sprintf("https://%s", urlParam)
+	}
+	parsedUrl, err := url.Parse(urlParam)
+	if err != nil {
+		return nil, fmt.Errorf("could not parse URL %s: %s", urlParam, err)
+	}
+	agentClient, options, err := getConnectionMaterialFromURL(parsedUrl, d.sshConfig, d.cliAuthMethods, d.cliOptions, d.optionParsers)
+	if err != nil {
+		return nil, fmt.Errorf("could not get connection material for %s: %s", parsedUrl, err)
+	}
+	knownHosts, skippedLines, err := ssh3.ParseKnownHosts(d.knownHostsPath)
+	if len(skippedLines) != 0 {
+		skipped := make([]string, 0, len(skippedLines))
+		for _, lineNumber := range skippedLines {
+			skipped = append(skipped, fmt.Sprintf("%d", lineNumber))
+		}
+		log.Warn().Msgf("the following lines in %s are invalid: %s", d.knownHostsPath, strings.Join(skipped, ", "))
+	}
+	if err != nil {
+		log.Warn().Msgf("there was an error when parsing known hosts: %s", err)
+	}
+
+	qconn, status := setupQUICConnection(d.ctx, d.insecure, d.keyLog, d.ssh3Dir, d.certPool, d.knownHostsPath, knownHosts, d.oidcConfig, options, nil, d.tty)
+	if qconn == nil && status == 0 {
+		// an unknown self-signed certificate was just added to known_hosts (or
+		// the user was asked about it): read the file again and retry
+		log.Info().Msgf("re-parsing known hosts and reconnecting to %s now..", options.CanonicalHostFormat())
+		knownHosts, _, _ = ssh3.ParseKnownHosts(d.knownHostsPath)
+		qconn, status = setupQUICConnection(d.ctx, d.insecure, d.keyLog, d.ssh3Dir, d.certPool, d.knownHostsPath, knownHosts, d.oidcConfig, options, nil, d.tty)
+	}
+	if qconn == nil {
+		return nil, fmt.Errorf("could not set up the transport to %s (exit status %d)", options.CanonicalHostFormat(), status)
+	}
+
+	roundTripper := &http3.RoundTripper{EnableDatagrams: true}
+	c, err := client.Dial(d.ctx, options, qconn, roundTripper, agentClient)
+	if err != nil {
+		return nil, fmt.Errorf("could not dial %s: %s", options.CanonicalHostFormat(), err)
+	}
+	return c, nil
+}
+
 type FlagValue struct {
 	pluginOptionName client_config.OptionName
 	val              string
@@ -685,46 +754,84 @@ func registerAgentForwardingFlag(fs *flag.FlagSet) *bool {
 	return forwardSSHAgent
 }
 
-// parseScpArgs splits the two scp-mode arguments into a transfer direction and
-// the local/remote paths. The remote argument uses '%' as the separator between
-// the sshoq server URL and the remote path, since ':' is already used for the
-// port designation
-// (e.g. user@host:443/sshoq-server%/tmp/remotefile). When the remote argument
-// is args[0] the transfer is a download, otherwise it is an upload.
+// scpEndpoint is one side of an -scp copy: either a path on the machine the
+// client runs on, or a path on a remote host together with the URL of the sshoq
+// server that must be connected to to reach it.
+type scpEndpoint struct {
+	remote bool
+	// path is a local path for the local side and the remote path for the
+	// remote side; the home directory of the remote user is "" or "~" and is
+	// reported as "~" (see scpRemoteArgument).
+	path string
+	// url is the connection URL of the remote host, empty for the local side.
+	url string
+}
+
+// String renders the endpoint the way it is written on the command line, so it
+// can be quoted back to the user in an error message.
+func (e scpEndpoint) String() string {
+	if !e.remote {
+		return e.path
+	}
+	return e.url + "%" + e.path
+}
+
+// scpRemoteArgument splits an -scp argument of the form
+// user@host:443/sshoq-server%/tmp/remotefile into the URL to connect to and the
+// path to copy on that host. '%' is the separator because ':' already is the
+// port designation. ok is false when the argument carries no '%': it is then a
+// path on the machine the client runs on, not a remote one.
 //
 // The remote path may be left out entirely (user@host:443/sshoq-server%): the
 // copy then targets the remote user's home directory, like OpenSSH's "host:".
 // It is reported as "~" here and resolved to the home directory announced by
 // the server in the sftp layer.
-func parseScpArgs(args []string) (upload bool, localPath, remotePath, urlParam string, err error) {
-	if len(args) != 2 {
-		return false, "", "", "", fmt.Errorf("scp mode requires exactly two arguments: <local-path> <remote-url> (upload) or <remote-url> <local-path> (download)")
+func scpRemoteArgument(arg string) (url string, remotePath string, ok bool) {
+	i := strings.Index(arg, "%")
+	if i == -1 {
+		return "", "", false
 	}
-	remoteIdx := -1
-	for i, arg := range args {
-		if strings.Contains(arg, "%") {
-			remoteIdx = i
-			break
-		}
-	}
-	if remoteIdx == -1 {
-		return false, "", "", "", fmt.Errorf("could not find the remote path separator '%%' in the arguments: the remote argument must look like user@host:443/sshoq-server%%/remote/path (or like user@host:443/sshoq-server%% to use the remote home directory)")
-	}
-	urlPathParts := strings.SplitN(args[remoteIdx], "%", 2)
-	if urlPathParts[0] == "" {
-		return false, "", "", "", fmt.Errorf("invalid remote argument %q: expected user@host:port/sshoq-server%%/remote/path", args[remoteIdx])
-	}
-	// no remote path at all: copy to (or from) the remote user's home directory
-	remotePath = urlPathParts[1]
+	url, remotePath = arg[:i], arg[i+1:]
 	if remotePath == "" {
 		remotePath = "~"
 	}
-	if remoteIdx == 1 {
-		// upload: local source is args[0], remote destination is args[1]
-		return true, args[0], remotePath, urlPathParts[0], nil
+	return url, remotePath, true
+}
+
+// parseScpEndpoints splits the two -scp arguments into the source and the
+// destination of the copy, in the left-to-right order scp uses. Each side is
+// either a local path or a remote one (see scpRemoteArgument), which gives the
+// three forms -scp accepts:
+//
+//	sshoq -scp localfile            user@host:443/srv%/tmp/remotefile   // upload
+//	sshoq -scp user@host:443/srv%.ssh/id_rsa .                         // download
+//	sshoq -scp user@s1:443/srv%a.txt user@s2:443/srv%b.txt             // host to host
+//
+// A copy between two remote hosts has both arguments remote: the client keeps
+// one connection to each of them and streams the data through itself, so the
+// two hosts never talk to each other directly (like OpenSSH's "scp -3").
+func parseScpEndpoints(args []string) (src scpEndpoint, dst scpEndpoint, err error) {
+	if len(args) != 2 {
+		return scpEndpoint{}, scpEndpoint{}, fmt.Errorf("scp mode requires exactly two arguments: <local-path> <remote-url> (upload), <remote-url> <local-path> (download) or <remote-url> <remote-url> (from one remote host to the other)")
 	}
-	// download: remote source is args[0], local destination is args[1]
-	return false, args[1], remotePath, urlPathParts[0], nil
+	endpoints := make([]scpEndpoint, 2)
+	remotes := 0
+	for i, arg := range args {
+		url, remotePath, ok := scpRemoteArgument(arg)
+		if !ok {
+			endpoints[i] = scpEndpoint{path: arg}
+			continue
+		}
+		if url == "" {
+			return scpEndpoint{}, scpEndpoint{}, fmt.Errorf("invalid remote argument %q: expected user@host:port/sshoq-server%%/remote/path", arg)
+		}
+		remotes++
+		endpoints[i] = scpEndpoint{remote: true, path: remotePath, url: url}
+	}
+	if remotes == 0 {
+		return scpEndpoint{}, scpEndpoint{}, fmt.Errorf("could not find the remote path separator '%%' in the arguments: the remote argument must look like user@host:443/sshoq-server%%/remote/path (or like user@host:443/sshoq-server%% to use the remote home directory)")
+	}
+	return endpoints[0], endpoints[1], nil
 }
 
 // parseSftpArgs splits the sftp-mode argument into the connection URL and the
@@ -785,7 +892,7 @@ func ClientMain() int {
 	proxyJump := flag.String("proxy-jump", "", "if set, performs a proxy jump using the specified remote host as proxy (requires server with version >= 0.1.5)")
 	sftpMode := flag.Bool("sftp", false, "if set, start an interactive SFTP session; the connection URL may be followed by a remote directory after '%', e.g. user@host:443/sshoq-server%/tmp, and the session then starts there instead of in the remote user's home directory")
 	noFollowSymlinks := flag.Bool("no-follow-symlinks", false, "if set with -sftp, do not follow symbolic links on the client (put source and get source, resolved client-side)")
-	scpMode := flag.Bool("scp", false, "if set, copy files to or from the remote host non-interactively, like scp; the remote argument is the connection URL with the remote path after '%', and without one the copy targets the remote user's home directory")
+	scpMode := flag.Bool("scp", false, "if set, copy files to or from the remote host non-interactively, like scp; the remote argument is the connection URL with the remote path after '%', and without one the copy targets the remote user's home directory. With two remote arguments (server1%file1 server2%file2), the copy goes from the first host to the second one through the client")
 	scpRecursive := flag.Bool("r", false, "if set with -scp, recursively copy directories")
 
 	var flagValues []*FlagValue
@@ -874,8 +981,11 @@ func ClientMain() int {
 	// (e.g. user@host:443/sshoq-server%/tmp); without it the session starts in
 	// the remote user's home directory.
 	var sftpInitialDir string
-	var scpUpload bool
-	var scpLocalPath, scpRemotePath string
+	// scpSrc and scpDst are the two sides of an -scp copy. Either of them can
+	// name the local machine; when both name a remote host, the copy goes from
+	// one host to the other through this client.
+	var scpSrc, scpDst scpEndpoint
+	var scpHostToHost bool
 	urlFromParam := args[0]
 	command := args[1:]
 	if *scpMode {
@@ -884,10 +994,24 @@ func ClientMain() int {
 			return -1
 		}
 		var err error
-		scpUpload, scpLocalPath, scpRemotePath, urlFromParam, err = parseScpArgs(args)
+		scpSrc, scpDst, err = parseScpEndpoints(args)
 		if err != nil {
 			log.Error().Msgf("%s", err)
 			return -1
+		}
+		scpHostToHost = scpSrc.remote && scpDst.remote
+		if scpHostToHost && scpSrc.url == scpDst.url && scpSrc.path == scpDst.path {
+			// The destination is opened truncated before the source has been
+			// read to the end: copying a file onto itself would destroy it.
+			log.Error().Msgf("cannot copy %s onto itself", scpSrc)
+			return -1
+		}
+		// The host this client connects to itself: the source of a
+		// host-to-host copy, and the one and only remote host otherwise.
+		if scpSrc.remote {
+			urlFromParam = scpSrc.url
+		} else {
+			urlFromParam = scpDst.url
 		}
 	} else if *sftpMode {
 		var err error
@@ -1141,7 +1265,48 @@ func ClientMain() int {
 	if *sftpMode {
 		err = sshoqsftp.RunInteractiveClient(c, !*noFollowSymlinks, sftpInitialDir)
 	} else if *scpMode {
-		err = sshoqsftp.RunScpClient(c, scpUpload, *scpRecursive, scpLocalPath, scpRemotePath)
+		if scpHostToHost {
+			// Both arguments name a remote host: open a second conversation, with
+			// the destination this time, and stream the copy through the client,
+			// as neither host can read the other one's filesystem.
+			if *proxyJump != "" {
+				log.Error().Msgf("cannot copy from %s to %s with a proxy jump: only one of the two hosts can be reached through %s - copy the file to the jump host and from there to the other host, or drop -proxy-jump", scpSrc, scpDst, *proxyJump)
+				return -1
+			}
+			dialer := &remoteDialer{
+				ctx:            ctx,
+				insecure:       *insecure,
+				keyLog:         keyLog,
+				ssh3Dir:        ssh3Dir,
+				certPool:       pool,
+				knownHostsPath: knownHostsPath,
+				sshConfig:      sshConfig,
+				cliAuthMethods: cliAuthMethods,
+				cliOptions:     cliOptions,
+				optionParsers:  optionsParsers,
+				oidcConfig:     oidcConfig,
+				tty:            tty,
+			}
+			// dialed with the same options, certificate authorities and
+			// authentication material as the source host. err is the one of the
+			// enclosing block, whose value the switch below reports.
+			var dstClient *client.Client
+			dstClient, err = dialer.dial(scpDst.url)
+			if err != nil {
+				log.Error().Msgf("could not connect to the destination host: %s", err)
+				return -1
+			}
+			err = sshoqsftp.RunRemoteCopyClient(c, dstClient, *scpRecursive, scpSrc.path, scpDst.path)
+		} else {
+			// One of the two sides is the machine the client runs on: the local
+			// path is the source of an upload and the destination of a download.
+			upload := !scpSrc.remote
+			localPath, remotePath := scpDst.path, scpSrc.path
+			if upload {
+				localPath, remotePath = scpSrc.path, scpDst.path
+			}
+			err = sshoqsftp.RunScpClient(c, upload, *scpRecursive, localPath, remotePath)
+		}
 	} else {
 		if *forwardSSHAgent && os.Getenv("SSH_AUTH_SOCK") == "" {
 			// Without a local agent there is nothing to forward: warn the user the
