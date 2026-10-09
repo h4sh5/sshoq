@@ -670,6 +670,21 @@ func (v *FlagValue) IsBoolFlag() bool {
 	return v.CLIOptionParser.IsBoolFlag()
 }
 
+// registerAgentForwardingFlag registers the SSH agent forwarding flags on the
+// given flag set, and returns the single boolean they both write to:
+//   - -forward-agent: the long, SSHOQ-specific spelling
+//   - -A: the OpenSSH-compatible short alias, so that the habits and the scripts
+//     written for OpenSSH keep working
+//
+// Both spellings set the same variable, so mixing them behaves like OpenSSH
+// where the flag is a mere switch: present means forwarding is on.
+func registerAgentForwardingFlag(fs *flag.FlagSet) *bool {
+	forwardSSHAgent := new(bool)
+	fs.BoolVar(forwardSSHAgent, "forward-agent", false, "if set, forwards ssh agent to be used with sshv2 connections on the remote host")
+	fs.BoolVar(forwardSSHAgent, "A", false, "alias for -forward-agent: forward the local SSH agent to the remote host (like OpenSSH -A)")
+	return forwardSSHAgent
+}
+
 // parseScpArgs splits the two scp-mode arguments into a transfer direction and
 // the local/remote paths. The remote argument uses '%' as the separator between
 // the sshoq server URL and the remote path, since ':' is already used for the
@@ -717,7 +732,7 @@ func ClientMain() int {
 	displayVersion := flag.Bool("version", false, "if set, displays the software version on standard output and exit")
 	noPKCE := flag.Bool("no-pkce", false, "if set perform PKCE challenge-response with oidc")
 	forcePTYAlloc := flag.Bool("force-pty", false, "if set, forces PTY allocation before command execution. Useful for interactive programs.")
-	forwardSSHAgent := flag.Bool("forward-agent", false, "if set, forwards ssh agent to be used with sshv2 connections on the remote host")
+	forwardSSHAgent := registerAgentForwardingFlag(flag.CommandLine)
 	var forwardTCP stringSliceFlag
 	var forwardUDP stringSliceFlag
 	var reverseTCP stringSliceFlag
@@ -1077,6 +1092,12 @@ func ClientMain() int {
 	} else if *scpMode {
 		err = sshoqsftp.RunScpClient(c, scpUpload, *scpRecursive, scpLocalPath, scpRemotePath)
 	} else {
+		if *forwardSSHAgent && os.Getenv("SSH_AUTH_SOCK") == "" {
+			// Without a local agent there is nothing to forward: warn the user the
+			// way OpenSSH does instead of silently setting up a remote socket which
+			// would never answer, and keep the session running.
+			log.Warn().Msg("agent forwarding was requested but SSH_AUTH_SOCK is not set: no local SSH agent to forward to the remote host")
+		}
 		err = c.RunSession(tty, *forwardSSHAgent, *forcePTYAlloc, options.EnvVars(), command...)
 	}
 	switch sessionError := err.(type) {

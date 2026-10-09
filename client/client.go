@@ -1388,6 +1388,21 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, forcePTYAlloc bo
 					continue
 				}
 				forwardReverseTCPInBackground(ctx, channel, conn)
+			case forwardSSHAgent && typ == "agent-connection":
+				// Agent forwarding (-A / -forward-agent): the server opens one
+				// "agent-connection" channel per connection made to the agent socket
+				// it created on the remote host, and this loop owns all the
+				// server-initiated channels, so agent connections have to be accepted
+				// here (see the comment where forwarding is requested below).
+				// A single broken agent connection only tears down that connection:
+				// the session itself must survive it.
+				log.Debug().Msg("new agent connection, forwarding to the local SSH agent")
+				go func() {
+					if err := forwardAgent(ctx, channel); err != nil {
+						log.Error().Msgf("agent forwarding error: %s", err.Error())
+					}
+					channel.Close()
+				}()
 			default:
 				// Unknown/unwanted channel -> close or log
 				channel.Close()
@@ -1412,33 +1427,21 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, forcePTYAlloc bo
 	}
 
 	if forwardSSHAgent {
+		// Ask the server to create an agent socket and to expose it as
+		// SSH_AUTH_SOCK to the processes it starts on this channel. The request is
+		// sent as the first data of the still-larval session channel, before any
+		// shell or command is started.
+		//
+		// The server-initiated "agent-connection" channels it generates are
+		// accepted by the single channel-accept loop at the beginning of this
+		// function. There must not be a second AcceptChannel loop for them: both
+		// loops would compete for the incoming channels, and an agent connection
+		// picked by the other loop would be closed as an unknown channel type.
 		_, err := channel.WriteData([]byte("forward-agent"), ssh3Messages.SSH_EXTENDED_DATA_NONE)
 		if err != nil {
-			log.Error().Msgf("could not forward agent: %s", err.Error())
+			log.Error().Msgf("could not request agent forwarding: %s", err.Error())
 			return err
 		}
-		go func() {
-			for {
-				forwardChannel, err := c.AcceptChannel(ctx)
-				if err != nil {
-					if err != context.Canceled {
-						log.Error().Msgf("could not accept forwarding channel: %s", err.Error())
-					}
-					return
-				} else if forwardChannel.ChannelType() != "agent-connection" {
-					log.Error().Msgf("unexpected server-initiated channel: %s", channel.ChannelType())
-					return
-				}
-				log.Debug().Msg("new agent connection, forwarding")
-				go func() {
-					err = forwardAgent(ctx, forwardChannel)
-					if err != nil {
-						log.Error().Msgf("agent forwarding error: %s", err.Error())
-						c.Close()
-					}
-				}()
-			}
-		}()
 	}
 
 	isATTY := term.IsTerminal(int(tty.Fd()))

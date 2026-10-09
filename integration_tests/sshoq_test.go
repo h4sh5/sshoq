@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -351,6 +352,86 @@ var _ = Describe("Testing the sshoq cli", func() {
 			getClientArgs := func(privKeyPath string, additionalArgs ...string) []string {
 				return getClientArgsWithBind(privKeyPath, serverBind, additionalArgs...)
 			}
+
+			Context("Agent forwarding", func() {
+				// A real ssh-agent is started for the specs and a test key is loaded in
+				// it. The forwarded agent is then checked remotely with ssh-add, exactly
+				// like a user checks that the agent is usable on the remote host.
+				var agentSock string
+				var agentPID int
+
+				BeforeEach(func() {
+					if _, err := exec.LookPath("ssh-agent"); err != nil {
+						Skip("ssh-agent is not installed")
+					}
+					if _, err := exec.LookPath("ssh-add"); err != nil {
+						Skip("ssh-add is not installed")
+					}
+					// "ssh-agent -s" starts a background agent and prints the shell lines
+					// giving its socket and its pid, which are parsed back below.
+					out, err := exec.Command("ssh-agent", "-s").Output()
+					Expect(err).ToNot(HaveOccurred())
+					sock := regexp.MustCompile(`SSH_AUTH_SOCK=([^;]+);`).FindSubmatch(out)
+					pid := regexp.MustCompile(`SSH_AGENT_PID=([0-9]+);`).FindSubmatch(out)
+					Expect(sock).To(HaveLen(2), "could not find the socket of the SSH agent")
+					Expect(pid).To(HaveLen(2), "could not find the pid of the SSH agent")
+					agentSock = string(sock[1])
+					agentPID, err = strconv.Atoi(string(pid[1]))
+					Expect(err).ToNot(HaveOccurred())
+
+					add := exec.Command("ssh-add", ed25519PrivKeyPath)
+					add.Env = append(os.Environ(), fmt.Sprintf("SSH_AUTH_SOCK=%s", agentSock))
+					// the test keys are generated without passphrase, so no prompt is needed
+					addOutput, err := add.CombinedOutput()
+					Expect(err).ToNot(HaveOccurred(), string(addOutput))
+				})
+
+				AfterEach(func() {
+					if agentPID != 0 {
+						_ = exec.Command("kill", fmt.Sprint(agentPID)).Run()
+						agentPID = 0
+					}
+					agentSock = ""
+				})
+
+				// The agent connections come back to the client as server-initiated
+				// channels: the client must accept them, relay them to its local agent
+				// socket, and let the remote ssh-add list the keys of that agent.
+				It("Should forward the local SSH agent with -A", func() {
+					clientArgs := append(getClientArgs(rsaPrivKeyPath, "-A"), "ssh-add", "-l")
+					command := exec.Command(ssh3Path, clientArgs...)
+					command.Env = append(os.Environ(), fmt.Sprintf("SSH_AUTH_SOCK=%s", agentSock))
+					session, err := Start(command, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session, "10s").Should(Exit(0))
+					Eventually(session.Out, "5s").Should(Say("ED25519"))
+				})
+
+				// The long -forward-agent spelling is the very same switch and must keep
+				// working next to the -A alias.
+				It("Should forward the local SSH agent with -forward-agent", func() {
+					clientArgs := append(getClientArgs(rsaPrivKeyPath, "-forward-agent"), "ssh-add", "-l")
+					command := exec.Command(ssh3Path, clientArgs...)
+					command.Env = append(os.Environ(), fmt.Sprintf("SSH_AUTH_SOCK=%s", agentSock))
+					session, err := Start(command, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session, "10s").Should(Exit(0))
+					Eventually(session.Out, "5s").Should(Say("ED25519"))
+				})
+
+				// Without the flag, no agent socket is created on the remote host and the
+				// remote ssh-add has nothing to talk to.
+				It("Should not forward the SSH agent without -A", func() {
+					clientArgs := append(getClientArgs(rsaPrivKeyPath), "ssh-add", "-l")
+					command := exec.Command(ssh3Path, clientArgs...)
+					command.Env = append(os.Environ(), fmt.Sprintf("SSH_AUTH_SOCK=%s", agentSock))
+					session, err := Start(command, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session, "10s").Should(Exit())
+					Expect(session.ExitCode()).ToNot(Equal(0), "ssh-add must fail when no agent is forwarded")
+					Eventually(session.Err, "5s").Should(Say("authentication agent"))
+				})
+			})
 
 			Context("Client behaviour", func() {
 				It("Should connect using an RSA privkey", func() {
