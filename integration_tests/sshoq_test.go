@@ -1337,6 +1337,84 @@ var _ = Describe("Testing the sshoq cli", func() {
 				})
 			})
 
+			Context("sftp session start directory", func() {
+				// sftpRemoteURL builds a client connection URL with the remote directory
+				// the interactive session starts in appended after the '%' separator
+				// (':' is used for the port), e.g.
+				// ssh3-testuser@127.0.0.1:4433/sshoq-tests%/tmp.
+				// An empty directory yields the bare "...%", which targets the remote
+				// user's home directory, like no '%' separator at all.
+				sftpRemoteURL := func(bind, remoteDir string) string {
+					return fmt.Sprintf("%s@%s%s%%%s", username, bind, DEFAULT_URL_PATH, remoteDir)
+				}
+
+				// runSftp starts the client in sftp mode with the connection URL built
+				// from remoteDir and feeds the given commands on its standard input.
+				// Without a terminal the client reads one command per line and does not
+				// print prompts, so the output holds only the command results.
+				runSftp := func(remoteDir string, commands ...string) *Session {
+					clientArgs := []string{
+						"-insecure", "-i", rsaPrivKeyPath,
+						"-sftp",
+						sftpRemoteURL(serverBind, remoteDir),
+					}
+					command := exec.Command(ssh3Path, clientArgs...)
+					command.Stdin = strings.NewReader(strings.Join(commands, "\n") + "\n")
+					session, err := Start(command, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					return session
+				}
+
+				It("starts the session in the remote directory given after '%'", func() {
+					// A directory of its own, so the pwd output cannot be confused with
+					// the home directory or with a log line.
+					remoteDir := fmt.Sprintf("/home/%s/sftp-start-%d", username, time.Now().UnixNano())
+					Expect(os.MkdirAll(remoteDir, 0755)).To(Succeed())
+					defer os.RemoveAll(remoteDir)
+
+					session := runSftp(remoteDir, "pwd", "exit")
+					Eventually(session).Should(Exit(0))
+					Eventually(session.Out).Should(Say(regexp.QuoteMeta(remoteDir) + "\n"))
+				})
+
+				It("starts the session in the remote home directory when no directory is given", func() {
+					home := fmt.Sprintf("/home/%s", username)
+					session := runSftp("", "pwd", "exit")
+					Eventually(session).Should(Exit(0))
+					Eventually(session.Out).Should(Say(regexp.QuoteMeta(home) + "\n"))
+				})
+
+				It("resolves a start directory relative to the remote home", func() {
+					subdirName := fmt.Sprintf("sftp-relative-%d", time.Now().UnixNano())
+					remoteDir := fmt.Sprintf("/home/%s/%s", username, subdirName)
+					Expect(os.MkdirAll(remoteDir, 0755)).To(Succeed())
+					defer os.RemoveAll(remoteDir)
+
+					// a relative start directory resolves against the home, like "cd"
+					session := runSftp(subdirName, "pwd", "exit")
+					Eventually(session).Should(Exit(0))
+					Eventually(session.Out).Should(Say(regexp.QuoteMeta(remoteDir) + "\n"))
+				})
+
+				It("resolves a ~/ start directory against the remote home", func() {
+					subdirName := fmt.Sprintf("sftp-tilde-%d", time.Now().UnixNano())
+					remoteDir := fmt.Sprintf("/home/%s/%s", username, subdirName)
+					Expect(os.MkdirAll(remoteDir, 0755)).To(Succeed())
+					defer os.RemoveAll(remoteDir)
+
+					session := runSftp("~/"+subdirName, "pwd", "exit")
+					Eventually(session).Should(Exit(0))
+					Eventually(session.Out).Should(Say(regexp.QuoteMeta(remoteDir) + "\n"))
+				})
+
+				It("fails when the start directory does not exist", func() {
+					missing := fmt.Sprintf("/home/%s/sftp-missing-%d", username, time.Now().UnixNano())
+					session := runSftp(missing, "pwd", "exit")
+					Eventually(session).Should(Exit(255))
+					Eventually(session.Err).Should(Say("could not start the session in " + regexp.QuoteMeta(missing)))
+				})
+			})
+
 			// It checks the client with the -forward-udp or -reverse-udp forwarding options.
 			// As forward-tcp, a TCP socket is indeed well open on the client and is forwarded
 			// through the SSH3 connection towards the specified remote IP and port at server´s reach.

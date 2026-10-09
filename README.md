@@ -266,6 +266,19 @@ To use sftp mode on the client, run this to drop into a SFTP shell:
 
 Type `help` in the `sftp>` prompt to see what commands are available.
 
+The session starts in the remote user's home directory. Append the directory to
+start in after `%` - the same separator `-scp` uses, since `:` is already used
+for the port - and the `sftp>` prompt opens there directly:
+
+`sshoq -sftp user@host%/tmp`
+
+The start directory is resolved like a `cd` issued from the remote home
+directory: `%/tmp` is absolute, `%projects` and `%~/projects` both point into
+the remote user's home, and nothing after the `%` (`user@host%`) explicitly
+asks for the home directory. If the directory cannot be entered, the session
+fails instead of dropping in the home directory, so uploads never land somewhere
+other than what was asked for.
+
 A leading `~` or `~/` in a path expands to the user's home directory, for
 every SFTP command: the *remote* user's home for remote arguments (`ls`,
 `mkdir`, `rm`, `rmdir`, the `get` source and `put` target) and the *local*

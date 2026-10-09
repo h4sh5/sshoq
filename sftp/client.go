@@ -19,7 +19,14 @@ import (
 	"github.com/h4sh5/sshoq/client"
 )
 
-func RunInteractiveClient(c *client.Client, follow bool) error {
+// RunInteractiveClient opens an sftp channel on c and runs the interactive
+// sftp shell until the user quits. Symlinks are followed when follow is set.
+// initialDir is the remote directory the session starts in, as given on the
+// command line after the '%' separator (e.g. "sshoq -sftp host%/tmp"); it may
+// be absolute, relative to the remote home directory, or use the "~" prefix.
+// An empty initialDir leaves the session in the remote user's home directory,
+// which is where the server starts every sftp session.
+func RunInteractiveClient(c *client.Client, follow bool, initialDir string) error {
 	channel, err := c.OpenChannel("sftp", 30000, 0)
 	if err != nil {
 		return fmt.Errorf("could not open sftp channel: %w", err)
@@ -50,6 +57,19 @@ func RunInteractiveClient(c *client.Client, follow bool) error {
 	// The previous remote directory, for `cd -`.
 	prevDir := ""
 	hasPrevDir := false
+
+	// Change to the directory requested on the command line before prompting,
+	// so `sshoq -sftp host%/tmp` drops straight into /tmp. An unreachable
+	// directory is an error: staying in the home directory instead would let
+	// uploads silently land somewhere the user did not ask for.
+	if initialDir != "" {
+		target := resolveInitialRemoteDir(initialDir, homeDir)
+		dir, err := changeRemoteDir(channel, target)
+		if err != nil {
+			return fmt.Errorf("could not start the session in %s: %w", target, err)
+		}
+		remoteDir = dir
+	}
 
 	input, err := newInteractiveReader()
 	if err != nil {
@@ -134,22 +154,13 @@ func RunInteractiveClient(c *client.Client, follow bool) error {
 				fmt.Fprintln(os.Stderr, "cd: no previous directory")
 				continue
 			}
-			resp, err := doRequest(channel, &Request{Cmd: "cd", Path: target})
+			dir, err := changeRemoteDir(channel, target)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "cd: %s\n", err)
 				continue
 			}
-			if !resp.OK {
-				fmt.Fprintf(os.Stderr, "cd: %s\n", resp.Error)
-			} else {
-				prevDir, hasPrevDir = remoteDir, true
-				pwdResp, _ := doRequest(channel, &Request{Cmd: "pwd"})
-				if pwdResp != nil && pwdResp.OK {
-					remoteDir = pwdResp.Path
-				} else {
-					remoteDir = target
-				}
-			}
+			prevDir, hasPrevDir = remoteDir, true
+			remoteDir = dir
 
 		case "pwd":
 			resp, err := doRequest(channel, &Request{Cmd: "pwd"})
@@ -260,6 +271,41 @@ func RunInteractiveClient(c *client.Client, follow bool) error {
 	}
 
 	return nil
+}
+
+// changeRemoteDir sends a `cd` request for target and returns the directory
+// the session is in afterwards, as reported by the server. It fails when the
+// server refuses the change (unknown directory, no permission) or when the
+// exchange itself fails.
+func changeRemoteDir(channel ssh3.Channel, target string) (string, error) {
+	resp, err := doRequest(channel, &Request{Cmd: "cd", Path: target})
+	if err != nil {
+		return "", err
+	}
+	if !resp.OK {
+		return "", serverError(target, resp.Error)
+	}
+	// The server resolves the target itself (symlinks, ".", ".."); ask it where
+	// the session ended up rather than guessing from the requested path.
+	if pwdResp, err := doRequest(channel, &Request{Cmd: "pwd"}); err == nil && pwdResp != nil && pwdResp.OK {
+		return pwdResp.Path, nil
+	}
+	return target, nil
+}
+
+// resolveInitialRemoteDir computes the absolute remote directory the
+// interactive session starts in from the path given on the command line
+// (e.g. "/tmp" for `sshoq -sftp host%/tmp`, "~/sub" for `...%~/sub`). It is
+// resolved exactly like a `cd` argument issued from the remote home directory
+// the server starts the session in, so relative paths resolve against the home
+// and "~" and "~/..." point into it.
+func resolveInitialRemoteDir(initialDir, homeDir string) string {
+	if initialDir == "" {
+		return homeDir
+	}
+	// resolveCDTarget never fails here: there is no "-" argument to resolve.
+	target, _ := resolveCDTarget(initialDir, homeDir, homeDir, "", false)
+	return target
 }
 
 // resolveCDTarget computes the remote path a `cd` command should change to,
