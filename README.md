@@ -14,6 +14,7 @@ Notable features:
 - New HTTP authentication methods such as [OAuth 2.0](https://datatracker.ietf.org/doc/html/rfc6749) and [OpenID Connect](https://openid.net/specs/openid-connect-core-1_0.html) in addition to classical SSH authentication
 - Invisible to port scanning attacks due to UDP
 - UDP port forwarding in addition to classical TCP port forwarding
+- SSH agent forwarding with the classical `-A` flag
 
 SSHOQ implements the common password-based and public-key (RSA and EdDSA/ed25519) authentication methods. It also supports new authentication methods such as OAuth 2.0 and allows logging in to your servers using your Google/Microsoft/Github accounts.
 
@@ -334,6 +335,25 @@ Warning: Reverse UDP port forwarding is not well tested and may not be working f
 Like OpenSSH, all forwarding flags (`-L`, `-R`, `-forward-tcp`, `-forward-udp`, `-reverse-tcp`, `-reverse-udp`) can be repeated any number of times and combined freely, including a mix of TCP and UDP and of local and reverse forwardings:
 
 `sshoq -L 8080@127.0.0.1@3000 -L 8443@127.0.0.1@443 -R 2222@127.0.0.1@22 -forward-udp 8053@127.0.0.1@5353 -reverse-udp 8888@127.0.0.1@53 user@example.com/secret-path`
+
+### Agent forwarding
+
+As in OpenSSH, `-A` forwards your local SSH agent to the remote host, so that the programs running on the
+remote host can use the keys kept in your local agent (this is what you want to `git push` or to ssh from the
+remote host to another machine):
+
+`sshoq -A user@example.com/secret-path`
+
+`-A` is a shortcut for the pre-existing `-forward-agent` flag; both do exactly the same thing and can be
+combined freely.
+
+The forwarded agent is the one your local `SSH_AUTH_SOCK` points to: `sshoq` connects to that socket and
+relays the requests coming from the remote host to it. The server creates a fresh agent socket for the
+session and exports it as `SSH_AUTH_SOCK` to the processes it starts, so nothing has to be configured on the
+remote host. If `SSH_AUTH_SOCK` is not set locally, there is no agent to forward and `sshoq` warns about it.
+
+Mind that agent forwarding gives the remote host (and every process running on it with your user) access to
+your keys: only use it on hosts you trust.
 
 ## SSHOQ is still experimental
 While SSHOQ shows promise for faster session establishment, it is still at an early proof-of-concept stage. As with any new complex protocol, **expert cryptographic review over an extended timeframe is required before reasonable security conclusions can be made**.

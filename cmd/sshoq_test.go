@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"flag"
 	"net"
 	"net/url"
 	"os"
@@ -729,5 +730,59 @@ func TestGetConnectionMaterialFromURL_CLIIdentityFileTilde(t *testing.T) {
 	got := options.Options()[client_pubkey_authentication.PRIVKEY_OPTION_NAME].(*client_pubkey_authentication.PrivkeyAuthOption).Filenames()
 	if len(got) != 1 || got[0] != want {
 		t.Errorf("expected %q, got %v", want, got)
+	}
+}
+
+// --- SSH agent forwarding CLI flags ---
+
+// parseAgentForwardingFlag registers the agent forwarding flags on a private
+// flag set and parses args with them, returning the resulting value and the
+// remaining positional arguments.
+func parseAgentForwardingFlag(t *testing.T, args ...string) (forward bool, rest []string) {
+	t.Helper()
+	fs := flag.NewFlagSet("sshoq-agent-flag-test", flag.ContinueOnError)
+	forwardSSHAgent := registerAgentForwardingFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		t.Fatalf("could not parse %v: %s", args, err)
+	}
+	return *forwardSSHAgent, fs.Args()
+}
+
+// OpenSSH uses -A to enable agent forwarding: the flag must be accepted and must
+// enable forwarding even though the long -forward-agent spelling exists too.
+func TestAgentForwardingFlagShortAlias(t *testing.T) {
+	forward, rest := parseAgentForwardingFlag(t, "-A", "user@example.org:443/sshoq-server")
+	if !forward {
+		t.Fatal("expected -A to enable agent forwarding")
+	}
+	// -A is a switch, not a flag with a value: the remote host must stay a
+	// positional argument, otherwise "sshoq -A host" would lose its host.
+	if len(rest) != 1 || rest[0] != "user@example.org:443/sshoq-server" {
+		t.Fatalf("expected the remote host to remain a positional argument, got %v", rest)
+	}
+}
+
+// The pre-existing long spelling keeps working and both spellings must drive the
+// same value: mixing them cannot silently turn forwarding back off.
+func TestAgentForwardingFlagLongForm(t *testing.T) {
+	forward, _ := parseAgentForwardingFlag(t, "-forward-agent")
+	if !forward {
+		t.Fatal("expected -forward-agent to enable agent forwarding")
+	}
+	forward, _ = parseAgentForwardingFlag(t, "-A", "-forward-agent")
+	if !forward {
+		t.Fatal("expected -forward-agent combined with -A to enable agent forwarding")
+	}
+}
+
+// Without either flag, agent forwarding must stay off: it is opt-in, like in
+// OpenSSH.
+func TestAgentForwardingFlagDisabledByDefault(t *testing.T) {
+	forward, rest := parseAgentForwardingFlag(t, "user@example.org")
+	if forward {
+		t.Fatal("agent forwarding must be off unless -A or -forward-agent is given")
+	}
+	if len(rest) != 1 {
+		t.Fatalf("expected the remote host to be the only positional argument, got %v", rest)
 	}
 }
