@@ -298,147 +298,206 @@ func TestGetConnectionMaterialFromURL_NoEnvDirectives(t *testing.T) {
 
 // --- scp argument parsing tests ---
 
-func TestParseScpArgsUpload(t *testing.T) {
-	upload, localPath, remotePath, urlParam, err := parseScpArgs([]string{"localfile", "user@remote:443/sshoq-server%/tmp/remotefile"})
+// TestParseScpEndpointsUpload checks the upload form, where the source is a
+// local path and the destination a remote one.
+func TestParseScpEndpointsUpload(t *testing.T) {
+	src, dst, err := parseScpEndpoints([]string{"localfile", "user@remote:443/sshoq-server%/tmp/remotefile"})
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
-	if !upload {
-		t.Errorf("expected upload direction, got download")
+	if src.remote {
+		t.Errorf("expected a local source, got remote %s", src)
 	}
-	if localPath != "localfile" {
-		t.Errorf("expected localPath localfile, got %s", localPath)
+	if src.path != "localfile" {
+		t.Errorf("expected the local source localfile, got %s", src.path)
 	}
-	if remotePath != "/tmp/remotefile" {
-		t.Errorf("expected remotePath /tmp/remotefile, got %s", remotePath)
+	if !dst.remote {
+		t.Errorf("expected a remote destination")
 	}
-	if urlParam != "user@remote:443/sshoq-server" {
-		t.Errorf("expected urlParam user@remote:443/sshoq-server, got %s", urlParam)
+	if dst.path != "/tmp/remotefile" {
+		t.Errorf("expected remote path /tmp/remotefile, got %s", dst.path)
+	}
+	if dst.url != "user@remote:443/sshoq-server" {
+		t.Errorf("expected URL user@remote:443/sshoq-server, got %s", dst.url)
+	}
+	if src.url != "" {
+		t.Errorf("expected no URL on the local side, got %s", src.url)
 	}
 }
 
-func TestParseScpArgsDownload(t *testing.T) {
-	upload, localPath, remotePath, urlParam, err := parseScpArgs([]string{"user@remote:443/sshoq-server%.ssh/authorized_keys", "."})
+// TestParseScpEndpointsDownload checks the download form, where the source is
+// the remote argument and the destination the local one.
+func TestParseScpEndpointsDownload(t *testing.T) {
+	src, dst, err := parseScpEndpoints([]string{"user@remote:443/sshoq-server%.ssh/authorized_keys", "."})
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
-	if upload {
-		t.Errorf("expected download direction, got upload")
+	if !src.remote {
+		t.Errorf("expected a remote source, got local %s", src)
 	}
-	if localPath != "." {
-		t.Errorf("expected localPath ., got %s", localPath)
+	if src.path != ".ssh/authorized_keys" {
+		t.Errorf("expected remote path .ssh/authorized_keys, got %s", src.path)
 	}
-	if remotePath != ".ssh/authorized_keys" {
-		t.Errorf("expected remotePath .ssh/authorized_keys, got %s", remotePath)
+	if src.url != "user@remote:443/sshoq-server" {
+		t.Errorf("expected URL user@remote:443/sshoq-server, got %s", src.url)
 	}
-	if urlParam != "user@remote:443/sshoq-server" {
-		t.Errorf("expected urlParam user@remote:443/sshoq-server, got %s", urlParam)
+	if dst.remote {
+		t.Errorf("expected a local destination, got remote %s", dst)
+	}
+	if dst.path != "." {
+		t.Errorf("expected the local destination ., got %s", dst.path)
 	}
 }
 
-func TestParseScpArgsRecursiveDownload(t *testing.T) {
-	upload, localPath, remotePath, urlParam, err := parseScpArgs([]string{"user@remote:443/sshoq-server%/etc/nginx", "."})
+func TestParseScpEndpointsRecursiveDownload(t *testing.T) {
+	src, dst, err := parseScpEndpoints([]string{"user@remote:443/sshoq-server%/etc/nginx", "."})
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
-	if upload {
-		t.Errorf("expected download direction, got upload")
+	if !src.remote || src.path != "/etc/nginx" {
+		t.Errorf("expected /etc/nginx as the remote source, got %s", src)
 	}
-	if localPath != "." {
-		t.Errorf("expected localPath ., got %s", localPath)
-	}
-	if remotePath != "/etc/nginx" {
-		t.Errorf("expected remotePath /etc/nginx, got %s", remotePath)
-	}
-	if urlParam != "user@remote:443/sshoq-server" {
-		t.Errorf("expected urlParam user@remote:443/sshoq-server, got %s", urlParam)
+	if dst.remote || dst.path != "." {
+		t.Errorf("expected . as the local destination, got %s", dst)
 	}
 }
 
-func TestParseScpArgsWrongArgCount(t *testing.T) {
+// TestParseScpEndpointsHostToHost checks the two-remote-hosts form: the copy
+// goes from the first argument to the second one, each carrying the URL of the
+// host it names and the path on it.
+func TestParseScpEndpointsHostToHost(t *testing.T) {
+	src, dst, err := parseScpEndpoints([]string{
+		"user@source:443/sshoq-server%/data/report.csv",
+		"user@destination:4433/sshoq-server%backup/report.csv",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if !src.remote || !dst.remote {
+		t.Fatalf("expected both endpoints to be remote, got %s and %s", src, dst)
+	}
+	if src.url != "user@source:443/sshoq-server" || src.path != "/data/report.csv" {
+		t.Errorf("unexpected source %s", src)
+	}
+	if dst.url != "user@destination:4433/sshoq-server" || dst.path != "backup/report.csv" {
+		t.Errorf("unexpected destination %s", dst)
+	}
+	// an endpoint is rendered the way it was written on the command line
+	if got := src.String(); got != "user@source:443/sshoq-server%/data/report.csv" {
+		t.Errorf("unexpected rendering of the source: %s", got)
+	}
+}
+
+// TestParseScpEndpointsHostToHostHomeDirs checks that a host-to-host copy may
+// name the home directory of the user by leaving the path out, and take a path
+// relative to that home directory on the other side.
+func TestParseScpEndpointsHostToHostHomeDirs(t *testing.T) {
+	src, dst, err := parseScpEndpoints([]string{"user@source:443/sshoq-server%", "user@destination%inbox"})
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if !src.remote || src.path != "~" {
+		t.Errorf("expected the remote home directory as the source, got %s", src)
+	}
+	if !dst.remote || dst.path != "inbox" {
+		t.Errorf("expected inbox relative to the remote home directory, got %s", dst)
+	}
+}
+
+// TestParseScpEndpointsHostToHostTilde checks that the "~" forms are kept as
+// they are written, so each of the two servers resolves them against the home
+// directory of the user authenticated on it.
+func TestParseScpEndpointsHostToHostTilde(t *testing.T) {
+	src, dst, err := parseScpEndpoints([]string{"user@source%/subdir/file.txt", "user@destination%~/file.txt"})
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if src.path != "/subdir/file.txt" {
+		t.Errorf("unexpected source path %s", src.path)
+	}
+	if dst.path != "~/file.txt" {
+		t.Errorf("expected the destination tilde form to be kept, got %s", dst.path)
+	}
+}
+
+func TestParseScpEndpointsWrongArgCount(t *testing.T) {
 	for _, args := range [][]string{
 		{},
 		{"onlyone"},
 		{"a", "b", "c"},
 	} {
-		if _, _, _, _, err := parseScpArgs(args); err == nil {
+		if _, _, err := parseScpEndpoints(args); err == nil {
 			t.Errorf("expected error for args %v", args)
 		}
 	}
 }
 
-func TestParseScpArgsNoSeparator(t *testing.T) {
-	if _, _, _, _, err := parseScpArgs([]string{"localfile", "user@remote:443/sshoq-server"}); err == nil {
+func TestParseScpEndpointsNoSeparator(t *testing.T) {
+	if _, _, err := parseScpEndpoints([]string{"localfile", "user@remote:443/sshoq-server"}); err == nil {
 		t.Error("expected error when no '%' separator is present")
 	}
 }
 
-func TestParseScpArgsEmptyUrlPart(t *testing.T) {
-	if _, _, _, _, err := parseScpArgs([]string{"localfile", "%/tmp/remotefile"}); err == nil {
+func TestParseScpEndpointsEmptyUrlPart(t *testing.T) {
+	if _, _, err := parseScpEndpoints([]string{"localfile", "%/tmp/remotefile"}); err == nil {
 		t.Error("expected error when the URL part is empty")
 	}
+	// the other side of a host-to-host copy is checked the same way
+	if _, _, err := parseScpEndpoints([]string{"user@source%/file.txt", "%/tmp/remotefile"}); err == nil {
+		t.Error("expected error when the URL part of the destination is empty")
+	}
 }
 
-// TestParseScpArgsEmptyRemotePath verifies that a remote argument without a path
-// (user@host:443/sshoq-server%) is accepted and targets the remote user's home
-// directory, reported as "~" for the sftp layer to resolve, like OpenSSH's
+// TestParseScpEndpointsEmptyRemotePath verifies that a remote argument without a
+// path (user@host:443/sshoq-server%) is accepted and targets the remote user's
+// home directory, reported as "~" for the sftp layer to resolve, like OpenSSH's
 // "host:".
-func TestParseScpArgsEmptyRemotePath(t *testing.T) {
-	upload, localPath, remotePath, urlParam, err := parseScpArgs([]string{"localfile", "user@remote:443/sshoq-server%"})
+func TestParseScpEndpointsEmptyRemotePath(t *testing.T) {
+	src, dst, err := parseScpEndpoints([]string{"localfile", "user@remote:443/sshoq-server%"})
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
-	if !upload {
-		t.Errorf("expected upload direction")
+	if src.remote {
+		t.Errorf("expected a local source")
 	}
-	if localPath != "localfile" {
-		t.Errorf("expected localPath localfile, got %s", localPath)
+	if !dst.remote || dst.path != "~" {
+		t.Errorf("expected ~ for the remote home directory, got %s", dst)
 	}
-	if remotePath != "~" {
-		t.Errorf("expected remotePath ~ for the remote home directory, got %s", remotePath)
-	}
-	if urlParam != "user@remote:443/sshoq-server" {
-		t.Errorf("expected urlParam user@remote:443/sshoq-server, got %s", urlParam)
+	if dst.url != "user@remote:443/sshoq-server" {
+		t.Errorf("expected URL user@remote:443/sshoq-server, got %s", dst.url)
 	}
 }
 
-// TestParseScpArgsEmptyRemotePathDownload verifies the download direction of a
-// remote argument without a path: the remote home directory is the source.
-func TestParseScpArgsEmptyRemotePathDownload(t *testing.T) {
-	upload, localPath, remotePath, urlParam, err := parseScpArgs([]string{"user@remote:443/sshoq-server%", "."})
+// TestParseScpEndpointsEmptyRemotePathDownload verifies the download direction
+// of a remote argument without a path: the remote home directory is the source.
+func TestParseScpEndpointsEmptyRemotePathDownload(t *testing.T) {
+	src, dst, err := parseScpEndpoints([]string{"user@remote:443/sshoq-server%", "."})
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
-	if upload {
-		t.Errorf("expected download direction, got upload")
+	if !src.remote || src.path != "~" {
+		t.Errorf("expected ~ for the remote home directory, got %s", src)
 	}
-	if localPath != "." {
-		t.Errorf("expected localPath ., got %s", localPath)
-	}
-	if remotePath != "~" {
-		t.Errorf("expected remotePath ~ for the remote home directory, got %s", remotePath)
-	}
-	if urlParam != "user@remote:443/sshoq-server" {
-		t.Errorf("expected urlParam user@remote:443/sshoq-server, got %s", urlParam)
+	if dst.remote || dst.path != "." {
+		t.Errorf("expected . as the local destination, got %s", dst)
 	}
 }
 
-func TestParseScpArgsRemotePathContainsPercent(t *testing.T) {
-	upload, localPath, remotePath, urlParam, err := parseScpArgs([]string{"localfile", "user@remote:443/sshoq-server%/tmp/100%25done"})
+func TestParseScpEndpointsRemotePathContainsPercent(t *testing.T) {
+	src, dst, err := parseScpEndpoints([]string{"localfile", "user@remote:443/sshoq-server%/tmp/100%25done"})
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
-	if !upload {
-		t.Errorf("expected upload direction")
+	if src.remote || src.path != "localfile" {
+		t.Errorf("expected localfile as the local source, got %s", src)
 	}
-	if localPath != "localfile" {
-		t.Errorf("expected localPath localfile, got %s", localPath)
+	// only the first '%' separates the URL from the path: the rest, percents
+	// included, is the path
+	if dst.path != "/tmp/100%25done" {
+		t.Errorf("expected remote path /tmp/100%%25done, got %s", dst.path)
 	}
-	if remotePath != "/tmp/100%25done" {
-		t.Errorf("expected remotePath /tmp/100%%25done, got %s", remotePath)
-	}
-	if urlParam != "user@remote:443/sshoq-server" {
-		t.Errorf("expected urlParam user@remote:443/sshoq-server, got %s", urlParam)
+	if dst.url != "user@remote:443/sshoq-server" {
+		t.Errorf("expected URL user@remote:443/sshoq-server, got %s", dst.url)
 	}
 }
 

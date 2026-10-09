@@ -1317,6 +1317,137 @@ var _ = Describe("Testing the sshoq cli", func() {
 					Expect(string(content)).To(Equal("second"))
 				})
 
+				// A copy with two remote arguments goes from one host to the other:
+				// the client keeps a connection to each of them and streams the data
+				// through itself, so no host ever reads the filesystem of the other
+				// one. The second server of the suite (the one the proxy-jump specs
+				// use) runs on the same machine with its own URL path, which is enough
+				// to stand for a second host.
+				proxyScpURL := func(remotePath string) string {
+					return fmt.Sprintf("%s@%s%s%%%s", username, proxyServerBind, DEFAULT_PROXY_URL_PATH, remotePath)
+				}
+
+				It("copies a file between two remote hosts with -scp", func() {
+					sourceFile := fmt.Sprintf("/home/%s/scp-h2h-%d.txt", username, time.Now().UnixNano())
+					defer os.RemoveAll(sourceFile)
+					err := os.WriteFile(sourceFile, []byte("host to host content"), 0644)
+					Expect(err).ToNot(HaveOccurred())
+
+					destFile := fmt.Sprintf("/home/%s/scp-h2h-dest-%d.txt", username, time.Now().UnixNano())
+					defer os.RemoveAll(destFile)
+
+					clientArgs := []string{
+						"-v", "-insecure", "-i", rsaPrivKeyPath,
+						"-scp",
+						scpRemoteURL(serverBind, sourceFile),
+						proxyScpURL(destFile),
+					}
+					command := exec.Command(ssh3Path, clientArgs...)
+					session, err := Start(command, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session).Should(Exit(0))
+					Eventually(session).Should(Say("Copied .*scp-h2h-"))
+
+					content, err := os.ReadFile(destFile)
+					Expect(err).ToNot(HaveOccurred())
+					Expect(string(content)).To(Equal("host to host content"))
+					// the copy leaves the source on its own host
+					_, err = os.Stat(sourceFile)
+					Expect(err).ToNot(HaveOccurred())
+				})
+
+				It("copies a directory tree between two remote hosts with -scp -r", func() {
+					// stage the tree on the first host with an ordinary upload
+					localSrcDir := filepath.Join(GinkgoT().TempDir(), "h2h-tree")
+					err := os.MkdirAll(filepath.Join(localSrcDir, "nested"), 0755)
+					Expect(err).ToNot(HaveOccurred())
+					err = os.WriteFile(filepath.Join(localSrcDir, "one.txt"), []byte("first"), 0644)
+					Expect(err).ToNot(HaveOccurred())
+					err = os.WriteFile(filepath.Join(localSrcDir, "nested", "two.txt"), []byte("second"), 0644)
+					Expect(err).ToNot(HaveOccurred())
+
+					stamp := time.Now().UnixNano()
+					// the trailing separators say both are directories, so the tree is
+					// staged as <srcParent>/h2h-tree and found back as
+					// <dstParent>/h2h-tree
+					srcParent := fmt.Sprintf("/home/%s/scp-h2hr-src-%d/", username, stamp)
+					dstParent := fmt.Sprintf("/home/%s/scp-h2hr-dst-%d/", username, stamp)
+					defer os.RemoveAll(srcParent)
+					defer os.RemoveAll(dstParent)
+
+					uploadArgs := []string{
+						"-v", "-insecure", "-i", rsaPrivKeyPath,
+						"-scp", "-r",
+						localSrcDir,
+						scpRemoteURL(serverBind, srcParent),
+					}
+					upSession, err := Start(exec.Command(ssh3Path, uploadArgs...), GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(upSession).Should(Exit(0))
+
+					clientArgs := []string{
+						"-v", "-insecure", "-i", rsaPrivKeyPath,
+						"-scp", "-r",
+						scpRemoteURL(serverBind, filepath.Join(srcParent, "h2h-tree")),
+						proxyScpURL(dstParent),
+					}
+					session, err := Start(exec.Command(ssh3Path, clientArgs...), GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session).Should(Exit(0))
+
+					// the tree is recreated under the destination directory, which the
+					// trailing separator announces, and both files come with it
+					content, err := os.ReadFile(filepath.Join(dstParent, "h2h-tree", "one.txt"))
+					Expect(err).ToNot(HaveOccurred())
+					Expect(string(content)).To(Equal("first"))
+					content, err = os.ReadFile(filepath.Join(dstParent, "h2h-tree", "nested", "two.txt"))
+					Expect(err).ToNot(HaveOccurred())
+					Expect(string(content)).To(Equal("second"))
+				})
+
+				It("refuses to copy a remote file onto itself", func() {
+					// the destination is opened truncated before the source has been
+					// read to the end, so the same file on both sides would destroy it
+					sourceFile := fmt.Sprintf("/home/%s/scp-h2h-self-%d.txt", username, time.Now().UnixNano())
+					defer os.RemoveAll(sourceFile)
+					err := os.WriteFile(sourceFile, []byte("do not lose me"), 0644)
+					Expect(err).ToNot(HaveOccurred())
+
+					clientArgs := []string{
+						"-v", "-insecure", "-i", rsaPrivKeyPath,
+						"-scp",
+						scpRemoteURL(serverBind, sourceFile),
+						scpRemoteURL(serverBind, sourceFile),
+					}
+					session, err := Start(exec.Command(ssh3Path, clientArgs...), GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session).Should(Exit(255))
+					Eventually(session.Err).Should(Say("onto itself"))
+
+					content, err := os.ReadFile(sourceFile)
+					Expect(err).ToNot(HaveOccurred())
+					Expect(string(content)).To(Equal("do not lose me"))
+				})
+
+				It("refuses a proxy jump with a copy between two remote hosts", func() {
+					sourceFile := fmt.Sprintf("/home/%s/scp-h2h-jump-%d.txt", username, time.Now().UnixNano())
+					defer os.RemoveAll(sourceFile)
+					err := os.WriteFile(sourceFile, []byte("x"), 0644)
+					Expect(err).ToNot(HaveOccurred())
+
+					clientArgs := []string{
+						"-v", "-insecure", "-i", rsaPrivKeyPath,
+						"-proxy-jump", fmt.Sprintf("%s@%s%s", username, proxyServerBind, DEFAULT_PROXY_URL_PATH),
+						"-scp",
+						scpRemoteURL(serverBind, sourceFile),
+						proxyScpURL(sourceFile + ".copy"),
+					}
+					session, err := Start(exec.Command(ssh3Path, clientArgs...), GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session).Should(Exit(255))
+					Eventually(session.Err).Should(Say("proxy jump"))
+				})
+
 				It("returns a useful error when SFTP is disabled on the server", func() {
 					localFile := filepath.Join(GinkgoT().TempDir(), "localfile.txt")
 					err := os.WriteFile(localFile, []byte("x"), 0644)

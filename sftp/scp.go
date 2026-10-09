@@ -23,14 +23,11 @@ import (
 // stops at the next chunk boundary, partial local files are removed, and
 // ErrCancelled is returned.
 func RunScpClient(c *client.Client, upload bool, recursive bool, localPath, remotePath string) error {
-	channel, err := c.OpenChannel("sftp", 30000, 0)
+	channel, err := openScpChannel(c)
 	if err != nil {
-		return fmt.Errorf("could not open sftp channel: %w", err)
+		return err
 	}
 	defer channel.Close()
-	if err := channel.WaitOpen(); err != nil {
-		return fmt.Errorf("could not open sftp channel: %w", err)
-	}
 
 	// Resolve the home-directory forms of the remote path before transferring;
 	// an explicit remote path needs no request and is left as it is.
@@ -49,6 +46,21 @@ func RunScpClient(c *client.Client, upload bool, recursive bool, localPath, remo
 		return scpUpload(channel, recursive, localPath, remotePath, cancel)
 	}
 	return scpDownload(channel, recursive, remotePath, localPath, cancel)
+}
+
+// openScpChannel opens the sftp channel an -scp copy runs on, and waits until
+// the server confirmed it. A copy between two remote hosts opens one on each of
+// them.
+func openScpChannel(c *client.Client) (ssh3.Channel, error) {
+	channel, err := c.OpenChannel("sftp", 30000, 0)
+	if err != nil {
+		return nil, fmt.Errorf("could not open sftp channel: %w", err)
+	}
+	if err := channel.WaitOpen(); err != nil {
+		channel.Close()
+		return nil, fmt.Errorf("could not open sftp channel: %w", err)
+	}
+	return channel, nil
 }
 
 // scpUpload copies a local file or directory to the remote host. Mirroring
