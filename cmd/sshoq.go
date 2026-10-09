@@ -727,6 +727,32 @@ func parseScpArgs(args []string) (upload bool, localPath, remotePath, urlParam s
 	return false, args[1], remotePath, urlPathParts[0], nil
 }
 
+// parseSftpArgs splits the sftp-mode argument into the connection URL and the
+// remote directory the interactive session must start in. As in scp mode, '%'
+// separates the sshoq server URL from the remote path, since ':' is already
+// used for the port designation
+// (e.g. user@host:443/sshoq-server%/tmp).
+//
+// When the argument has no '%', the session starts in the remote user's home
+// directory, as it always did, and the whole argument is the connection URL.
+// An empty remote path (user@host:443/sshoq-server%) explicitly requests that
+// home directory too.
+func parseSftpArgs(args []string) (urlParam string, initialDir string, err error) {
+	if len(args) == 0 {
+		return "", "", fmt.Errorf("sftp mode requires a remote host: user@host:port/sshoq-server")
+	}
+	if !strings.Contains(args[0], "%") {
+		return args[0], "", nil
+	}
+	urlPathParts := strings.SplitN(args[0], "%", 2)
+	if urlPathParts[0] == "" {
+		return "", "", fmt.Errorf("invalid sftp argument %q: expected user@host:port/sshoq-server%%/remote/path", args[0])
+	}
+	// An empty remote path means the remote user's home directory, which is
+	// where the server starts every sftp session anyway.
+	return urlPathParts[0], urlPathParts[1], nil
+}
+
 func ClientMain() int {
 	internal.CloseClientPluginsRegistry()
 	internal.CloseServerPluginsRegistry()
@@ -757,7 +783,7 @@ func ClientMain() int {
 	flag.Var(&forwardTCP, "L", "alias for -forward-tcp (may be specified multiple times)")
 	flag.Var(&reverseTCP, "R", "alias for -reverse-tcp (may be specified multiple times)")
 	proxyJump := flag.String("proxy-jump", "", "if set, performs a proxy jump using the specified remote host as proxy (requires server with version >= 0.1.5)")
-	sftpMode := flag.Bool("sftp", false, "if set, start an interactive SFTP session")
+	sftpMode := flag.Bool("sftp", false, "if set, start an interactive SFTP session; the connection URL may be followed by a remote directory after '%', e.g. user@host:443/sshoq-server%/tmp, and the session then starts there instead of in the remote user's home directory")
 	noFollowSymlinks := flag.Bool("no-follow-symlinks", false, "if set with -sftp, do not follow symbolic links on the client (put source and get source, resolved client-side)")
 	scpMode := flag.Bool("scp", false, "if set, copy files to or from the remote host non-interactively, like scp; the remote argument is the connection URL with the remote path after '%', and without one the copy targets the remote user's home directory")
 	scpRecursive := flag.Bool("r", false, "if set with -scp, recursively copy directories")
@@ -842,6 +868,12 @@ func ClientMain() int {
 	// (e.g. user@host:443/sshoq-server%/tmp/remotefile). Without a remote path
 	// (user@host:443/sshoq-server%), the copy targets the remote user's home
 	// directory.
+	//
+	// In sftp mode, the remote directory the session starts in is appended to
+	// the connection URL after the same '%' separator
+	// (e.g. user@host:443/sshoq-server%/tmp); without it the session starts in
+	// the remote user's home directory.
+	var sftpInitialDir string
 	var scpUpload bool
 	var scpLocalPath, scpRemotePath string
 	urlFromParam := args[0]
@@ -853,6 +885,13 @@ func ClientMain() int {
 		}
 		var err error
 		scpUpload, scpLocalPath, scpRemotePath, urlFromParam, err = parseScpArgs(args)
+		if err != nil {
+			log.Error().Msgf("%s", err)
+			return -1
+		}
+	} else if *sftpMode {
+		var err error
+		urlFromParam, sftpInitialDir, err = parseSftpArgs(args)
 		if err != nil {
 			log.Error().Msgf("%s", err)
 			return -1
@@ -1100,7 +1139,7 @@ func ClientMain() int {
 	}
 
 	if *sftpMode {
-		err = sshoqsftp.RunInteractiveClient(c, !*noFollowSymlinks)
+		err = sshoqsftp.RunInteractiveClient(c, !*noFollowSymlinks, sftpInitialDir)
 	} else if *scpMode {
 		err = sshoqsftp.RunScpClient(c, scpUpload, *scpRecursive, scpLocalPath, scpRemotePath)
 	} else {

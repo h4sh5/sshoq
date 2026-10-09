@@ -442,6 +442,82 @@ func TestParseScpArgsRemotePathContainsPercent(t *testing.T) {
 	}
 }
 
+// --- sftp argument parsing tests ---
+
+// TestParseSftpArgsInitialDir verifies that the sftp argument accepts a remote
+// directory after the '%' separator and that it is reported separately from the
+// connection URL (e.g. "sshoq -sftp user@host%/tmp" starts in /tmp).
+func TestParseSftpArgsInitialDir(t *testing.T) {
+	urlParam, initialDir, err := parseSftpArgs([]string{"user@remote:443/sshoq-server%/tmp"})
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if urlParam != "user@remote:443/sshoq-server" {
+		t.Errorf("expected urlParam user@remote:443/sshoq-server, got %s", urlParam)
+	}
+	if initialDir != "/tmp" {
+		t.Errorf("expected initialDir /tmp, got %s", initialDir)
+	}
+}
+
+// Without a '%' separator the whole argument is the connection URL and the
+// session must start in the remote home directory, as it always did.
+
+func TestParseSftpArgsNoSeparator(t *testing.T) {
+	urlParam, initialDir, err := parseSftpArgs([]string{"user@remote:443/sshoq-server"})
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if urlParam != "user@remote:443/sshoq-server" {
+		t.Errorf("expected urlParam user@remote:443/sshoq-server, got %s", urlParam)
+	}
+	if initialDir != "" {
+		t.Errorf("expected no initial remote directory, got %s", initialDir)
+	}
+}
+
+// An empty remote path (user@host:443/sshoq-server%) explicitly asks for the
+// remote home directory, reported as the empty initial directory.
+func TestParseSftpArgsEmptyInitialDir(t *testing.T) {
+	urlParam, initialDir, err := parseSftpArgs([]string{"user@remote:443/sshoq-server%"})
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if urlParam != "user@remote:443/sshoq-server" {
+		t.Errorf("expected urlParam user@remote:443/sshoq-server, got %s", urlParam)
+	}
+	if initialDir != "" {
+		t.Errorf("expected the remote home directory (empty initialDir), got %s", initialDir)
+	}
+}
+
+// A relative remote path is kept as-is for the sftp layer, which resolves it
+// against the remote home directory; a second '%' belongs to the path.
+func TestParseSftpArgsRelativeInitialDir(t *testing.T) {
+	urlParam, initialDir, err := parseSftpArgs([]string{"user@remote:443/sshoq-server%projects/100%25done"})
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if urlParam != "user@remote:443/sshoq-server" {
+		t.Errorf("expected urlParam user@remote:443/sshoq-server, got %s", urlParam)
+	}
+	if initialDir != "projects/100%25done" {
+		t.Errorf("expected initialDir projects/100%%25done, got %s", initialDir)
+	}
+}
+
+func TestParseSftpArgsEmptyUrlPart(t *testing.T) {
+	if _, _, err := parseSftpArgs([]string{"%/tmp"}); err == nil {
+		t.Error("expected error when the URL part is empty")
+	}
+}
+
+func TestParseSftpArgsNoArgs(t *testing.T) {
+	if _, _, err := parseSftpArgs(nil); err == nil {
+		t.Error("expected error when no remote host is given")
+	}
+}
+
 func TestParseAddrPort(t *testing.T) {
 	const syntaxError = "Use [bindip:]localport@remoteip@remoteport (bindip is optional), same as openssh but with @ instead of :"
 
