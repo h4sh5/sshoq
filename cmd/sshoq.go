@@ -691,6 +691,11 @@ func registerAgentForwardingFlag(fs *flag.FlagSet) *bool {
 // port designation
 // (e.g. user@host:443/sshoq-server%/tmp/remotefile). When the remote argument
 // is args[0] the transfer is a download, otherwise it is an upload.
+//
+// The remote path may be left out entirely (user@host:443/sshoq-server%): the
+// copy then targets the remote user's home directory, like OpenSSH's "host:".
+// It is reported as "~" here and resolved to the home directory announced by
+// the server in the sftp layer.
 func parseScpArgs(args []string) (upload bool, localPath, remotePath, urlParam string, err error) {
 	if len(args) != 2 {
 		return false, "", "", "", fmt.Errorf("scp mode requires exactly two arguments: <local-path> <remote-url> (upload) or <remote-url> <local-path> (download)")
@@ -703,18 +708,23 @@ func parseScpArgs(args []string) (upload bool, localPath, remotePath, urlParam s
 		}
 	}
 	if remoteIdx == -1 {
-		return false, "", "", "", fmt.Errorf("could not find the remote path separator '%%' in the arguments: the remote argument must look like user@host:443/sshoq-server%%/remote/path")
+		return false, "", "", "", fmt.Errorf("could not find the remote path separator '%%' in the arguments: the remote argument must look like user@host:443/sshoq-server%%/remote/path (or like user@host:443/sshoq-server%% to use the remote home directory)")
 	}
 	urlPathParts := strings.SplitN(args[remoteIdx], "%", 2)
-	if urlPathParts[0] == "" || urlPathParts[1] == "" {
+	if urlPathParts[0] == "" {
 		return false, "", "", "", fmt.Errorf("invalid remote argument %q: expected user@host:port/sshoq-server%%/remote/path", args[remoteIdx])
+	}
+	// no remote path at all: copy to (or from) the remote user's home directory
+	remotePath = urlPathParts[1]
+	if remotePath == "" {
+		remotePath = "~"
 	}
 	if remoteIdx == 1 {
 		// upload: local source is args[0], remote destination is args[1]
-		return true, args[0], urlPathParts[1], urlPathParts[0], nil
+		return true, args[0], remotePath, urlPathParts[0], nil
 	}
 	// download: remote source is args[0], local destination is args[1]
-	return false, args[1], urlPathParts[1], urlPathParts[0], nil
+	return false, args[1], remotePath, urlPathParts[0], nil
 }
 
 func ClientMain() int {
@@ -749,7 +759,7 @@ func ClientMain() int {
 	proxyJump := flag.String("proxy-jump", "", "if set, performs a proxy jump using the specified remote host as proxy (requires server with version >= 0.1.5)")
 	sftpMode := flag.Bool("sftp", false, "if set, start an interactive SFTP session")
 	noFollowSymlinks := flag.Bool("no-follow-symlinks", false, "if set with -sftp, do not follow symbolic links on the client (put source and get source, resolved client-side)")
-	scpMode := flag.Bool("scp", false, "if set, copy files to or from the remote host non-interactively, like scp")
+	scpMode := flag.Bool("scp", false, "if set, copy files to or from the remote host non-interactively, like scp; the remote argument is the connection URL with the remote path after '%', and without one the copy targets the remote user's home directory")
 	scpRecursive := flag.Bool("r", false, "if set with -scp, recursively copy directories")
 
 	var flagValues []*FlagValue
@@ -829,7 +839,9 @@ func ClientMain() int {
 	// In scp mode, one of the two arguments is the remote URL. It uses '%' to
 	// separate the sshoq server URL from the remote path, since ':' is already
 	// used for the port designation
-	// (e.g. user@host:443/sshoq-server%/tmp/remotefile).
+	// (e.g. user@host:443/sshoq-server%/tmp/remotefile). Without a remote path
+	// (user@host:443/sshoq-server%), the copy targets the remote user's home
+	// directory.
 	var scpUpload bool
 	var scpLocalPath, scpRemotePath string
 	urlFromParam := args[0]

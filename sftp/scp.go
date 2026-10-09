@@ -16,6 +16,9 @@ import (
 // protocol (the same channel the interactive -sftp mode uses). upload selects
 // the direction: when true, localPath is copied to remotePath; when false,
 // remotePath is copied to localPath. recursive enables directory transfers.
+// A remote path of "" or "~" (and a "~/" prefix) targets the remote user's home
+// directory, like scp's "host:" and "host:~/".
+//
 // While the copy runs, SIGINT (Ctrl+C) and SIGTERM cancel it: the transfer
 // stops at the next chunk boundary, partial local files are removed, and
 // ErrCancelled is returned.
@@ -27,6 +30,13 @@ func RunScpClient(c *client.Client, upload bool, recursive bool, localPath, remo
 	defer channel.Close()
 	if err := channel.WaitOpen(); err != nil {
 		return fmt.Errorf("could not open sftp channel: %w", err)
+	}
+
+	// Resolve the home-directory forms of the remote path before transferring;
+	// an explicit remote path needs no request and is left as it is.
+	remotePath, err = resolveScpRemotePath(channel, remotePath)
+	if err != nil {
+		return err
 	}
 
 	// Scp mode runs with a normal terminal, so Ctrl+C is delivered as SIGINT
@@ -82,6 +92,51 @@ func scpDownload(channel ssh3.Channel, recursive bool, remotePath, localPath str
 		return downloadRecursive(channel, remotePath, localPath, true, cancel)
 	}
 	return downloadFile(channel, remotePath, localPath, true, cancel)
+}
+
+// remoteHomeDir asks the server for the current directory of the SFTP session.
+// The server always starts a session in the authenticated user's home
+// directory, so the answer is that user's home, which is what scp's "host:"
+// refers to.
+func remoteHomeDir(channel ssh3.Channel) (string, error) {
+	resp, err := doRequest(channel, &Request{Cmd: "pwd"})
+	if err != nil {
+		return "", fmt.Errorf("could not determine the remote home directory: %w", err)
+	}
+	if !resp.OK || resp.Path == "" {
+		msg := resp.Error
+		if msg == "" {
+			msg = "the server did not report its current directory"
+		}
+		return "", fmt.Errorf("could not determine the remote home directory: %s", msg)
+	}
+	return resp.Path, nil
+}
+
+// resolveScpRemotePath resolves the remote side of an scp-style copy. The empty
+// path (user@host:443/sshoq-server%) and the "~"/"~/" forms mean the remote
+// user's home directory, like OpenSSH scp's "host:", "host:~" and "host:~/dir";
+// they are replaced with the home directory reported by the server. Every other
+// path is returned unchanged, so absolute paths stay absolute and relative ones
+// keep resolving against the session's directory (the home) on the server.
+// A trailing separator is kept: "host%~/" names the home directory itself as a
+// directory target, so the source basename is appended to it.
+func resolveScpRemotePath(channel ssh3.Channel, remotePath string) (string, error) {
+	if remotePath != "" && remotePath != "~" && !strings.HasPrefix(remotePath, "~/") {
+		return remotePath, nil
+	}
+	home, err := remoteHomeDir(channel)
+	if err != nil {
+		return "", err
+	}
+	if remotePath == "" {
+		return home, nil
+	}
+	expanded := expandTildePath(remotePath, home)
+	if strings.HasSuffix(remotePath, "/") && expanded != "/" && !strings.HasSuffix(expanded, "/") {
+		expanded += "/"
+	}
+	return expanded, nil
 }
 
 // isRemoteDir reports whether the remote path refers to an existing
