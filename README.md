@@ -286,6 +286,18 @@ Upload a local file to a remote path:
 
 `sshoq -scp localfile user@remote:443/sshoq-server%/tmp/remotefile`
 
+With no remote path at all (nothing after the `%`), the copy targets the remote
+user's home directory, like OpenSSH's `host:`:
+
+`sshoq -scp localfile user@remote:443/sshoq-server%`
+
+is the same as `...%/` and as `...%~`: the file is copied to
+`~/localfile` on the server. `~` and `~/subdir` also work as remote path
+prefixes, and a remote path without any prefix is relative to the home
+directory:
+
+`sshoq -scp -r ./localfolder user@remote:443/sshoq-server%~`
+
 Upload a local folder recursively to the remote host:
 
 `sshoq -scp -r ./localfolder user@remote:443/sshoq-server%/tmp/`

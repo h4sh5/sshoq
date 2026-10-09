@@ -379,9 +379,47 @@ func TestParseScpArgsEmptyUrlPart(t *testing.T) {
 	}
 }
 
+// TestParseScpArgsEmptyRemotePath verifies that a remote argument without a path
+// (user@host:443/sshoq-server%) is accepted and targets the remote user's home
+// directory, reported as "~" for the sftp layer to resolve, like OpenSSH's
+// "host:".
 func TestParseScpArgsEmptyRemotePath(t *testing.T) {
-	if _, _, _, _, err := parseScpArgs([]string{"localfile", "user@remote:443/sshoq-server%"}); err == nil {
-		t.Error("expected error when the remote path is empty")
+	upload, localPath, remotePath, urlParam, err := parseScpArgs([]string{"localfile", "user@remote:443/sshoq-server%"})
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if !upload {
+		t.Errorf("expected upload direction")
+	}
+	if localPath != "localfile" {
+		t.Errorf("expected localPath localfile, got %s", localPath)
+	}
+	if remotePath != "~" {
+		t.Errorf("expected remotePath ~ for the remote home directory, got %s", remotePath)
+	}
+	if urlParam != "user@remote:443/sshoq-server" {
+		t.Errorf("expected urlParam user@remote:443/sshoq-server, got %s", urlParam)
+	}
+}
+
+// TestParseScpArgsEmptyRemotePathDownload verifies the download direction of a
+// remote argument without a path: the remote home directory is the source.
+func TestParseScpArgsEmptyRemotePathDownload(t *testing.T) {
+	upload, localPath, remotePath, urlParam, err := parseScpArgs([]string{"user@remote:443/sshoq-server%", "."})
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if upload {
+		t.Errorf("expected download direction, got upload")
+	}
+	if localPath != "." {
+		t.Errorf("expected localPath ., got %s", localPath)
+	}
+	if remotePath != "~" {
+		t.Errorf("expected remotePath ~ for the remote home directory, got %s", remotePath)
+	}
+	if urlParam != "user@remote:443/sshoq-server" {
+		t.Errorf("expected urlParam user@remote:443/sshoq-server, got %s", urlParam)
 	}
 }
 

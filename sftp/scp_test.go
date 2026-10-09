@@ -3,6 +3,7 @@ package sftp
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -290,5 +291,132 @@ func TestScpUploadMissingLocalFile(t *testing.T) {
 	err := scpUpload(ch, false, "/nonexistent/file.txt", "/tmp/", nil)
 	if err == nil {
 		t.Fatal("expected error for missing local file")
+	}
+}
+
+// TestResolveScpRemotePathEmptyUsesHome verifies that an empty remote path
+// (user@host:443/sshoq-server% with nothing after the separator) resolves to the
+// remote user's home directory, which the server reports as the current
+// directory of the SFTP session, like scp's "host:".
+func TestResolveScpRemotePathEmptyUsesHome(t *testing.T) {
+	ch := newMockChannel(
+		makeResponseMsg(&Response{ID: 1, OK: true, Path: "/home/alice"}),
+	)
+
+	got, err := resolveScpRemotePath(ch, "")
+	if err != nil {
+		t.Fatalf("resolveScpRemotePath error: %v", err)
+	}
+	if got != "/home/alice" {
+		t.Fatalf("expected /home/alice, got %q", got)
+	}
+	if len(ch.Writes) != 1 {
+		t.Fatalf("expected 1 request (pwd), got %d", len(ch.Writes))
+	}
+	var pwdReq Request
+	if err := decodeRequestFrame(ch.Writes[0], &pwdReq); err != nil {
+		t.Fatalf("decode pwd request: %v", err)
+	}
+	if pwdReq.Cmd != "pwd" {
+		t.Fatalf("expected pwd request, got %q", pwdReq.Cmd)
+	}
+}
+
+// TestResolveScpRemotePathTilde verifies that the tilde forms of the remote path
+// resolve to the home directory reported by the server, like scp's "host:~" and
+// "host:~/dir", and that a trailing separator is kept so the home directory
+// itself is used as a directory target.
+func TestResolveScpRemotePathTilde(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want string
+	}{
+		{"~", "/home/alice"},
+		{"~/", "/home/alice/"},
+		{"~/sub", "/home/alice/sub"},
+		{"~/sub/", "/home/alice/sub/"},
+	} {
+		ch := newMockChannel(
+			makeResponseMsg(&Response{ID: 1, OK: true, Path: "/home/alice"}),
+		)
+		got, err := resolveScpRemotePath(ch, tc.in)
+		if err != nil {
+			t.Fatalf("resolveScpRemotePath(%q) error: %v", tc.in, err)
+		}
+		if got != tc.want {
+			t.Errorf("resolveScpRemotePath(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestResolveScpRemotePathLeavesOtherPathsAlone verifies that an explicit remote
+// path needs no request at all: absolute paths stay absolute and relative ones
+// keep resolving against the session directory on the server.
+func TestResolveScpRemotePathLeavesOtherPathsAlone(t *testing.T) {
+	for _, in := range []string{"/tmp/remotefile", ".ssh/authorized_keys", "x", "/~user/x"} {
+		ch := newMockChannel()
+		got, err := resolveScpRemotePath(ch, in)
+		if err != nil {
+			t.Fatalf("resolveScpRemotePath(%q) error: %v", in, err)
+		}
+		if got != in {
+			t.Errorf("resolveScpRemotePath(%q) = %q, want it unchanged", in, got)
+		}
+		if len(ch.Writes) != 0 {
+			t.Errorf("resolveScpRemotePath(%q) issued %d requests, want none", in, len(ch.Writes))
+		}
+	}
+}
+
+// TestResolveScpRemotePathHomeLookupFailure verifies that a server refusing to
+// report its current directory is reported as an error naming the home
+// directory rather than silently copying to an empty path.
+func TestResolveScpRemotePathHomeLookupFailure(t *testing.T) {
+	ch := newMockChannel(
+		makeResponseMsg(&Response{ID: 1, OK: false, Error: "permission denied"}),
+	)
+	_, err := resolveScpRemotePath(ch, "")
+	if err == nil {
+		t.Fatal("expected error when the server does not report its directory")
+	}
+	if !strings.Contains(err.Error(), "home directory") {
+		t.Errorf("expected the error to mention the home directory, got %v", err)
+	}
+}
+
+// TestScpUploadWithoutRemotePathGoesToHome verifies a whole upload with no remote
+// path: the home directory reported by the server is the destination directory,
+// so the source lands in it under its own basename
+// (sshoq -scp ./file.txt user@host:443/sshoq-server% copies to ~/file.txt).
+func TestScpUploadWithoutRemotePathGoesToHome(t *testing.T) {
+	tmp := t.TempDir()
+	localPath := filepath.Join(tmp, "local.txt")
+	if err := os.WriteFile(localPath, []byte("hello home"), 0644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+
+	ch := newMockChannel(
+		makeResponseMsg(&Response{ID: 1, OK: true, Path: "/home/alice"}),
+		makeResponseMsg(&Response{ID: 2, OK: true, Info: &FileInfo{Name: "alice", IsDir: true}}),
+		makeResponseMsg(&Response{ID: 3, OK: true}),
+	)
+
+	remotePath, err := resolveScpRemotePath(ch, "")
+	if err != nil {
+		t.Fatalf("resolveScpRemotePath error: %v", err)
+	}
+	if err := scpUpload(ch, false, localPath, remotePath, nil); err != nil {
+		t.Fatalf("scpUpload error: %v", err)
+	}
+
+	if len(ch.Writes) != 3 {
+		t.Fatalf("expected 3 requests (pwd, stat, put), got %d", len(ch.Writes))
+	}
+	var putReq Request
+	if err := decodeRequestFrame(ch.Writes[2], &putReq); err != nil {
+		t.Fatalf("decode put request: %v", err)
+	}
+	if putReq.Cmd != "put" || putReq.Path != "/home/alice/local.txt" {
+		t.Fatalf("expected put /home/alice/local.txt, got %s %q", putReq.Cmd, putReq.Path)
 	}
 }

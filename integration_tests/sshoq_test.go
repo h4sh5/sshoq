@@ -1100,6 +1100,8 @@ var _ = Describe("Testing the sshoq cli", func() {
 				// scpRemoteURL builds a client connection URL with the remote path
 				// appended after the '%' separator (':' is used for the port), e.g.
 				// ssh3-testuser@127.0.0.1:4433/sshoq-tests%/home/ssh3-testuser/x.txt.
+				// An empty remote path yields the bare "...%", which targets the remote
+				// user's home directory.
 				// The connection URL is already part of the string, so scp client
 				// args are built manually instead of via getClientArgs (which
 				// appends a bare connection URL as the last argument).
@@ -1130,6 +1132,73 @@ var _ = Describe("Testing the sshoq cli", func() {
 					content, err := os.ReadFile(remoteFile)
 					Expect(err).ToNot(HaveOccurred())
 					Expect(string(content)).To(Equal("hello from scp upload"))
+				})
+
+				It("uploads to the remote home directory when -scp has no remote path", func() {
+					// the local basename is unique, so the copy landing in the home
+					// directory under that same name cannot collide with an older run
+					fileName := fmt.Sprintf("scp-home-%d.txt", time.Now().UnixNano())
+					localFile := filepath.Join(GinkgoT().TempDir(), fileName)
+					err := os.WriteFile(localFile, []byte("scp to home default"), 0644)
+					Expect(err).ToNot(HaveOccurred())
+
+					// nothing after the '%': the destination is the remote user's home
+					// directory, like OpenSSH scp's "host:"
+					remoteFile := fmt.Sprintf("/home/%s/%s", username, fileName)
+					defer os.RemoveAll(remoteFile)
+
+					clientArgs := []string{
+						"-v", "-insecure", "-i", rsaPrivKeyPath,
+						"-scp",
+						localFile,
+						scpRemoteURL(serverBind, ""),
+					}
+					command := exec.Command(ssh3Path, clientArgs...)
+					session, err := Start(command, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session).Should(Exit(0))
+					Eventually(session).Should(Say("Uploaded .*" + fileName))
+
+					content, err := os.ReadFile(remoteFile)
+					Expect(err).ToNot(HaveOccurred())
+					Expect(string(content)).To(Equal("scp to home default"))
+				})
+
+				It("downloads a remote file from a ~/ path with -scp", func() {
+					fileName := fmt.Sprintf("scp-tilde-%d.txt", time.Now().UnixNano())
+					localSrc := filepath.Join(GinkgoT().TempDir(), fileName)
+					err := os.WriteFile(localSrc, []byte("tilde round trip"), 0644)
+					Expect(err).ToNot(HaveOccurred())
+
+					remoteFile := fmt.Sprintf("/home/%s/%s", username, fileName)
+					defer os.RemoveAll(remoteFile)
+
+					uploadArgs := []string{
+						"-v", "-insecure", "-i", rsaPrivKeyPath,
+						"-scp",
+						localSrc,
+						scpRemoteURL(serverBind, remoteFile),
+					}
+					upSession, err := Start(exec.Command(ssh3Path, uploadArgs...), GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(upSession).Should(Exit(0))
+
+					localDir := GinkgoT().TempDir()
+					clientArgs := []string{
+						"-v", "-insecure", "-i", rsaPrivKeyPath,
+						"-scp",
+						// "~/file" is a file inside the remote user's home directory
+						scpRemoteURL(serverBind, "~/"+fileName),
+						localDir,
+					}
+					session, err := Start(exec.Command(ssh3Path, clientArgs...), GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(session).Should(Exit(0))
+					Eventually(session).Should(Say("Downloaded .*" + fileName))
+
+					content, err := os.ReadFile(filepath.Join(localDir, fileName))
+					Expect(err).ToNot(HaveOccurred())
+					Expect(string(content)).To(Equal("tilde round trip"))
 				})
 
 				It("uploads a directory recursively with -scp -r", func() {
