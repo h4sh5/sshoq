@@ -4,6 +4,7 @@ require (
 	github.com/caddyserver/certmagic v0.20.0
 	github.com/coreos/go-oidc/v3 v3.7.0
 	github.com/creack/pty v1.1.18
+	github.com/go-jose/go-jose/v3 v3.0.1
 	github.com/golang-jwt/jwt/v5 v5.2.2
 	github.com/kevinburke/ssh_config v1.2.0
 	github.com/onsi/ginkgo/v2 v2.13.0
@@ -21,7 +22,6 @@ require (
 )
 
 require (
-	github.com/go-jose/go-jose/v3 v3.0.1 // indirect
 	github.com/go-logr/logr v1.2.4 // indirect
 	github.com/go-task/slim-sprig v0.0.0-20230315185526-52ccab3ef572 // indirect
 	github.com/golang/protobuf v1.5.3 // indirect

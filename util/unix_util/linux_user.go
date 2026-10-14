@@ -18,16 +18,30 @@ int get_errno() { return errno; }
 */
 import "C"
 import (
+	"crypto/subtle"
 	"fmt"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/h4sh5/sshoq/util"
+	"github.com/rs/zerolog/log"
 )
 
 type ShadowEntry struct {
 	Username string
 	Password string
+	// LastChange is sp_lstchg: day of the last password change (days since 1970-01-01),
+	// -1 when unset.
+	LastChange int64
+	// MaxAge is sp_max: how many days the password stays valid after a change, -1 when it
+	// never expires.
+	MaxAge int64
+	// ExpireDate is sp_expire: day from which the account is no longer accessible, -1
+	// when the account never expires.
+	ExpireDate int64
+	// Flags is sp_flag, the account flags of shadow(5).
+	Flags uint64
 }
 
 /*
@@ -55,8 +69,12 @@ func Getspnam(name string) (*ShadowEntry, error) {
 	}
 
 	s := ShadowEntry{
-		Username: C.GoString(cspwd.sp_namp),
-		Password: C.GoString(cspwd.sp_pwdp),
+		Username:   C.GoString(cspwd.sp_namp),
+		Password:   C.GoString(cspwd.sp_pwdp),
+		LastChange: int64(cspwd.sp_lstchg),
+		MaxAge:     int64(cspwd.sp_max),
+		ExpireDate: int64(cspwd.sp_expire),
+		Flags:      uint64(cspwd.sp_flag),
 	}
 
 	return &s, nil
@@ -76,9 +94,14 @@ func Crypt(clearPassword, setting string) (string, error) {
 	defer C.free(unsafe.Pointer(cSetting))
 
 	ccrypt_ret := C.crypt(cPassword, cSetting)
+	if ccrypt_ret == nil {
+		// crypt(3) returns NULL on error; indexing the converted string used to panic on
+		// the empty result it produced
+		return "", fmt.Errorf("bad password hashing: crypt() failed")
+	}
 
 	hashedPassword := C.GoString(ccrypt_ret)
-	if hashedPassword[0] == '*' {
+	if hashedPassword == "" || hashedPassword[0] == '*' {
 		return "", fmt.Errorf("bad password hashing")
 	}
 	return hashedPassword, nil
@@ -102,10 +125,17 @@ func GetGid() int32 {
 
 /*
  * Compares the provided password with the one stored in the shadow passwords table (generally /etc/shadow)
+ *
+ * The comparison is constant time: comparing hashes with == stops at the first differing
+ * byte, which tells an attacker how much of a guess is right. A hashing failure is a
+ * hard denial as well, never a mismatch to ignore.
  */
 func ComparePasswordWithHashedPassword(candidatePassword string, hashedPassword string) (bool, error) {
 	candidateHashedPassword, err := Crypt(candidatePassword, string(hashedPassword))
-	return candidateHashedPassword == string(hashedPassword), err
+	if err != nil {
+		return false, err
+	}
+	return subtle.ConstantTimeCompare([]byte(candidateHashedPassword), []byte(hashedPassword)) == 1, nil
 }
 
 /*
@@ -115,8 +145,34 @@ func ComparePasswordWithHashedPassword(candidatePassword string, hashedPassword 
 func userPasswordAuthentication(username, password string) (bool, error) {
 	shadowEntry, err := Getspnam(username)
 	if err != nil {
-		return false, nil
+		// an unreadable or missing shadow entry is not "no password needed": the error is
+		// returned instead of being dropped on the floor, and no comparison is attempted
+		return false, err
 	}
+
+	user, err := getUser(username)
+	if err != nil {
+		return false, err
+	}
+
+	// The password being right is not enough: an account which is locked, expired, or
+	// without a login shell must not open a session, as nologin(8) and PAM would refuse
+	// it. This is checked before the hash, so a locked account cannot even be probed
+	// against its password.
+	policy := AccountPolicy{
+		PasswordHash: shadowEntry.Password,
+		LastChange:   shadowEntry.LastChange,
+		MaxAge:       shadowEntry.MaxAge,
+		ExpireDate:   shadowEntry.ExpireDate,
+		Flags:        uint32(shadowEntry.Flags),
+		Shell:        user.Shell,
+		IsRoot:       user.Uid == 0,
+	}
+	if err := CheckAccountUsable(policy, time.Now()); err != nil {
+		log.Warn().Msgf("refusing password login of user %s: %s", username, err)
+		return false, err
+	}
+
 	return ComparePasswordWithHashedPassword(password, shadowEntry.Password)
 }
 

@@ -1081,7 +1081,9 @@ func ClientMain() int {
 	var keyLog io.Writer
 	*keyLogFile = util.ExpandPath(*keyLogFile)
 	if len(*keyLogFile) > 0 {
-		f, err := os.Create(*keyLogFile)
+		// the key log holds the QUIC/TLS master secrets: reading it is reading the traffic,
+		// so it is created private to its owner instead of the 0666&^umask of os.Create
+		f, err := util.CreateSecretFile(*keyLogFile)
 		if err != nil {
 			log.Fatal().Msgf("%s", err)
 		}

@@ -156,6 +156,7 @@ func isExpectedForwardingStreamClose(err error) bool {
 
 func forwardUDPInBackground(ctx context.Context, channel ssh3.Channel, conn *net.UDPConn) {
 	go func() {
+		defer ssh3.RecoverGoroutine("the UDP forwarding channel datagram loop")
 		defer conn.Close()
 		for {
 			select {
@@ -222,6 +223,7 @@ func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net
 		conn.Close()
 	}()
 	go func() {
+		defer ssh3.RecoverGoroutine("the TCP forwarding channel read loop")
 		defer directions.Done()
 		defer func() {
 			// half-close the socket, so the target still may answer what it was
@@ -364,6 +366,7 @@ func forwardReverseTCPInBackground(ctx context.Context, channel ssh3.Channel, co
 	}()
 
 	go func() {
+		defer ssh3.RecoverGoroutine("the reverse TCP forwarding channel read loop")
 		defer directions.Done()
 		defer conn.CloseWrite()
 		for {
@@ -591,6 +594,19 @@ func newPtyReq(user *unix_util.User, channel ssh3.Channel, request ssh3Messages.
 
 func newX11Req(user *unix_util.User, channel ssh3.Channel, request ssh3Messages.X11Request, wantReply bool) error {
 	return fmt.Errorf("%T not implemented", request)
+}
+
+// rejectShellRequest refuses an interactive shell when the identity which authenticated
+// the conversation is restricted to a command: what such an identity may run is exactly
+// the command it names, and a shell is not it. Ending the session is what a denied
+// restriction means here; carrying on because the client asked for a shell would make the
+// restriction decorative.
+func rejectShellRequest(identityOptions *ssh3.IdentityOptions) error {
+	if identityOptions != nil && identityOptions.ForcedCommand != "" {
+		return fmt.Errorf("refusing the shell request: the identity which authenticated this conversation is "+
+			"restricted to the command %q", identityOptions.ForcedCommand)
+	}
+	return nil
 }
 
 func newCommand(user *unix_util.User, channel ssh3.Channel, loginShell bool, command string, args ...string) error {
@@ -1038,6 +1054,7 @@ func handleUDPReverseForwardingChannel(ctx context.Context, user *unix_util.User
 				}
 				forwardings[addr.String()] = channel
 				go func() {
+					defer ssh3.RecoverGoroutine("the reverse UDP forwarding channel datagram loop")
 					for {
 						dgram, err := channel.ReceiveDatagram(ctx)
 						if err != nil {
@@ -1091,6 +1108,9 @@ func newDataReq(user *unix_util.User, channel ssh3.Channel, request ssh3Messages
 }
 
 func handleAuthAgentSocketConn(conn net.Conn, conversation *ssh3.Conversation) {
+	// one goroutine per accepted agent-socket connection, reading messages which come
+	// from the network: see ssh3.RecoverGoroutine
+	defer ssh3.RecoverGoroutine("the SSH agent socket connection handler")
 	channel, err := conversation.OpenChannel("agent-connection", 30000, 10)
 	if err != nil {
 		log.Error().Msgf("could not open channel from server: %s", err.Error())
@@ -1295,7 +1315,9 @@ func ServerMain() int {
 		if logFileName == "" {
 			logFileName = "sshoq.log"
 		}
-		logFile, err := os.OpenFile(logFileName, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		// the log holds usernames, peer addresses and conversation IDs: it must not be
+		// world-readable on a multi-user host
+		logFile, err := util.OpenSecretAppendFile(logFileName)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "cannot open log file %s: %s\n", logFileName, err.Error())
 			return -1
@@ -1370,12 +1392,30 @@ func ServerMain() int {
 		if err != nil {
 			return err
 		}
+		// The identity which authenticated this conversation may carry OpenSSH-style
+		// restrictions (command=, from=, restrict, no-pty, ...) read from the
+		// authorized_keys / authorized_identities line of the user. They express what the
+		// owner of that file allows, so they must be enforced on every channel and every
+		// request of the session: an option which is read when the identity is parsed and
+		// then forgotten is a restriction which does nothing.
+		identityOptions := conv.IdentityOptions()
+		if identityOptions != nil {
+			log.Debug().Msgf("conversation %s of user %s authenticated with a restricted identity",
+				conv.ConversationID(), authenticatedUsername)
+		}
 		conv.SetChannelOpenHandler(func(channel ssh3.Channel) error {
 			if channel.ChannelType() == "sftp" && *disableSFTP {
 				log.Warn().Msgf("rejecting SFTP channel for user %s: feature disabled", authenticatedUsername)
 				return ssh3.ChannelOpenFailure{
 					ReasonCode: ssh3.SSH_OPEN_ADMINISTRATIVELY_PROHIBITED,
 					ErrorMsg:   "SFTP is disabled on the server",
+				}
+			}
+			if err := identityOptions.CheckChannelOpen(channel.ChannelType()); err != nil {
+				log.Warn().Msgf("rejecting %s channel for user %s: %s", channel.ChannelType(), authenticatedUsername, err)
+				return ssh3.ChannelOpenFailure{
+					ReasonCode: ssh3.SSH_OPEN_ADMINISTRATIVELY_PROHIBITED,
+					ErrorMsg:   err.Error(),
 				}
 			}
 			return nil
@@ -1406,6 +1446,7 @@ func ServerMain() int {
 					runningCmd:   nil,
 				})
 				go func() {
+					defer ssh3.RecoverGoroutine("the session channel read loop")
 					// handle the main sessionChannel, once it ends, the whole conversation ends
 					defer channel.Close()
 					defer conv.Close()
@@ -1425,15 +1466,38 @@ func ServerMain() int {
 						case *ssh3Messages.ChannelRequestMessage:
 							switch requestMessage := message.ChannelRequest.(type) {
 							case *ssh3Messages.PtyRequest:
-								err = newPtyReq(authenticatedUser, channel, *requestMessage, message.WantReply)
+								// no-pty / restrict: no terminal for an identity which forbids one
+								err = identityOptions.CheckRequest("pty-req")
+								if err == nil {
+									err = newPtyReq(authenticatedUser, channel, *requestMessage, message.WantReply)
+								}
 							case *ssh3Messages.EnvRequest:
-								err = newEnvReq(authenticatedUser, channel, *requestMessage, message.WantReply)
+								err = identityOptions.CheckRequest("env")
+								if err == nil {
+									err = newEnvReq(authenticatedUser, channel, *requestMessage, message.WantReply)
+								}
 							case *ssh3Messages.X11Request:
-								err = newX11Req(authenticatedUser, channel, *requestMessage, message.WantReply)
+								err = identityOptions.CheckRequest("x11-req")
+								if err == nil {
+									err = newX11Req(authenticatedUser, channel, *requestMessage, message.WantReply)
+								}
 							case *ssh3Messages.ShellRequest:
-								err = newShellReq(authenticatedUser, channel, message.WantReply)
+								err = rejectShellRequest(identityOptions)
+								if err == nil {
+									err = newShellReq(authenticatedUser, channel, message.WantReply)
+								}
 							case *ssh3Messages.ExecRequest:
-								err = newCommandInShellReq(authenticatedUser, channel, message.WantReply, requestMessage.Command)
+								// command=: whatever the client asked to run is replaced by the command the identity
+								// restricts the session to
+								command := requestMessage.Command
+								if identityOptions != nil && identityOptions.ForcedCommand != "" {
+									if command != identityOptions.ForcedCommand {
+										log.Warn().Msgf("running the forced command of the identity of user %s instead of %q",
+											authenticatedUsername, command)
+									}
+									command = identityOptions.ForcedCommand
+								}
+								err = newCommandInShellReq(authenticatedUser, channel, message.WantReply, command)
 							case *ssh3Messages.SubsystemRequest:
 								err = newSubsystemReq(authenticatedUser, channel, *requestMessage, message.WantReply)
 							case *ssh3Messages.WindowChangeRequest:
@@ -1449,7 +1513,12 @@ func ServerMain() int {
 							runningSession, ok := runningSessions.Get(channel)
 							if ok && runningSession.channelState == LARVAL {
 								if message.Data == string("forward-agent") {
-									runningSession.authAgentSocketPath, err = openAgentSocketAndForwardAgent(conv.Context(), conv, authenticatedUser)
+									// no-agent-forwarding / restrict: the agent socket of the user is not made
+									// available to a session which must not see it
+									err = identityOptions.CheckRequest("agent-forwarding")
+									if err == nil {
+										runningSession.authAgentSocketPath, err = openAgentSocketAndForwardAgent(conv.Context(), conv, authenticatedUser)
+									}
 								} else {
 									// invalid data on larval state
 									err = fmt.Errorf("invalid data on ssh channel with LARVAL state")

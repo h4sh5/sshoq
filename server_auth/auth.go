@@ -23,13 +23,19 @@ func HandleAuths(ctx context.Context, enablePasswordLogin bool, defaultMaxPacket
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Server", ssh3.GetCurrentVersionString())
 		peerVersion, err := ssh3.ParseVersionString(r.UserAgent())
-		log.Debug().Msgf("received request from User-Agent %s", r.UserAgent())
-		log.Debug().Msgf("peer version: protocol version %s, software version %s", peerVersion.GetProtocolVersion(), peerVersion.GetSoftwareVersion())
+		// The User-Agent is untrusted and this runs before any authentication: it is logged
+		// truncated, and never reflected in the response body. Slicing it with [:100] used to
+		// panic for every User-Agent shorter than 100 bytes (that is, for every real client,
+		// scanner or browser reaching the URL path), which turned a clean 403 into an
+		// unauthenticated H3_INTERNAL_ERROR.
+		log.Debug().Msgf("received request from User-Agent %s", truncate(r.UserAgent(), maxLoggedUserAgentLength))
 		// currently apply strict version rules
 		if err != nil {
-			http.Error(w, fmt.Sprintf("Unsupported user-agent: %s", r.UserAgent()[:100]), http.StatusForbidden)
+			log.Warn().Msgf("rejecting request from %s: unsupported user-agent %s", r.RemoteAddr, truncate(r.UserAgent(), maxLoggedUserAgentLength))
+			http.Error(w, "Unsupported user-agent", http.StatusForbidden)
 			return
 		}
+		log.Debug().Msgf("peer version: protocol version %s, software version %s", peerVersion.GetProtocolVersion(), peerVersion.GetSoftwareVersion())
 		if !ssh3.IsVersionSupported(peerVersion) {
 			http.Error(w, fmt.Sprintf("Unsupported version: %s not supported by server with version %s", peerVersion.GetProtocolVersion(), ssh3.ThisVersion().GetProtocolVersion()), http.StatusForbidden)
 			return
@@ -84,6 +90,14 @@ func HandleAuths(ctx context.Context, enablePasswordLogin bool, defaultMaxPacket
 			case *WrappedPluginVerifier:
 				if verifier.Verify(r, base64ConvID) {
 					log.Debug().Msgf("request for user %s successfully verified by plugin", username)
+					// The identity line the verifier was built from may carry restrictions
+					// (command=, from=, restrict, no-pty, ...). They are part of what the owner
+					// of the file asked for: attach them to the conversation so the session layer
+					// enforces them, exactly like OpenSSH does with authorized_keys.
+					if identityOptions := verifier.IdentityOptions(); identityOptions != nil {
+						conv.SetIdentityOptions(identityOptions)
+						log.Debug().Msgf("applying the restrictions of the identity of user %s to conversation %s", username, convID)
+					}
 					handlerFunc(username, conv, w, r)
 					return
 				}
@@ -111,14 +125,38 @@ func HandleBasicAuth(handlerFunc ssh3.AuthenticatedHandlerFunc, conv *ssh3.Conve
 			return
 		}
 
+		// Guessing a password used to cost nothing but hashing power: neither the source
+		// nor the account was counted, and a failure was answered immediately. Each failed
+		// attempt now costs the attacker a wait, and a source which failed too often is
+		// refused for the rest of the window.
+		perUserKey, perAddressKey := throttleKey(r.RemoteAddr, username)
+		if err := passwordLogins.beforeAttempt(perAddressKey, passwordMaxFailuresPerAddress); err != nil {
+			log.Warn().Msgf("refusing password login of user %s from %s: %s", username, r.RemoteAddr, err)
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		if err := passwordLogins.beforeAttempt(perUserKey, passwordMaxFailuresPerSource); err != nil {
+			log.Warn().Msgf("refusing password login of user %s from %s: %s", username, r.RemoteAddr, err)
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+
 		ok, err := unix_util.UserPasswordAuthentication(username, password)
 		if err != nil || !ok {
+			passwordLogins.failure(perUserKey)
+			passwordLogins.failure(perAddressKey)
 			if err != nil {
-				log.Error().Msgf("user authentication failed: %s", err)
+				// a failed lookup is not reported as a plain bad password: the account may
+				// exist and the server may have been unable to read what it needed
+				log.Error().Msgf("user authentication of %s from %s failed: %s", username, r.RemoteAddr, err)
+			} else {
+				log.Warn().Msgf("wrong password for user %s from %s", username, r.RemoteAddr)
 			}
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
+		passwordLogins.success(perUserKey)
+		passwordLogins.success(perAddressKey)
 		handlerFunc(username, conv, w, r)
 	}
 }

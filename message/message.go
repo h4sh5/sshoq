@@ -2,6 +2,7 @@ package message
 
 import (
 	"errors"
+	"fmt"
 	"io"
 
 	"github.com/h4sh5/sshoq/util"
@@ -45,6 +46,19 @@ const (
 type Message interface {
 	Write(buf []byte) (n int, err error)
 	Length() int
+}
+
+// UnsupportedMessage is returned by ParseMessage when the peer sent a message type
+// which this implementation does not know how to parse. It is a protocol violation
+// of the peer: the channel (or the conversation) carrying it must be closed, it is
+// never a reason to stop the process. Panicking here used to kill the whole server,
+// every session of every other user included, upon a single malformed message.
+type UnsupportedMessage struct {
+	TypeID uint64
+}
+
+func (e UnsupportedMessage) Error() string {
+	return fmt.Sprintf("peer sent an unsupported message type: %d", e.TypeID)
 }
 
 type ChannelOpenConfirmationMessage struct {
@@ -200,20 +214,28 @@ func ParseMessage(r util.Reader) (Message, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// every parser below returns a pointer type, and a nil pointer stored in a Message
+	// is not a nil Message: a caller testing the interface, or switching on its dynamic
+	// type, would take it for a real message and dereference it. Keep the interface nil
+	// when there is no message.
+	var message Message
 	switch typeId {
 	case SSH_MSG_CHANNEL_REQUEST:
-		return ParseRequestMessage(r)
+		message, err = ParseRequestMessage(r)
 	case SSH_MSG_CHANNEL_OPEN_CONFIRMATION:
-		return ParseChannelOpenConfirmationMessage(r)
+		message, err = ParseChannelOpenConfirmationMessage(r)
 	case SSH_MSG_CHANNEL_OPEN_FAILURE:
-		return ParseChannelOpenFailureMessage(r)
-	case SSH_MSG_CHANNEL_DATA, SSH_MSG_CHANNEL_EXTENDED_DATA:
-		if typeId == SSH_MSG_CHANNEL_DATA {
-			return ParseDataMessage(r)
-		} else {
-			return ParseExtendedDataMessage(r)
-		}
+		message, err = ParseChannelOpenFailureMessage(r)
+	case SSH_MSG_CHANNEL_DATA:
+		message, err = ParseDataMessage(r)
+	case SSH_MSG_CHANNEL_EXTENDED_DATA:
+		message, err = ParseExtendedDataMessage(r)
 	default:
-		panic("not implemented")
+		return nil, UnsupportedMessage{TypeID: typeId}
 	}
+	if err != nil {
+		return nil, err
+	}
+	return message, nil
 }
