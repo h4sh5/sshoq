@@ -28,6 +28,75 @@ type Reader interface {
 	io.Reader
 }
 
+const (
+	// MaxFieldLength is the absolute ceiling applied to any length-prefixed field
+	// (an SSH string, an SSH byte string) read from a peer. Without such a ceiling,
+	// a 10-byte message announcing a 2^62-1 length makes the process allocate up to
+	// 4 EiB of address space, and any length above Go's maxAlloc makes `make`
+	// panic ("makeslice: len out of range"), which kills the whole process.
+	// Readers which know a tighter bound (a channel knows the maximum packet size it
+	// negotiated with the peer) must use it, see NewLengthLimitedReader.
+	MaxFieldLength uint64 = 1 << 24
+)
+
+// MaxLengthAware is implemented by readers which know the maximum length of a
+// length-prefixed field they are willing to accept from the peer.
+type MaxLengthAware interface {
+	// MaxFieldLength returns the maximum accepted length, in bytes.
+	MaxFieldLength() uint64
+}
+
+// lengthLimitedReader bounds the length-prefixed fields read from the wrapped Reader.
+type lengthLimitedReader struct {
+	Reader
+	max uint64
+}
+
+var _ Reader = &lengthLimitedReader{}
+var _ MaxLengthAware = &lengthLimitedReader{}
+
+// NewLengthLimitedReader wraps r so that any length-prefixed field longer than max
+// bytes is refused instead of being allocated. It is meant to be used for the data
+// coming from a peer, with max set to the maximum packet size negotiated with that
+// peer. Wrapping an already limited reader tightens its limit, it never loosens it.
+func NewLengthLimitedReader(r Reader, max uint64) Reader {
+	if max > MaxFieldLength {
+		max = MaxFieldLength
+	}
+	if limited, ok := r.(*lengthLimitedReader); ok && limited.max <= max {
+		return limited
+	}
+	return &lengthLimitedReader{Reader: r, max: max}
+}
+
+func (r *lengthLimitedReader) MaxFieldLength() uint64 {
+	return r.max
+}
+
+func (r *lengthLimitedReader) ReadByte() (byte, error) {
+	var b [1]byte
+	n, err := r.Read(b[:])
+	if n == 1 && err == io.EOF {
+		err = nil
+	}
+	return b[0], err
+}
+
+// checkFieldLength refuses a length received from the peer when it is larger than
+// what the reader is prepared to allocate for it.
+func checkFieldLength(buf Reader, length uint64) error {
+	max := uint64(MaxFieldLength)
+	if aware, ok := buf.(MaxLengthAware); ok {
+		if limited := aware.MaxFieldLength(); limited < max {
+			max = limited
+		}
+	}
+	if length > max {
+		return fmt.Errorf("peer announced a %d bytes field, the maximum accepted length is %d bytes", length, max)
+	}
+	return nil
+}
+
 type byteReader struct {
 	io.Reader
 }
@@ -206,6 +275,14 @@ func ParseSSHString(buf Reader) (string, error) {
 	if err != nil {
 		return "", InvalidSSHString{err}
 	}
+	// the length comes from the peer: it must be bounded *before* anything is allocated,
+	// otherwise a few bytes received are enough to ask for an arbitrarily large allocation
+	if err := checkFieldLength(buf, length); err != nil {
+		return "", InvalidSSHString{err}
+	}
+	if length == 0 {
+		return "", nil
+	}
 	out := make([]byte, length)
 	n, err := io.ReadFull(buf, out)
 	if n != int(length) {
@@ -222,6 +299,13 @@ func ParseSSHBytes(buf Reader) ([]byte, error) {
 	if err != nil {
 		return []byte{}, InvalidSSHString{err}
 	}
+	// same as ParseSSHString: never allocate what the peer merely announces
+	if err := checkFieldLength(buf, length); err != nil {
+		return []byte{}, InvalidSSHString{err}
+	}
+	if length == 0 {
+		return []byte{}, nil
+	}
 	out := make([]byte, length)
 	n, err := io.ReadFull(buf, out)
 	if n != int(length) {
@@ -232,7 +316,6 @@ func ParseSSHBytes(buf Reader) ([]byte, error) {
 	}
 	return out, err
 }
-
 
 func WriteSSHString(out []byte, s string) (int, error) {
 	if uint64(len(out)) < uint64(SSHStringLen(s)) {

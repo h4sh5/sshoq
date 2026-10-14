@@ -51,6 +51,12 @@ type Conversation struct {
 	channelOpenHandler     func(Channel) error
 	channelHandlerGate     chan struct{}
 	channelHandlerGateOnce sync.Once
+
+	// identityOptions are the restrictions carried by the identity which authenticated
+	// this conversation (see SetIdentityOptions). They are set once, right after
+	// authentication, and read by the goroutine handling each channel.
+	identityOptionsMutex sync.Mutex
+	identityOptions      *IdentityOptions
 }
 
 func GenerateConversationID(tls *tls.ConnectionState) (convID ConversationID, err error) {

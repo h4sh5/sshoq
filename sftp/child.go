@@ -39,6 +39,10 @@ const (
 // GID and supplementary groups. This prevents the privilege drop from affecting
 // the main server process and other concurrent sessions.
 func ServeChannel(ctx context.Context, user *unix_util.User, channel ssh3.Channel) {
+	// ServeChannel runs in its own goroutine on the server: a panic raised while
+	// handling this channel must cost this SFTP session, not the server and every other
+	// user of it
+	defer ssh3.RecoverGoroutine("the SFTP channel handler")
 	if user == nil {
 		log.Error().Msg("sftp: no user provided, closing channel")
 		channel.Close()
@@ -124,6 +128,7 @@ func serveChannelInChild(ctx context.Context, user *unix_util.User, channel ssh3
 
 	// Forward QUIC channel data messages to the child's stdin.
 	go func() {
+		defer ssh3.RecoverGoroutine("the SFTP child message pump")
 		defer wg.Done()
 		defer stdinW.Close()
 		for {

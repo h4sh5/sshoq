@@ -78,6 +78,7 @@ func forwardAgent(parent context.Context, channel ssh3.Channel) error {
 	defer c.Close()
 	ctx, cancel := context.WithCancelCause(parent)
 	go func() {
+		defer ssh3.RecoverGoroutine("the agent forwarding channel read loop")
 		var err error = nil
 		var genericMessage ssh3Messages.Message
 		for {
@@ -161,6 +162,7 @@ func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net
 		conn.Close()
 	}()
 	go func() {
+		defer ssh3.RecoverGoroutine("the TCP forwarding channel read loop")
 		defer directions.Done()
 		defer func() {
 			// half-close the socket - the peer may still have an answer on the
@@ -269,6 +271,7 @@ func forwardReverseTCPInBackground(ctx context.Context, channel ssh3.Channel, co
 		conn.Close()
 	}()
 	go func() {
+		defer ssh3.RecoverGoroutine("the reverse TCP forwarding channel read loop")
 		defer directions.Done()
 		defer conn.CloseWrite()
 		for {
@@ -349,6 +352,7 @@ func forwardReverseTCPInBackground(ctx context.Context, channel ssh3.Channel, co
 
 func forwardReverseUDPInBackground(ctx context.Context, channel ssh3.Channel, conn *net.UDPConn) {
 	go func() {
+		defer ssh3.RecoverGoroutine("the UDP forwarding channel datagram loop")
 		defer conn.Close()
 		for {
 			select {
@@ -577,7 +581,11 @@ func Dial(ctx context.Context, config *client_config.Config, qconn quic.EarlyCon
 				attempts = append(attempts, authAttempt{
 					prepare: func(freshReq *http.Request) error {
 						log.Debug().Msgf("try OIDC auth to issuer %s", m.OIDCConfig().IssuerUrl)
-						token, err := oidc.Connect(context.Background(), m.OIDCConfig(), m.OIDCConfig().IssuerUrl, m.DoPKCE())
+						// the conversation ID is handed to the issuer so the ID token it issues is
+						// bound to this conversation: a token which is not - or bound to another one -
+						// is refused by the server, since it could otherwise be replayed on any
+						// conversation of the server by anybody holding a copy of it
+						token, err := oidc.Connect(context.Background(), m.OIDCConfig(), m.OIDCConfig().IssuerUrl, conv.ConversationID().String(), m.DoPKCE())
 						if err != nil {
 							return err
 						}
@@ -848,6 +856,7 @@ func (c *Client) ForwardUDP(ctx context.Context, localUDPAddr *net.UDPAddr, remo
 				forwardings[addr.String()] = channel
 
 				go func() {
+					defer ssh3.RecoverGoroutine("the reverse UDP forwarding channel datagram loop")
 					for {
 						dgram, err := channel.ReceiveDatagram(ctx)
 						if err != nil {
@@ -1538,6 +1547,7 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, forcePTYAlloc bo
 	}()
 
 	go func() {
+		defer ssh3.RecoverGoroutine("the client stdin pump")
 		buf := make([]byte, channel.MaxPacketSize())
 		for {
 			n, err := os.Stdin.Read(buf)

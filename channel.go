@@ -11,6 +11,19 @@ import (
 	"github.com/h4sh5/sshoq/util"
 
 	"github.com/quic-go/quic-go"
+	"github.com/rs/zerolog/log"
+)
+
+const (
+	// maxNegotiatedMaxPacketSize is the largest maximum packet size accepted from a
+	// peer. The packet size is announced by the peer itself in the channel header, so
+	// without a ceiling a peer would only have to announce a huge one to be allowed to
+	// ask for a huge allocation with each message it sends.
+	maxNegotiatedMaxPacketSize = uint64(1 << 20)
+	// minMessageFieldLength is the smallest bound ever applied when reading a message:
+	// a peer announcing an absurdly small packet size must not prevent it from sending
+	// a regular request. It stays far below what the protocol uses by default (30000).
+	minMessageFieldLength = uint64(1024)
 )
 
 type ChannelOpenFailure struct {
@@ -267,6 +280,13 @@ func parseHeader(channelID uint64, r util.Reader) (conversationControlStreamID C
 	if err != nil {
 		return 0, "", 0, err
 	}
+	// the announced packet size comes from the peer: cap it, it is what bounds the
+	// allocations the peer can trigger on this channel afterwards
+	if maxPacketSize > maxNegotiatedMaxPacketSize {
+		log.Warn().Msgf("peer announced a max packet size of %d bytes on channel %d, capping it to %d",
+			maxPacketSize, channelID, maxNegotiatedMaxPacketSize)
+		maxPacketSize = maxNegotiatedMaxPacketSize
+	}
 	return conversationControlStreamID, channelType, maxPacketSize, nil
 }
 
@@ -452,8 +472,24 @@ func (c *channelImpl) ConversationID() ConversationID {
 // / The error is EOF only if no bytes were read. If an EOF happens
 // / after reading some but not all the bytes, nextMessage returns
 // / ErrUnexpectedEOF.
+// maxMessageFieldLength returns the largest length a peer may announce for a
+// length-prefixed field of a message received on this channel. It is derived from the
+// maximum packet size negotiated with the peer, capped by what this implementation
+// accepts, so that a malicious peer cannot make the process allocate more than what it
+// legitimately asked to send.
+func (c *channelImpl) maxMessageFieldLength() uint64 {
+	limit := c.ChannelInfo.MaxPacketSize
+	if limit < minMessageFieldLength {
+		limit = minMessageFieldLength
+	}
+	if limit > maxNegotiatedMaxPacketSize {
+		limit = maxNegotiatedMaxPacketSize
+	}
+	return limit
+}
+
 func (c *channelImpl) nextMessage() (ssh3.Message, error) {
-	return ssh3.ParseMessage(util.NewReader(c.recv))
+	return ssh3.ParseMessage(util.NewLengthLimitedReader(util.NewReader(c.recv), c.maxMessageFieldLength()))
 }
 
 // The returned  message will neither be ChannelOpenConfirmationMessage nor ChannelOpenFailureMessage
