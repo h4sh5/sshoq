@@ -180,7 +180,7 @@ with the following command:
       sshoq -use-password username@my-server.example.org/my-secret-path
 
 ### Config-based session establishment
-`sshoq` parses your OpenSSH config. It handles the `Hostname`, `User`, `Port`, `IdentityFile`, `SetEnv` and `SendEnv` OpenSSH options.
+`sshoq` parses your OpenSSH config. It handles the `Hostname`, `User`, `Port`, `IdentityFile`, `ForwardAgent`, `SetEnv` and `SendEnv` OpenSSH options.
 It also adds new option only used by SSHOQ, such as `URLPath` or `UDPProxyJump`. `URLPath` allows you to omit the secret URL path in your
 SSHOQ command. `UDPProxyJump` allows you to perform SSHOQ (#proxy-jump)[Proxy Jump] and has the same meaning as the `-proxy-jump` command-line argument.
 
@@ -393,6 +393,16 @@ remote host to another machine):
 
 `-A` is a shortcut for the pre-existing `-forward-agent` flag; both do exactly the same thing and can be
 combined freely.
+
+As in OpenSSH, agent forwarding can also be enabled from `~/.ssh/config` with the `ForwardAgent` directive,
+so that you do not have to pass `-A` on every command line:
+
+```
+Host my-server
+  ForwardAgent yes
+```
+
+The flags always win over the config, since they can only turn forwarding on.
 
 The forwarded agent is the one your local `SSH_AUTH_SOCK` points to: `sshoq` connects to that socket and
 relays the requests coming from the remote host to it. The server creates a fresh agent socket for the
