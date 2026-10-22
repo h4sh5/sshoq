@@ -754,6 +754,35 @@ func registerAgentForwardingFlag(fs *flag.FlagSet) *bool {
 	return forwardSSHAgent
 }
 
+// configForwardAgent reports whether the ForwardAgent directive of the ssh
+// config enables agent forwarding for the given host, so that "ForwardAgent
+// yes" in ~/.ssh/config works like OpenSSH without having to pass -A on every
+// command line. Like OpenSSH (and like the other directives parsed here), the
+// first matching value in the config wins, so a more specific Host block can
+// override "Host *". Accepted values are yes/no and the true/false aliases;
+// any other value is ignored with a warning, like a bad value in OpenSSH.
+func configForwardAgent(sshConfig *ssh_config.Config, host string) (bool, error) {
+	if sshConfig == nil {
+		return false, nil
+	}
+	value, err := sshConfig.Get(host, "ForwardAgent")
+	if err != nil {
+		return false, fmt.Errorf("could not get ForwardAgent config value: %s", err)
+	}
+	switch strings.ToLower(value) {
+	case "":
+		// no ForwardAgent directive for this host
+		return false, nil
+	case "yes", "true":
+		return true, nil
+	case "no", "false":
+		return false, nil
+	default:
+		log.Warn().Msgf("ignoring invalid ForwardAgent value %q in ssh config for %s: expected yes or no", value, host)
+		return false, nil
+	}
+}
+
 // scpEndpoint is one side of an -scp copy: either a path on the machine the
 // client runs on, or a path on a remote host together with the URL of the sshoq
 // server that must be connected to to reach it.
@@ -1119,6 +1148,19 @@ func ClientMain() int {
 	if err != nil {
 		log.Error().Msgf("could not parse URL: %s", err)
 		return -1
+	}
+
+	// "ForwardAgent yes" in ~/.ssh/config enables agent forwarding like OpenSSH
+	// does; the -A/-forward-agent flags on the command line always win, since
+	// they can only turn forwarding on.
+	if !*forwardSSHAgent {
+		if configEnablesAgent, err := configForwardAgent(sshConfig, parsedUrl.Hostname()); err != nil {
+			log.Error().Msgf("%s", err)
+			return -1
+		} else if configEnablesAgent {
+			log.Debug().Msgf("enabling SSH agent forwarding because ForwardAgent is set in the ssh config for %s", parsedUrl.Hostname())
+			*forwardSSHAgent = true
+		}
 	}
 
 	ctx := context.Background()

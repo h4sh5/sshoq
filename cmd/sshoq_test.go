@@ -959,3 +959,100 @@ func TestAgentForwardingFlagDisabledByDefault(t *testing.T) {
 		t.Fatalf("expected the remote host to be the only positional argument, got %v", rest)
 	}
 }
+
+// --- ForwardAgent in ~/.ssh/config ---
+
+func decodeSSHConfigForTest(t *testing.T, content string) *ssh_config.Config {
+	t.Helper()
+	cfg, err := ssh_config.DecodeBytes([]byte(content))
+	if err != nil {
+		t.Fatalf("could not parse ssh config: %s", err)
+	}
+	return cfg
+}
+
+// "ForwardAgent yes" in a matching Host block must enable agent forwarding
+// without needing -A on the command line, like OpenSSH.
+func TestConfigForwardAgentYes(t *testing.T) {
+	cfg := decodeSSHConfigForTest(t, "Host example.org\n  ForwardAgent yes\n")
+	forward, err := configForwardAgent(cfg, "example.org")
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if !forward {
+		t.Fatal("expected ForwardAgent yes to enable agent forwarding")
+	}
+}
+
+// true/false are accepted as aliases of yes/no, and the keyword and its value
+// are case insensitive, like every other ssh config directive.
+func TestConfigForwardAgentAliasesAndCase(t *testing.T) {
+	for _, yesValue := range []string{"yes", "Yes", "YES", "true"} {
+		cfg := decodeSSHConfigForTest(t, "Host example.org\n  ForwardAgent "+yesValue+"\n")
+		forward, err := configForwardAgent(cfg, "example.org")
+		if err != nil || !forward {
+			t.Fatalf("ForwardAgent %q: expected forwarding on (got %v, err %v)", yesValue, forward, err)
+		}
+	}
+	for _, noValue := range []string{"no", "No", "false"} {
+		cfg := decodeSSHConfigForTest(t, "Host example.org\n  ForwardAgent "+noValue+"\n")
+		forward, err := configForwardAgent(cfg, "example.org")
+		if err != nil || forward {
+			t.Fatalf("ForwardAgent %q: expected forwarding off (got %v, err %v)", noValue, forward, err)
+		}
+	}
+}
+
+// Without any ForwardAgent directive, and with a nil config (no ~/.ssh/config
+// at all), agent forwarding must stay off: it remains opt-in.
+func TestConfigForwardAgentAbsent(t *testing.T) {
+	cfg := decodeSSHConfigForTest(t, "Host example.org\n  User someone\n")
+	forward, err := configForwardAgent(cfg, "example.org")
+	if err != nil || forward {
+		t.Fatalf("expected forwarding off with no directive (got %v, err %v)", forward, err)
+	}
+	forward, err = configForwardAgent(nil, "example.org")
+	if err != nil || forward {
+		t.Fatalf("expected forwarding off with a nil config (got %v, err %v)", forward, err)
+	}
+}
+
+// The directive must only apply to the hosts it matches: "Host *" applies to
+// every host, and a Host block must not leak forwarding to another host.
+func TestConfigForwardAgentScopedToHost(t *testing.T) {
+	cfg := decodeSSHConfigForTest(t, "Host proxy.example.org\n  ForwardAgent yes\nHost other.example.org\n  User someone\n")
+	if forward, err := configForwardAgent(cfg, "proxy.example.org"); err != nil || !forward {
+		t.Fatalf("expected forwarding on for proxy.example.org (got %v, err %v)", forward, err)
+	}
+	if forward, err := configForwardAgent(cfg, "other.example.org"); err != nil || forward {
+		t.Fatalf("expected forwarding off for other.example.org (got %v, err %v)", forward, err)
+	}
+	starCfg := decodeSSHConfigForTest(t, "Host *\n  ForwardAgent yes\n")
+	if forward, err := configForwardAgent(starCfg, "anywhere.example.org"); err != nil || !forward {
+		t.Fatalf("expected Host * to enable forwarding for any host (got %v, err %v)", forward, err)
+	}
+}
+
+// Like the other directives of ~/.ssh/config, the first matching value wins, so
+// a specific Host block can override a preceding "Host *" (and a preceding
+// value can override a later one, as OpenSSH does too).
+func TestConfigForwardAgentFirstValueWins(t *testing.T) {
+	cfg := decodeSSHConfigForTest(t, "Host *\n  ForwardAgent yes\nHost example.org\n  ForwardAgent no\n")
+	forward, err := configForwardAgent(cfg, "example.org")
+	if err != nil || !forward {
+		t.Fatalf("expected the first matching value (yes) to win (got %v, err %v)", forward, err)
+	}
+}
+
+// A bad value must not break the connection: it is ignored, with a warning,
+// like OpenSSH refusing the line.
+func TestConfigForwardAgentInvalidValue(t *testing.T) {
+	cfg := decodeSSHConfigForTest(t, "Host example.org\n  ForwardAgent maybe\n")
+	forward, err := configForwardAgent(cfg, "example.org")
+	if err != nil {
+		t.Fatalf("an invalid value should be ignored, not fail: %s", err)
+	}
+	if forward {
+		t.Fatal("an invalid ForwardAgent value must leave forwarding off")
+	}
+}
