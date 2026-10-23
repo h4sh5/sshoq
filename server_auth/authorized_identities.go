@@ -242,19 +242,32 @@ func GetAuthorizedIdentities(user *unix_util.User) ([]IdentityVerifier, error) {
 	filenames := DefaultIdentitiesFileNames(user)
 	var identities []IdentityVerifier
 	for _, filename := range filenames {
-		identitiesFile, err := os.Open(filename)
-		if err == nil {
-			newIdentities, err := ParseAuthorizedIdentitiesFile(user, identitiesFile)
-			if err != nil {
-				// TODO: logging
-				log.Error().Msgf("error when parsing authorized identities: %s", err)
-				return nil, err
-			}
+		newIdentities, err := parseIdentitiesFile(user, filename)
+		switch {
+		case err == nil:
 			identities = append(identities, newIdentities...)
-		} else if !os.IsNotExist(err) {
-			log.Error().Msgf("error could not open %s: %s", filename, err)
+		case os.IsNotExist(err):
+			// a user who has none of the two files is the normal case, not an error
+		default:
+			log.Error().Msgf("error while reading the identities of %s: %s", filename, err)
 			return nil, err
 		}
 	}
 	return identities, nil
+}
+
+// parseIdentitiesFile reads the identities of a single file, and closes it again.
+//
+// Authenticating a user opens one file per file they have, and this used to leave them all
+// open: a public key login which stays open for a day is one descriptor which will never
+// come back, and a server used by people who reconnect often ends up with "too many open
+// files" for everybody, clients included. The parsing error path leaked one too.
+func parseIdentitiesFile(user *unix_util.User, filename string) ([]IdentityVerifier, error) {
+	identitiesFile, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer identitiesFile.Close()
+
+	return ParseAuthorizedIdentitiesFile(user, identitiesFile)
 }

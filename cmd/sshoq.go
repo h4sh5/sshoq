@@ -106,8 +106,8 @@ func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog 
 
 	var qconf quic.Config
 
-	qconf.MaxIncomingUniStreams = 100000
-	qconf.MaxIncomingStreams = 100000
+	qconf.MaxIncomingUniStreams = ssh3.MaxIncomingUniStreams
+	qconf.MaxIncomingStreams = ssh3.MaxIncomingStreams
 	qconf.Allow0RTT = false
 	qconf.EnableDatagrams = true
 	qconf.KeepAlivePeriod = 1 * time.Second
@@ -966,7 +966,12 @@ func ClientMain() int {
 	useOIDC := *issuerUrl != ""
 
 	ssh3Dir := resolveConfigDir(*configDir)
-	os.MkdirAll(ssh3Dir, 0700)
+	// the directory holds known_hosts and the OIDC client secret: a directory which exists
+	// with looser permissions is tightened as well, and not merely created 0700 when missing
+	if err := util.MakePrivateDir(ssh3Dir); err != nil {
+		log.Error().Msgf("could not prepare the configuration directory %s: %s", ssh3Dir, err)
+		return 1
+	}
 
 	if len(args) == 0 {
 		log.Error().Msgf("no remote host specified, exit")
@@ -1095,6 +1100,8 @@ func ClientMain() int {
 	}
 
 	if oidcConfigFile != nil {
+		// it is read once, and does not need to stay open for the whole session
+		defer oidcConfigFile.Close()
 		data, err := io.ReadAll(oidcConfigFile)
 		if err != nil {
 			log.Error().Msgf("could not read oidc config file: %s", err.Error())
@@ -1234,6 +1241,9 @@ func ClientMain() int {
 			log.Error().Msgf("could not establish SSH3 proxy conversation: %s", err)
 			return -1
 		}
+		// registered before the one of the jumped-over connection, so it runs after it: the
+		// tunnel which goes through the proxy must be gone first
+		defer proxyClient.Close()
 
 		baseAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
 		if err != nil {
@@ -1285,6 +1295,9 @@ func ClientMain() int {
 		log.Error().Msgf("could not dial %s: %s", options.CanonicalHostFormat(), err)
 		return -1
 	}
+	// telling the server the conversation is over, instead of leaving it to find out on its
+	// own once its idle timeout expires
+	defer c.Close()
 	// The forwardings bind local (or remote) sockets: they live on a context of
 	// their own, cancelled when the session ends, so that the ports they hold are
 	// given back to the system as soon as the forwarding stops instead of being
@@ -1340,6 +1353,7 @@ func ClientMain() int {
 				log.Error().Msgf("could not connect to the destination host: %s", err)
 				return -1
 			}
+			defer dstClient.Close()
 			err = sshoqsftp.RunRemoteCopyClient(c, dstClient, *scpRecursive, scpSrc.path, scpDst.path)
 		} else {
 			// One of the two sides is the machine the client runs on: the local

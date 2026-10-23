@@ -184,6 +184,9 @@ func (s *Server) GetHTTPHandlerFunc(ctx context.Context) AuthenticatedHandlerFun
 			w.WriteHeader(200)
 
 			go func() {
+				// every byte handled here comes from the peer, and there is nobody to hand an
+				// error to: without this guard, a panic inside it ends the whole server
+				defer RecoverGoroutine("the datagram receive loop")
 				// TODO: this hijacks the datagrams for the whole quic connection, so the server
 				//		 currently does not work for several conversations in the same QUIC connection
 				for {
@@ -217,6 +220,7 @@ func (s *Server) GetHTTPHandlerFunc(ctx context.Context) AuthenticatedHandlerFun
 				}
 			}()
 			go func() {
+				defer RecoverGoroutine("the conversation handler")
 				defer newConv.Close()
 				defer conversationsManager.removeConversation(newConv)
 				defer s.removeConnection(streamCreator)

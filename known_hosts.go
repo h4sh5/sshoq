@@ -7,7 +7,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"syscall"
+
+	"github.com/h4sh5/sshoq/util"
 )
 
 type KnownHosts map[string][]*x509.Certificate
@@ -66,7 +67,10 @@ func ParseKnownHosts(filename string) (knownHosts KnownHosts, invalidLines []int
 
 func AppendKnownHost(filename string, host string, cert *x509.Certificate) error {
 	encodedCert := base64.StdEncoding.EncodeToString(cert.Raw)
-	knownHosts, err := os.OpenFile(filename, os.O_CREATE|syscall.O_APPEND|syscall.O_WRONLY, 0600)
+	// a file created here is 0600, and one which already exists and was readable by others
+	// gets tightened: the mode given to OpenFile only applies when it is created, so a
+	// known_hosts written by an older version - or by hand - stayed world-readable
+	knownHosts, err := util.OpenSecretAppendFile(filename)
 	if err != nil {
 		return err
 	}

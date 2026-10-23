@@ -12,7 +12,9 @@ KillMode=process
 Restart=on-failure
 Type=simple
 RuntimeDirectory=sshoq
-RuntimeDirectoryMode=0755
+# 0700, not 0755: whatever lands in there (a socket, a token) belongs to the server alone,
+# and there is no reason for the rest of the box to be able to list it
+RuntimeDirectoryMode=0700
 
 [Install]
 WantedBy=multi-user.target
