@@ -105,6 +105,44 @@ type runningCommand struct {
 	stdinW  io.Writer
 }
 
+// wireExitStatus turns the outcome of a process into the number this request carries.
+//
+// Go reports -1 for a process which was killed by a signal, and this request has no way of
+// saying so (that is what the exit-signal request, which ssh3 does not use yet, is for).
+// Turning -1 into a uint64 gives 18446744073709551615, which does not even fit a QUIC
+// varint: it used to panic on its way out, and the client was left without an exit status.
+// Report it the way a shell does instead, 128 plus the signal number, so that the client
+// gets a number it can act on.
+func wireExitStatus(state *os.ProcessState) uint64 {
+	code := state.ExitCode()
+	if code >= 0 {
+		return uint64(code)
+	}
+	if status, ok := state.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+		return 128 + uint64(status.Signal())
+	}
+	// nothing better to go on: 255 is what a shell reports for a command it could not run
+	return 255
+}
+
+// hangup tells the command of a session that the session is gone, the way a terminal does
+// when the connection it belongs to drops. A session with a pty gets that hangup for free
+// when the master side is closed; a command on pipes does not, and the end of stdin is no
+// use to a program which never reads it. This is what OpenSSH does to its children too.
+func (c *runningCommand) hangup() error {
+	if c.Process == nil || c.ProcessState != nil {
+		// the command never started, or is over and reaped already
+		return nil
+	}
+	// os.Process refuses to signal a process it has already waited for - it answers
+	// ErrProcessDone - so this cannot reach a pid the kernel gave to somebody else in the
+	// meantime
+	if err := c.Process.Signal(syscall.SIGHUP); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return err
+	}
+	return nil
+}
+
 type runningSession struct {
 	channelState        channelType
 	pty                 *openPty
@@ -129,7 +167,15 @@ var runningSessions = util.NewSyncMap[ssh3.Channel, *runningSession]()
 // our side, and the /dev/pts index allocated with it, until we close it. The stdin write
 // end is normally closed by Cmd.Wait(), which is deliberately not used here (it would race
 // with the output readers); whoever waits for the process must close it instead.
+//
+// The command itself is hung up first: a client which disappears would otherwise leave its
+// shell - or its loop, or its editor - running on the server for good, memory included.
 func (s *runningSession) Close() {
+	if s.runningCmd != nil {
+		if err := s.runningCmd.hangup(); err != nil {
+			log.Warn().Msgf("could not tell the command of a session that it lost its client: %s", err)
+		}
+	}
 	if s.runningCmd != nil && s.runningCmd.stdinW != nil {
 		if closer, ok := s.runningCmd.stdinW.(io.Closer); ok {
 			_ = closer.Close()
@@ -572,7 +618,7 @@ func execCmdInBackground(channel ssh3.Channel, openPty *openPty, user *unix_util
 					execExitStatus = uint64(0)
 					if err != nil {
 						if exitError, ok := err.(*exec.ExitError); ok {
-							execExitStatus = uint64(exitError.ExitCode())
+							execExitStatus = wireExitStatus(exitError.ProcessState)
 						}
 					}
 				}
@@ -1474,11 +1520,13 @@ func ServerMain() int {
 	log.Debug().Msgf("version %s", ssh3.GetCurrentSoftwareVersion())
 
 	quicConf := &quic.Config{
-		Allow0RTT:             false,
-		KeepAlivePeriod:       1 * time.Second,
-		EnableDatagrams:       true,
-		MaxIncomingStreams:    100000, // client-initiated bidi streams allowed
-		MaxIncomingUniStreams: 100000, // client-initiated uni streams allowed
+		Allow0RTT:       false,
+		KeepAlivePeriod: 1 * time.Second,
+		EnableDatagrams: true,
+		// client-initiated bidi (channel) and uni streams allowed, bounded: see
+		// ssh3.MaxIncomingStreams
+		MaxIncomingStreams:    ssh3.MaxIncomingStreams,
+		MaxIncomingUniStreams: ssh3.MaxIncomingUniStreams,
 	}
 
 	var err error

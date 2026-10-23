@@ -106,8 +106,8 @@ func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog 
 
 	var qconf quic.Config
 
-	qconf.MaxIncomingUniStreams = 100000
-	qconf.MaxIncomingStreams = 100000
+	qconf.MaxIncomingUniStreams = ssh3.MaxIncomingUniStreams
+	qconf.MaxIncomingStreams = ssh3.MaxIncomingStreams
 	qconf.Allow0RTT = false
 	qconf.EnableDatagrams = true
 	qconf.KeepAlivePeriod = 1 * time.Second

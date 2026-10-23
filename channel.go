@@ -26,6 +26,22 @@ const (
 	minMessageFieldLength = uint64(1024)
 )
 
+// MaxIncomingStreams and MaxIncomingUniStreams are the number of streams a peer may open on
+// one connection, that is the number of channels it may have open at a time in one
+// conversation (plus the few unidirectional streams HTTP/3 itself needs, ssh3 uses none).
+//
+// They are a limit the peer picks, and each channel costs the side which accepts it both
+// goroutines and buffers: 400 concurrent forwarding channels were measured at 23 MB of
+// resident memory on the server, about 58 kB per channel. The 100000 which used to be
+// advertised there - "no limit" - therefore meant that a single connection which opens
+// channels and keeps them could ask for several gigabytes. 2048 still lets a busy session
+// tunnel thousands of connections, and bounds what one conversation can make the other side
+// spend.
+const (
+	MaxIncomingStreams    = 2048
+	MaxIncomingUniStreams = 128
+)
+
 type ChannelOpenFailure struct {
 	ReasonCode uint64
 	ErrorMsg   string
