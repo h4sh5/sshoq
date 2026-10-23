@@ -151,6 +151,12 @@ func forwardAgent(parent context.Context, channel ssh3.Channel) error {
 // park the forwarding goroutine and the QUIC channel forever.
 const forwardingDrainTimeout = 30 * time.Second
 
+// maxUDPForwardPeers bounds how many distinct sources may have a channel open on one UDP
+// forwarding at the same time. The sources are the addresses the datagrams arrive from, so
+// an unbounded table is memory the network gets to ask for and keep: a peer which goes away
+// quietly is never noticed.
+const maxUDPForwardPeers = 1000
+
 func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net.TCPConn) {
 	var directions sync.WaitGroup
 	directions.Add(2)
@@ -827,6 +833,24 @@ func joinOnInterfacesV6(p *ipv6.PacketConn, group *net.UDPAddr, ifaceName string
 
 //++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
+// Close ends the conversation and the QUIC connection underneath it.
+//
+// A client used to stop reading and simply return, leaving the connection open: with no
+// CONNECTION_CLOSE reaching the server, the server kept the conversation - its session, its
+// reverse forwarding ports, its agent socket - until its idle timeout expired, so a command
+// which took one second was still occupying the server half a minute later. A script running
+// commands one after the other therefore piles up thirty times as many conversations on a
+// server as it actually uses.
+func (c *Client) Close() error {
+	if c.Conversation != nil {
+		c.Conversation.Close()
+	}
+	if c.qconn != nil {
+		return c.qconn.CloseWithError(0, "session finished")
+	}
+	return nil
+}
+
 func (c *Client) ForwardUDP(ctx context.Context, localUDPAddr *net.UDPAddr, remoteUDPAddr *net.UDPAddr, multconn *net.UDPConn) (*net.UDPAddr, *net.UDPConn, error) {
 	log.Debug().Msgf("start UDP forwarding from %s to %s", localUDPAddr, remoteUDPAddr)
 	//conn, err := net.ListenUDP("udp", localUDPAddr)
@@ -835,32 +859,49 @@ func (c *Client) ForwardUDP(ctx context.Context, localUDPAddr *net.UDPAddr, remo
 		log.Error().Msgf("could not listen on UDP socket: %s", err)
 		return nil, nil, err
 	}
-	// Close everything when ctx is canceled.
+	// Close everything when ctx is canceled: the socket this forwarding bound must be given
+	// back when it stops, like the TCP one is (see closeListenerOnContextDone), otherwise
+	// the port stays held until the process exits.
+	closeSocketOnContextDone(ctx, conn)
 
-	forwardings := make(map[string]ssh3.Channel)
+	// One channel per address the datagrams come from, bounded: a broadcast or multicast
+	// address hands the peer as many distinct sources as it likes, and a peer which stops
+	// answering is never noticed, so an unbounded table is memory the network gets to ask
+	// for and keep.
+	forwardings := util.NewPeerTable[ssh3.Channel](maxUDPForwardPeers)
 	go func() {
 		buf := make([]byte, 1500)
 		for {
 			n, addr, err := conn.ReadFromUDP(buf)
 			if err != nil {
-				log.Error().Msgf("could not read on UDP socket: %s", err)
+				log.Debug().Msgf("UDP forwarding %s stopped: %s", localUDPAddr, err)
 				return
 			}
-			channel, ok := forwardings[addr.String()]
+			channel, ok := forwardings.Get(addr.String())
 			if !ok {
-				channel, err = c.OpenUDPForwardingChannel(30000, 10, localUDPAddr, remoteUDPAddr)
+				newChannel, err := c.OpenUDPForwardingChannel(30000, 10, localUDPAddr, remoteUDPAddr)
 				if err != nil {
 					log.Error().Msgf("could open new UDP forwarding channel: %s", err)
 					return
 				}
-				forwardings[addr.String()] = channel
+				if !forwardings.Add(addr.String(), newChannel) {
+					newChannel.Close()
+					log.Warn().Msgf("more than %d peers on the UDP forwarding to %s, dropping datagram from %s",
+						maxUDPForwardPeers, remoteUDPAddr, addr)
+					continue
+				}
+				channel = newChannel
 
 				go func() {
 					defer ssh3.RecoverGoroutine("the reverse UDP forwarding channel datagram loop")
+					// the peer may come back later and get a channel again: what must not
+					// happen is a peer which went away keeping its entry forever
+					defer forwardings.Remove(addr.String())
 					for {
 						dgram, err := channel.ReceiveDatagram(ctx)
 						if err != nil {
-							log.Error().Msgf("could open receive datagram on channel: %s", err)
+							log.Debug().Msgf("no more datagrams from %s on the UDP forwarding to %s: %s",
+								addr, remoteUDPAddr, err)
 							return
 						}
 						_, err = conn.WriteToUDP(dgram, addr)
@@ -1026,6 +1067,15 @@ func closeListenerOnContextDone(ctx context.Context, listener net.Listener) {
 	go func() {
 		<-ctx.Done()
 		_ = listener.Close()
+	}()
+}
+
+// closeSocketOnContextDone does the same for a socket, which is not a net.Listener. It is
+// safe to close a socket more than once, and a blocked read returns once it is closed.
+func closeSocketOnContextDone(ctx context.Context, socket io.Closer) {
+	go func() {
+		<-ctx.Done()
+		_ = socket.Close()
 	}()
 }
 

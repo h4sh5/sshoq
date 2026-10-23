@@ -402,8 +402,12 @@ func GenerateCert(priv crypto.PrivateKey) (*x509.Certificate, error) {
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
-		DNSNames:              []string{"*", "selfsigned.ssh3"},
-		IsCA:                  true,
+		// the name the client asks for when it recognises this certificate (see cmd/sshoq.go
+		// and the TOFU flow in known_hosts.go). No wildcard: the client trusts this exact
+		// certificate once accepted, and a certificate which is its own CA and matches every
+		// hostname has no reason to be trusted for one.
+		DNSNames: []string{"selfsigned.ssh3"},
+		IsCA:     true,
 	}
 
 	return &cert, nil

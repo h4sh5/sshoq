@@ -414,9 +414,9 @@ func (c *Conversation) AddDatagram(ctx context.Context, datagram []byte) error {
 	}
 	channel, ok := c.channelsManager.getChannel(channelID)
 	if !ok {
-		dgramQueue := util.NewDatagramsQueue(10)
-		dgramQueue.Add(datagram[buf.Size()-int64(buf.Len()):])
-		c.channelsManager.addDanglingDatagramsQueue(channelID, dgramQueue)
+		// the datagram ran ahead of the channel carrying it: keep it for that channel, which
+		// picks it up when it is opened - unless the peer already has too many waiting
+		c.channelsManager.queueDanglingDatagram(channelID, datagram[buf.Size()-int64(buf.Len()):])
 		return util.ChannelNotFound{ChannelID: channelID}
 	}
 	return channel.waitAddDatagram(ctx, datagram[buf.Size()-int64(buf.Len()):])

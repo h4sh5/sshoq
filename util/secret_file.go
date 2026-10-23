@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"github.com/rs/zerolog/log"
 )
@@ -11,6 +12,45 @@ import (
 // secretFilePerm is the permission a file holding sensitive material gets: its owner
 // alone, whatever the umask of the process is.
 const secretFilePerm = os.FileMode(0600)
+
+// MakePrivateDir creates a directory which must not be readable by the rest of the box,
+// and takes back the permissions of one which already exists but is group- or
+// world-accessible - the client configuration directory holding known_hosts and the OIDC
+// client secret, for instance, which an earlier version may have created 0755.
+//
+// A directory which does not belong to the caller is left alone: pointing -config-dir at
+// somebody else's directory is not a reason to change its permissions, and only its owner
+// (or root) could answer for them anyway.
+func MakePrivateDir(path string) error {
+	if err := os.MkdirAll(path, 0700); err != nil {
+		return err
+	}
+	if path == "/" || path == "." {
+		// never tighten a directory the whole system depends on being traversable
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsDir() {
+		return fmt.Errorf("%s exists and is not a directory", path)
+	}
+	if info.Mode().Perm()&0077 != 0 {
+		if stat, ok := info.Sys().(*syscall.Stat_t); ok && stat.Uid != uint32(os.Getuid()) {
+			log.Warn().Msgf("%s holds sensitive data but belongs to another user, its permissions are left at %s",
+				path, info.Mode().Perm())
+			return nil
+		}
+		if err := os.Chmod(path, 0700); err != nil {
+			log.Warn().Msgf("%s holds sensitive data but could not be made private: %s", path, err)
+			return nil
+		}
+		log.Warn().Msgf("%s holds sensitive data and was accessible to group or others (%s): its permissions have "+
+			"just been tightened to 0700", path, info.Mode().Perm())
+	}
+	return nil
+}
 
 // OpenSecretFile opens a file whose content must stay private to its owner - the server
 // log (usernames, peer addresses, conversation IDs) or the TLS key log (the master

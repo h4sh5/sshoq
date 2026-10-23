@@ -5,6 +5,7 @@ import (
 
 	"github.com/h4sh5/sshoq/util"
 	"github.com/quic-go/quic-go/http3"
+	"github.com/rs/zerolog/log"
 )
 
 type ControlStreamID = uint64
@@ -58,18 +59,39 @@ func (m *channelsManager) addChannel(channel Channel) {
 	m.channels[util.ChannelID(channel.ChannelID())] = channel
 }
 
-func (m *channelsManager) addDanglingDatagramsQueue(id util.ChannelID, queue *util.DatagramsQueue) {
+// maxDanglingDatagramQueues bounds how many channels may have datagrams waiting for them
+// in one conversation. A datagram may legitimately arrive before the channel it carries has
+// been opened - which is why they are kept - but the channel ID inside it is picked by the
+// peer, so without a bound a peer spraying datagrams with made-up IDs would make this
+// allocate one queue per ID, and never give any of it back.
+const maxDanglingDatagramQueues = 100
+
+// danglingDatagramQueueLen is how many datagrams are kept for a single unknown channel.
+const danglingDatagramQueueLen = 10
+
+// queueDanglingDatagram remembers a datagram received for a channel which does not exist
+// yet, so that it is handed over to that channel when it shows up.
+func (m *channelsManager) queueDanglingDatagram(id util.ChannelID, datagram []byte) {
 	m.lock.Lock()
 	defer m.lock.Unlock()
 	// let's first check if a channel has recently been added
 	if channel, ok := m.channels[id]; ok {
-		dgram := queue.Next()
-		for ; dgram != nil; dgram = queue.Next() {
-			channel.addDatagram(dgram)
+		channel.addDatagram(datagram)
+		return
+	}
+	queue, ok := m.danglingDgramQueues[id]
+	if !ok {
+		if len(m.danglingDgramQueues) >= maxDanglingDatagramQueues {
+			log.Warn().Msgf("dropping datagram for unknown channel %d: %d channels already have datagrams waiting",
+				uint64(id), maxDanglingDatagramQueues)
+			return
 		}
-	} else {
+		queue = util.NewDatagramsQueue(danglingDatagramQueueLen)
 		m.danglingDgramQueues[id] = queue
 	}
+	// a queue which is already full loses the datagram, as it would with a real channel
+	// whose reader fell behind: it must never block the one reading the socket
+	queue.Add(datagram)
 }
 
 func (m *channelsManager) getChannel(id util.ChannelID) (Channel, bool) {

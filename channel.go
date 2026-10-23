@@ -495,18 +495,26 @@ func (c *channelImpl) nextMessage() (ssh3.Message, error) {
 // The returned  message will neither be ChannelOpenConfirmationMessage nor ChannelOpenFailureMessage
 // as this function handles it internally
 func (c *channelImpl) NextMessage() (ssh3.Message, error) {
-	genericMessage, err := c.nextMessage()
-	if err != nil {
-		return nil, err
-	}
+	// a confirmation is handled here and the reading goes on, in a loop rather than by
+	// calling itself: the number of confirmations in a row is what the peer chooses, and
+	// recursion would let it decide how deep this stack grows
+	var genericMessage ssh3.Message
+	for {
+		message, err := c.nextMessage()
+		if err != nil {
+			return nil, err
+		}
 
-	switch message := genericMessage.(type) {
-	case *ssh3.ChannelOpenConfirmationMessage:
-		c.confirmReceived = true
-		// let's read the next message
-		return c.NextMessage()
-	case *ssh3.ChannelOpenFailureMessage:
-		return nil, ChannelOpenFailure{ReasonCode: message.ReasonCode, ErrorMsg: message.ErrorMessageUTF8}
+		switch m := message.(type) {
+		case *ssh3.ChannelOpenConfirmationMessage:
+			c.confirmReceived = true
+			// let's read the next message
+			continue
+		case *ssh3.ChannelOpenFailureMessage:
+			return nil, ChannelOpenFailure{ReasonCode: m.ReasonCode, ErrorMsg: m.ErrorMessageUTF8}
+		}
+		genericMessage = message
+		break
 	}
 
 	// TODO: might be problematic if a peer already sends data along the channel opening
@@ -659,8 +667,21 @@ func (c *channelImpl) CancelRead() {
 	c.recv.CancelRead(42)
 }
 
+// Close finishes the channel: it closes the stream carrying everything sent on it, and it
+// releases the reference the conversation holds on the channel.
+//
+// The second half is what keeps a long conversation from growing without end: the
+// conversation keeps a table of its channels, to route datagrams to them by ID, and nothing
+// else ever takes a finished channel out of it. Each connection of a port forwarding opens
+// one channel, so without this every connection of a "-L" session left its channel, its
+// datagram queue and its addresses behind until the whole conversation ended.
 func (c *channelImpl) Close() {
 	c.send.Close()
+	// a channel which never made it into the table (a rejected opening, a mock) simply has
+	// nothing to remove, and deleting an absent key is harmless anyway
+	if c.channelCloseListener != nil {
+		c.onChannelClose(c)
+	}
 }
 
 func (c *channelImpl) MaxPacketSize() uint64 {

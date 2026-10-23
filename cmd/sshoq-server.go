@@ -114,7 +114,36 @@ type runningSession struct {
 }
 
 // var runningSessions = make(map[ssh3.Channel]*runningSession)
+//
+// The map is keyed on the channel, so an entry keeps the channel - and with it the QUIC
+// streams and the datagram queue - alive. It is therefore deleted, and the session
+// resources released, as soon as the goroutine reading that channel returns: a session
+// which stayed in here would hold its terminal and its pipes for the lifetime of the
+// server, and a few thousand logins would end it with "too many open files" for everybody.
 var runningSessions = util.NewSyncMap[ssh3.Channel, *runningSession]()
+
+// Close releases everything the session owns which is not closed by the process itself:
+// the two ends of the terminal it asked for, and the write end of the command's stdin.
+//
+// The pty pair is worth spelling out: a shell which exited leaves the master side open on
+// our side, and the /dev/pts index allocated with it, until we close it. The stdin write
+// end is normally closed by Cmd.Wait(), which is deliberately not used here (it would race
+// with the output readers); whoever waits for the process must close it instead.
+func (s *runningSession) Close() {
+	if s.runningCmd != nil && s.runningCmd.stdinW != nil {
+		if closer, ok := s.runningCmd.stdinW.(io.Closer); ok {
+			_ = closer.Close()
+		}
+	}
+	if s.pty != nil {
+		if s.pty.pty != nil {
+			_ = s.pty.pty.Close()
+		}
+		if s.pty.tty != nil {
+			_ = s.pty.tty.Close()
+		}
+	}
+}
 
 func setWinsize(f *os.File, charWidth, charHeight, pixWidth, pixHeight uint64) {
 	syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(syscall.TIOCSWINSZ),
@@ -424,6 +453,7 @@ func execCmdInBackground(channel ssh3.Channel, openPty *openPty, user *unix_util
 	}
 
 	go func() {
+		defer ssh3.RecoverGoroutine("the command output forwarder")
 
 		type readResult struct {
 			data []byte
@@ -436,6 +466,7 @@ func execCmdInBackground(channel ssh3.Channel, openPty *openPty, user *unix_util
 		execExitStatus := uint64(0)
 
 		readStdout := func() {
+			defer ssh3.RecoverGoroutine("the command stdout reader")
 			defer close(stdoutChan)
 			defer func() {
 				// the pipe read ends are no longer closed by Wait() (see below), so we
@@ -458,6 +489,7 @@ func execCmdInBackground(channel ssh3.Channel, openPty *openPty, user *unix_util
 			}
 		}
 		readStderr := func() {
+			defer ssh3.RecoverGoroutine("the command stderr reader")
 			defer close(stderrChan)
 			defer func() {
 				if closer, ok := runningCommand.stderrR.(io.Closer); ok {
@@ -481,6 +513,7 @@ func execCmdInBackground(channel ssh3.Channel, openPty *openPty, user *unix_util
 		go readStdout()
 		go readStderr()
 		go func() {
+			defer ssh3.RecoverGoroutine("the command waiter")
 			// Use Process.Wait() rather than Cmd.Wait(): the latter closes the stdout
 			// and stderr pipe read ends after the process exits, racing with the
 			// readStdout/readStderr goroutines above and potentially discarding the
@@ -545,6 +578,14 @@ func execCmdInBackground(channel ssh3.Channel, openPty *openPty, user *unix_util
 				}
 			}
 			if stdoutChan == nil && stderrChan == nil && execResultChan == nil {
+				// The process is gone and everything it printed has been forwarded. Its
+				// stdin, which Cmd.Wait() would have closed for us, is closed here: left
+				// open, one pipe end leaks per command executed on the server, forever.
+				if runningCommand.stdinW != nil {
+					if closer, ok := runningCommand.stdinW.(io.Closer); ok {
+						_ = closer.Close()
+					}
+				}
 				err := channel.SendRequest(&ssh3Messages.ChannelRequestMessage{
 					WantReply:      false,
 					ChannelRequest: &ssh3Messages.ExitStatusRequest{ExitStatus: execExitStatus},
@@ -640,18 +681,9 @@ func newCommand(user *unix_util.User, channel ssh3.Channel, loginShell bool, com
 		stdinW = session.pty.pty
 		cmd, _, _, _, err = user.CreateCommand(env, stdoutW, stderrW, stdinR, loginShell, command, args...)
 	} else {
-		stdoutR, stdoutW, err = os.Pipe()
-		if err != nil {
-			return err
-		}
-		stderrR, stderrW, err = os.Pipe()
-		if err != nil {
-			return err
-		}
-		stdinR, stdinW, err = os.Pipe()
-		if err != nil {
-			return err
-		}
+		// CreateCommandPipeOutput creates the pipes of the command it returns, and returns
+		// them: they must not be created here as well, or the three pairs created are six
+		// file descriptors which belong to nothing and stay open forever.
 		cmd, stdoutR, stderrR, stdinW, err = user.CreateCommandPipeOutput(env, loginShell, command, args...)
 	}
 
@@ -726,6 +758,12 @@ func newWindowChangeReq(user *unix_util.User, channel ssh3.Channel, request ssh3
 		NCols:       uint16(request.CharWidth),
 		PixelWidth:  uint16(request.PixelWidth),
 		PixelHeight: uint16(request.PixelHeight),
+	}
+	// the terminal is what this request resizes: without one there is nothing to resize.
+	// There is no reason to die over it - a client may send window-change before pty-req,
+	// or without pty-req at all.
+	if session.pty == nil || session.pty.pty == nil {
+		return fmt.Errorf("cannot change the window size of a session without a pty")
 	}
 	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, session.pty.pty.Fd(), uintptr(syscall.TIOCSWINSZ), uintptr(unsafe.Pointer(&ws)))
 	if errno != 0 {
@@ -813,24 +851,46 @@ func handleTCPForwardingChannel(ctx context.Context, user *unix_util.User, conv 
 }
 
 // Copied from client.go ForwardTCP()
-func handleTCPReverseForwardingChannel(ctx context.Context, user *unix_util.User, conv *ssh3.Conversation, channel *ssh3.TCPReverseForwardingChannelImpl) error {
-	conn, err := net.ListenTCP("tcp", channel.LocalAddr)
-	if err != nil {
-		log.Error().Msgf("could listen on TCP socket: %s", err)
-		return nil
+// closeWhenDone closes closer once the conversation is over. For a socket it is also how
+// the loop blocked in Accept/ReadFromUDP gets released, so that a forwarding does not
+// outlive the client which asked for it - and, in the case of a listening socket, does not
+// keep the port bound so that it can never be forwarded again.
+func closeWhenDone(ctx context.Context, closer io.Closer, what string) {
+	<-ctx.Done()
+	if err := closer.Close(); err != nil {
+		log.Debug().Msgf("could not close the %s: %s", what, err)
 	}
+}
+
+func handleTCPReverseForwardingChannel(ctx context.Context, user *unix_util.User, conv *ssh3.Conversation, channel *ssh3.TCPReverseForwardingChannelImpl) error {
+	listener, err := net.ListenTCP("tcp", channel.LocalAddr)
+	if err != nil {
+		log.Error().Msgf("could not listen on %s for the reverse TCP forwarding: %s", channel.LocalAddr, err)
+		// The channel has been confirmed before this is called, so closing it is the only
+		// way to tell the client that the port it asked for is not forwarded at all.
+		// Returning nil, as this used to, leaves the client - and the user - believing it is.
+		channel.Close()
+		return err
+	}
+	go closeWhenDone(ctx, listener, fmt.Sprintf("reverse TCP forwarding socket on %s", channel.LocalAddr))
 
 	go func() {
+		defer ssh3.RecoverGoroutine("the reverse TCP forwarding accept loop")
+		defer listener.Close()
 		for {
-			conn, err := conn.AcceptTCP()
+			conn, err := listener.AcceptTCP()
 			if err != nil {
-				log.Error().Msgf("could read on UDP socket: %s", err)
+				// the usual way out: the conversation ended and closed the listener
+				log.Debug().Msgf("no more connections on the reverse TCP forwarding: %s", err)
 				return
 			}
 
 			forwardingChannel, err := conv.OpenTCPReverseForwardingChannel(30000, 10, channel.RemoteAddr)
 			if err != nil {
 				log.Error().Msgf("could not open new TCP reverse forwarding channel: %s", err)
+				// nobody is going to carry this connection: hanging up is what tells the peer
+				// which connected to the forwarded port that there is nothing behind it
+				conn.Close()
 				return
 			}
 			forwardReverseTCPInBackground(ctx, forwardingChannel, conn)
@@ -1028,33 +1088,55 @@ func disableMulticastAll(uc *net.UDPConn) error {
 	return serr
 }
 
-// Copied from client.go ForwardUDP()
+// maxReverseUDPFlows bounds, for one reverse UDP forwarding, how many peers may have a
+// channel open at the same time. The peers are the addresses the datagrams come from, so
+// without a bound anything able to throw a datagram at the forwarded port - a broadcast or
+// multicast address included - would get a QUIC channel, a goroutine and a table entry
+// each, and keep them, since a peer which stops answering is never noticed.
+const maxReverseUDPFlows = 1000
+
 func handleUDPReverseForwardingChannel(ctx context.Context, user *unix_util.User, conv *ssh3.Conversation, ch *ssh3.UDPReverseForwardingChannelImpl) error {
 	conn, err := ListenUDPWithAutoMulticast(ch.LocalAddr, "")
 	//conn, err := net.ListenUDP("udp", ch.LocalAddr)
 	if err != nil {
-		log.Error().Msgf("could not listen on UDP socket: %s", err)
-		return nil
+		log.Error().Msgf("could not listen on %s for the reverse UDP forwarding: %s", ch.LocalAddr, err)
+		// see handleTCPReverseForwardingChannel: the confirmed channel is the only handle on
+		// the failure, and closing it is how the client learns the forward is not up
+		ch.Close()
+		return err
 	}
-	forwardings := make(map[string]ssh3.Channel)
+	go closeWhenDone(ctx, conn, fmt.Sprintf("reverse UDP forwarding socket on %s", ch.LocalAddr))
+
+	flows := util.NewPeerTable[ssh3.Channel](maxReverseUDPFlows)
 	go func() {
+		defer ssh3.RecoverGoroutine("the reverse UDP forwarding read loop")
 		buf := make([]byte, 1500)
 		for {
 			n, addr, err := conn.ReadFromUDP(buf)
 			if err != nil {
-				log.Error().Msgf("could not read on UDP socket: %s", err)
+				// the usual way out: the conversation ended and closed the socket
+				log.Debug().Msgf("no more datagrams on the reverse UDP forwarding: %s", err)
 				return
 			}
-			channel, ok := forwardings[addr.String()]
+			channel, ok := flows.Get(addr.String())
 			if !ok {
-				channel, err = conv.OpenUDPReverseForwardingChannel(30000, 10, ch.LocalAddr, ch.RemoteAddr)
+				newChannel, err := conv.OpenUDPReverseForwardingChannel(30000, 10, ch.LocalAddr, ch.RemoteAddr)
 				if err != nil {
 					log.Error().Msgf("could not open new UDP reverse forwarding channel: %s", err)
 					return
 				}
-				forwardings[addr.String()] = channel
+				if !flows.Add(addr.String(), newChannel) {
+					newChannel.Close()
+					log.Warn().Msgf("more than %d peers on the reverse UDP forwarding on %s, dropping datagram from %s",
+						maxReverseUDPFlows, ch.LocalAddr, addr)
+					continue
+				}
+				channel = newChannel
 				go func() {
 					defer ssh3.RecoverGoroutine("the reverse UDP forwarding channel datagram loop")
+					// the peer may come back later and get a channel again: what must not
+					// happen is a peer which went away keeping its entry forever
+					defer flows.Remove(addr.String())
 					for {
 						dgram, err := channel.ReceiveDatagram(ctx)
 						if err != nil {
@@ -1117,6 +1199,7 @@ func handleAuthAgentSocketConn(conn net.Conn, conversation *ssh3.Conversation) {
 		return
 	}
 	go func() {
+		defer ssh3.RecoverGoroutine("the SSH agent socket to client pipe")
 		defer channel.Close()
 		buf := make([]byte, channel.MaxPacketSize())
 		for {
@@ -1152,9 +1235,13 @@ func handleAuthAgentSocketConn(conn net.Conn, conversation *ssh3.Conversation) {
 	}
 }
 
-func listenAndAcceptAuthSockets(cancel context.CancelCauseFunc, conversation *ssh3.Conversation, listener net.Listener, maxSSHPacketSize uint64) {
+func listenAndAcceptAuthSockets(cancel context.CancelCauseFunc, conversation *ssh3.Conversation, listener net.Listener, maxSSHPacketSize uint64, socketDir string) {
 	defer cancel(nil)
 	defer listener.Close()
+	// the directory of the agent socket was created for this conversation only, and nobody
+	// but it can use it: it must not stay behind, or every agent-forwarded session leaves an
+	// orphan directory in /tmp
+	defer os.RemoveAll(socketDir)
 	for {
 		log.Debug().Msg("waiting for new agent connections to forward")
 		conn, err := listener.Accept()
@@ -1169,32 +1256,50 @@ func listenAndAcceptAuthSockets(cancel context.CancelCauseFunc, conversation *ss
 }
 
 func openAgentSocketAndForwardAgent(parent context.Context, conv *ssh3.Conversation, user *unix_util.User) (string, error) {
-	ctx, cancel := context.WithCancelCause(parent)
 	sockPath, err := unix_util.NewUnixSocketPath()
 	if err != nil {
 		return "", err
 	}
 
+	// whatever goes wrong below, the directory created for the socket must not stay behind:
+	// every session asking for agent forwarding would otherwise leave one in /tmp forever
+	sockDir := path.Dir(sockPath)
+	defer func() {
+		if err != nil {
+			_ = os.RemoveAll(sockDir)
+		}
+	}()
+
 	var listener net.ListenConfig
-	agentSock, err := listener.Listen(ctx, "unix", sockPath)
+	agentSock, err := listener.Listen(parent, "unix", sockPath)
 	if err != nil {
 		log.Error().Msgf("could not listen on agent socket: %s", err.Error())
 		return "", err
 	}
+	// Giving a context to Listen does not make the socket close when that context is done, it
+	// only bounds the call itself. Without closing it by hand the accept loop below never
+	// notices the conversation ended: the goroutine, the socket file and the directory holding
+	// it stayed behind for the whole life of the server, and anything able to reach the stale
+	// socket was handed a conversation which no longer existed.
+	go closeWhenDone(parent, agentSock, "the SSH agent socket")
 
-	sockDir := path.Dir(sockPath)
 	err = os.Chown(sockDir, int(user.Uid), int(user.Gid))
 	if err != nil {
 		log.Error().Msgf("could chown the directory of the listening socket at %s: %s", sockPath, err.Error())
+		agentSock.Close()
 		return "", err
 	}
 	err = os.Chown(sockPath, int(user.Uid), int(user.Gid))
 	if err != nil {
 		log.Error().Msgf("could chown the listening socket at %s: %s", sockPath, err.Error())
+		agentSock.Close()
 		return "", err
 	}
 
-	go listenAndAcceptAuthSockets(cancel, conv, agentSock, 30000)
+	// the context is only worth creating once the socket exists: it is the accept loop's to
+	// cancel, and an error path returning before that would leak it
+	_, cancel := context.WithCancelCause(parent)
+	go listenAndAcceptAuthSockets(cancel, conv, agentSock, 30000, sockDir)
 	return sockPath, nil
 }
 
@@ -1440,16 +1545,22 @@ func ServerMain() int {
 					go ssh3sftp.ServeChannel(conv.Context(), authenticatedUser, channel)
 					continue
 				}
-				runningSessions.Insert(channel, &runningSession{
+				session := &runningSession{
 					channelState: LARVAL,
 					pty:          nil,
 					runningCmd:   nil,
-				})
+				}
+				runningSessions.Insert(channel, session)
 				go func() {
 					defer ssh3.RecoverGoroutine("the session channel read loop")
 					// handle the main sessionChannel, once it ends, the whole conversation ends
 					defer channel.Close()
 					defer conv.Close()
+					// Nothing else ever takes the session, nor the terminal and the pipes it
+					// holds, back: this is where they are released, and where the channel stops
+					// being referenced by the map of running sessions.
+					defer runningSessions.Delete(channel)
+					defer session.Close()
 					for {
 						genericMessage, err := channel.NextMessage()
 						if errors.Is(err, net.ErrClosed) {

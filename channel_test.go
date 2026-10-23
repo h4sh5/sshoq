@@ -158,3 +158,64 @@ func TestChannelWriteDataReturnsInputLength(t *testing.T) {
 }
 
 var _ io.Reader = (*stubReceiveStream)(nil)
+
+// The conversation routes datagrams to its channels through the channels manager, and a
+// finished channel must leave that table: the channels of a long-lived conversation - one
+// per connection of a port forwarding, for instance - would otherwise accumulate, together
+// with their datagram queues, until the whole conversation ended.
+func TestChannelCloseUnregistersFromManager(t *testing.T) {
+	manager := newChannelsManager()
+	send := &stubWriteCloser{}
+	channel := NewChannel(1, ConversationID{}, 42, "session", 30000, &stubReceiveStream{Reader: bytes.NewReader(nil)},
+		send, nil, manager, false, true, true, 10, nil)
+	manager.addChannel(channel)
+
+	if _, ok := manager.getChannel(util.ChannelID(42)); !ok {
+		t.Fatal("expected the channel to be known to the manager once added")
+	}
+
+	channel.Close()
+
+	if _, ok := manager.getChannel(util.ChannelID(42)); ok {
+		t.Fatal("expected a closed channel to be gone from the manager")
+	}
+	// closing twice, as several owners of a channel may do, must stay harmless
+	channel.Close()
+}
+
+// Datagrams may run ahead of the channel carrying them, which is why they are kept for it;
+// but the channel ID they name comes from the peer, so the number of channels which may
+// have datagrams waiting must stay bounded.
+func TestDanglingDatagramQueuesAreBounded(t *testing.T) {
+	manager := newChannelsManager()
+
+	for i := 0; i < maxDanglingDatagramQueues*2; i++ {
+		manager.queueDanglingDatagram(util.ChannelID(i), []byte("datagram"))
+	}
+	if len(manager.danglingDgramQueues) != maxDanglingDatagramQueues {
+		t.Fatalf("expected the queue of dangling datagrams to stop at %d, got %d",
+			maxDanglingDatagramQueues, len(manager.danglingDgramQueues))
+	}
+
+	// an address which already has datagrams waiting keeps being served: what is refused is
+	// the opening of new entries, not the growth of the ones already granted
+	manager.queueDanglingDatagram(util.ChannelID(0), []byte("one more"))
+	if len(manager.danglingDgramQueues) != maxDanglingDatagramQueues {
+		t.Fatalf("queueing for a known channel grew the table: %d", len(manager.danglingDgramQueues))
+	}
+
+	// and once a channel shows up, its datagrams follow it instead of being queued
+	// an ID the loop above could not have queued anything for, being beyond the bound
+	send := &stubWriteCloser{}
+	manager = newChannelsManager()
+	channel := NewChannel(1, ConversationID{}, 500, "session", 30000, &stubReceiveStream{Reader: bytes.NewReader(nil)},
+		send, nil, manager, false, true, true, 10, nil)
+	manager.queueDanglingDatagram(util.ChannelID(500), []byte("early datagram"))
+	manager.addChannel(channel)
+	if _, ok := manager.danglingDgramQueues[util.ChannelID(500)]; ok {
+		t.Fatal("a channel which exists must not leave its datagrams dangling")
+	}
+	if dgram := channel.(*channelImpl).datagramsQueue.Next(); string(dgram) != "early datagram" {
+		t.Fatalf("the waiting datagram was not handed to the channel: %q", dgram)
+	}
+}

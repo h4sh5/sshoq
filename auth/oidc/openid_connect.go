@@ -9,7 +9,9 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -33,6 +35,11 @@ const (
 	// maxJWKSSize is how much is read from a JWKS endpoint: a signing key set is small by
 	// construction, so a larger body is not a key set and must not be buffered.
 	maxJWKSSize = 1 << 20
+	// oidcLoginTimeout bounds the whole browser exchange of a client logging in with OIDC.
+	// Typing a password in a browser takes longer than any request to an issuer, but a
+	// login which never comes back - the tab was closed, the exchange failed - must not
+	// park the client forever, with a QUIC connection and a listening port held for it.
+	oidcLoginTimeout = 5 * time.Minute
 )
 
 // issuerHTTPClient returns the client used to talk to an issuer.
@@ -97,6 +104,27 @@ type OIDCConfig struct {
 // can bind the ID token it hands back to that single conversation (as the "jti" or
 // "ssh3_conv_id" claim). A token bound to a conversation cannot be replayed against
 // another one, which is what the server requires (see server_auth.OpenIDConnectIdentity).
+// oauthState returns the value of the "state" authorization parameter: a random value the
+// client remembers and expects back untouched in the redirect, so that a request towards
+// the redirect URL which does not come from the authorization flow it started - another
+// site guessing one, or a process on this machine poking at the port - is not accepted as
+// the user's login.
+func oauthState() (string, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("could not generate the OpenID Connect state parameter: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+// tokenResult is what the temporary redirect handler hands back to Connect. Reporting the
+// failure as well as the token matters: a handler which only ever sends a token leaves the
+// client waiting for one that is never coming.
+type tokenResult struct {
+	rawIDToken string
+	err        error
+}
+
 func Connect(ctx context.Context, oidcConfig *OIDCConfig, issuerURL string, conversationID string, doPKCE bool) (rawIDTokey string, err error) {
 	// the issuer of the token used to authenticate must be reached over HTTPS, and its
 	// discovery document must not be able to block the connection forever
@@ -111,9 +139,12 @@ func Connect(ctx context.Context, oidcConfig *OIDCConfig, issuerURL string, conv
 
 	providerEndpoint := provider.Endpoint()
 
-	listener, err := net.Listen("tcp", ":0")
+	// The redirect endpoint is loopback-only: the authorization code it accepts is the
+	// credential, and a listener on every interface hands it to anybody who can reach the
+	// machine - while the redirect URL sent to the browser says "localhost" anyway.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		panic(err)
+		return "", fmt.Errorf("could not listen on a local port for the OpenID Connect redirect: %w", err)
 	}
 
 	path := "/ssh"
@@ -142,11 +173,27 @@ func Connect(ctx context.Context, oidcConfig *OIDCConfig, issuerURL string, conv
 
 	verifier := oauth2.GenerateVerifier()
 
-	tokenChannel := make(chan string)
+	state, err := oauthState()
+	if err != nil {
+		return "", err
+	}
+
+	// buffered by one: the handler which loses the race - the client gave up, or the
+	// browser hit the redirect twice - must not be left blocked in a send nobody reads
+	tokenChannel := make(chan tokenResult, 1)
 	mux := http.NewServeMux()
-	mux.Handle(path, getOAuth2Callback(ctx, provider, oidcConfig.ClientID, &oauthConfig, tokenChannel, verifier, doPKCE))
+	mux.Handle(path, getOAuth2Callback(ctx, provider, oidcConfig.ClientID, &oauthConfig, state, tokenChannel, verifier, doPKCE))
 	server := http.Server{Handler: mux}
-	go server.Serve(listener)
+	go func() {
+		// Serve returns once Connect closes the server below
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Debug().Msgf("the temporary OpenID Connect redirect server stopped: %s", err)
+		}
+	}()
+	// the temporary listener and server belong to this login only: they are gone when it
+	// is over, whoever won - a token, an error, or no answer at all
+	defer server.Close()
+
 	var cmd string
 	var args []string
 	switch runtime.GOOS {
@@ -168,33 +215,64 @@ func Connect(ctx context.Context, oidcConfig *OIDCConfig, issuerURL string, conv
 		options = append(options, oauth2.SetAuthURLParam("ssh3_conversation_id", conversationID))
 	}
 
-	authCodeURL := oauthConfig.AuthCodeURL("state", options...)
+	authCodeURL := oauthConfig.AuthCodeURL(state, options...)
 
 	args = append(args, authCodeURL)
 	log.Debug().Msgf("spawning browser at %s\n", authCodeURL)
 	command := exec.Command(cmd, args...)
 	err = command.Start()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("could not open the browser towards the OpenID Connect provider (%s): %w", cmd, err)
 	}
 
-	rawIDToken := <-tokenChannel
-	// the ID token is a bearer credential: it must never end up in a log file, not even
-	// at debug level, since anybody able to read the log could connect as that user
-	log.Debug().Msgf("got ID token of %d bytes", len(rawIDToken))
-	server.Close()
-	// todo: trigger a browser on localhost on the listeningPort and fetch the token, and then close the http server
-	return rawIDToken, nil
+	select {
+	case result := <-tokenChannel:
+		if result.err != nil {
+			return "", result.err
+		}
+		// the ID token is a bearer credential: it must never end up in a log file, not even
+		// at debug level, since anybody able to read the log could connect as that user
+		log.Debug().Msgf("got ID token of %d bytes", len(result.rawIDToken))
+		return result.rawIDToken, nil
+	case <-ctx.Done():
+		return "", fmt.Errorf("OpenID Connect login canceled: %w", ctx.Err())
+	case <-time.After(oidcLoginTimeout):
+		return "", fmt.Errorf("no OpenID Connect login received within %s", oidcLoginTimeout)
+	}
 }
 
 func getOAuth2Callback(ctx context.Context, provider *oidc.Provider, clientID string, oauth2Config *oauth2.Config,
-	tokenChannel chan string, challengeVerifier string, doPKCE bool) http.HandlerFunc {
+	state string, tokenChannel chan tokenResult, challengeVerifier string, doPKCE bool) http.HandlerFunc {
 
 	verifier := provider.Verifier(&oidc.Config{ClientID: clientID})
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		defer w.(http.Flusher).Flush()
-		// Verify state and errors.
+
+		// report tells Connect how the exchange went, exactly once and without ever
+		// blocking: Connect has either already left, or is waiting for the first result
+		report := func(result tokenResult) {
+			select {
+			case tokenChannel <- result:
+			default:
+			}
+		}
+		reject := func(reason string) {
+			log.Error().Msgf("OpenID Connect login failed: %s", reason)
+			http.Error(w, "Login failed", http.StatusBadRequest)
+			report(tokenResult{err: fmt.Errorf("OpenID Connect login failed: %s", reason)})
+		}
+
+		// The state must be the one asked for: it is what tells this redirect apart from a
+		// request somebody else sends to this port, carrying a code of their own.
+		if got := r.URL.Query().Get("state"); got != state {
+			reject("the redirect carried an unexpected state parameter")
+			return
+		}
+		if providerError := r.URL.Query().Get("error"); providerError != "" {
+			reject(fmt.Sprintf("the provider reported %s", providerError))
+			return
+		}
 
 		options := []oauth2.AuthCodeOption{}
 		if doPKCE {
@@ -208,21 +286,21 @@ func getOAuth2Callback(ctx context.Context, provider *oidc.Provider, clientID st
 
 		oauth2Token, err := oauth2Config.Exchange(exchangeCtx, r.URL.Query().Get("code"), options...)
 		if err != nil {
-			log.Error().Msgf("error when parsing oauth token: %s", err.Error())
+			reject(fmt.Sprintf("could not exchange the authorization code: %s", err))
 			return
 		}
 
 		// Extract the ID Token from OAuth2 token.
 		rawIDToken, ok := oauth2Token.Extra("id_token").(string)
 		if !ok {
-			log.Error().Msgf("missing id token in the retrieved oauth2 token")
+			reject("the provider returned no ID token")
 			return
 		}
 
 		// Parse and verify ID Token payload.
 		idToken, err := verifier.Verify(ctx, rawIDToken)
 		if err != nil {
-			log.Error().Msgf("error when verifying oauth token: %s", err.Error())
+			reject(fmt.Sprintf("the ID token could not be verified: %s", err))
 			return
 		}
 
@@ -232,12 +310,12 @@ func getOAuth2Callback(ctx context.Context, provider *oidc.Provider, clientID st
 			Verified bool   `json:"email_verified"`
 		}
 		if err := idToken.Claims(&claims); err != nil {
-			log.Error().Msgf("error when parsing the oauth token claims: %s", err.Error())
+			reject(fmt.Sprintf("the ID token claims could not be parsed: %s", err))
 			return
 		}
 
 		w.Write([]byte("you can now close this tab")) // status 200 is implicit
-		tokenChannel <- rawIDToken
+		report(tokenResult{rawIDToken: rawIDToken})
 	}
 }
 
