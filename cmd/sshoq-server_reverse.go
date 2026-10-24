@@ -233,6 +233,18 @@ const reverseTunnelRetryDelay = 5 * time.Second
 // serves the channels it opens for the connecting users until the conversation
 // dies - then it tries again, so that a server behind a NAT recovers by itself
 // when the public relay comes back.
+//
+// The connection is kept alive and its death is detected by the QUIC layer:
+// setupQUICConnection sets a 1-second KeepAlivePeriod, which both refreshes
+// NAT or firewall bindings so an idle tunnel is not silently dropped, and
+// makes a peer which vanished without a CONNECTION_CLOSE be declared dead when
+// the idle timeout expires, a few tens of seconds at most. A dead connection
+// makes AcceptChannel fail, ServeReverseForwarding returns, and this loop
+// starts a brand new connection - including a fresh reverse-forwarding
+// request, since the port on the remote side died with the old conversation -
+// after reverseTunnelRetryDelay. The loop never gives up: a relay which is
+// down for hours, or a key installed hours later with -rpub on the other
+// side, is recovered without restarting sshoq-server.
 func runReverseTunnel(cfg *reverseTunnelConfig, identityFiles []string, insecure bool) {
 	ctx := context.Background()
 	for {
@@ -314,6 +326,11 @@ func reverseTunnelOnce(ctx context.Context, cfg *reverseTunnelConfig, identityFi
 	roundTripper := &http3.RoundTripper{EnableDatagrams: true}
 	c, err := client.Dial(ctx, clientConfig, qconn, roundTripper, nil)
 	if err != nil {
+		// no c.Close() to do it: the conversation never came up, so close the
+		// transport by hand. A reconnect loop which retried every few seconds
+		// against a server requiring an unknown key would leak one UDP socket and
+		// one QUIC connection per attempt until the file descriptors ran out.
+		qconn.CloseWithError(0, "could not authenticate to the remote sshoq server")
 		return fmt.Errorf("could not authenticate to %s: %s", cfg.url, err)
 	}
 	defer c.Close()

@@ -1235,10 +1235,29 @@ func (c *Client) ReverseUDP(ctx context.Context, localUDPAddr *net.UDPAddr, remo
 // forwarding part of RunSession alone, for callers which never open a shell -
 // sshoq-server -R for instance - and blocks until the conversation is gone.
 func (c *Client) ServeReverseForwarding(ctx context.Context) error {
+	// AcceptChannel only watches the context it is given, and the reconnection
+	// loop of sshoq-server passes a background one: without this bridge, the
+	// accept would keep blocking long after the QUIC connection died - a relay
+	// killed without a goodbye, a network which blackholes the tunnel - and the
+	// reconnection would never start. The conversation context is done as soon
+	// as the connection is gone (it derives from qconn.Context()), and dying
+	// conversations must interrupt this loop, which they do through cancel().
+	acceptCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	conversationDone := c.Context().Done()
+	go func() {
+		select {
+		case <-conversationDone:
+			cancel()
+		case <-acceptCtx.Done():
+		}
+	}()
+
 	for {
-		channel, err := c.AcceptChannel(ctx)
+		channel, err := c.AcceptChannel(acceptCtx)
 		if err != nil {
-			// ctx canceled, conn closed, or fatal; the reverse forwardings are dead
+			// ctx canceled, the conversation/connection is gone, or fatal;
+			// the reverse forwardings are dead and must be re-established
 			return err
 		}
 
