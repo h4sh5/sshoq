@@ -1764,7 +1764,18 @@ func ServerMain() int {
 	// the local socket once it exists, and connections to the destination are
 	// opened lazily, per remote user.
 	if reverseTunnelCfg != nil {
-		go runReverseTunnel(reverseTunnelCfg, remoteForwardIdentities, *remoteForwardInsecure)
+		tunnelFirstAttempt := make(chan error, 1)
+		go runReverseTunnel(reverseTunnelCfg, remoteForwardIdentities, *remoteForwardInsecure, tunnelFirstAttempt)
+		// if the very first connection to the remote sshoq server fails, say so
+		// and die: a server started with -R exists to be reachable through that
+		// remote, and a mistyped URL, an unreachable relay or a rejected key must
+		// not look like a successful startup. Once the tunnel has been up, later
+		// failures are transient and the loop reconnects by itself.
+		if err := <-tunnelFirstAttempt; err != nil {
+			fmt.Fprintf(os.Stderr, "-R: could not connect to the remote sshoq server %s: %s\n", reverseTunnelCfg.url, err)
+			log.Error().Msgf("-R: first connection to %s failed: %s", reverseTunnelCfg.url, err)
+			return -1
+		}
 	}
 
 	outputMessage := fmt.Sprintf("Server started, listening on %s%s", *bindAddr, *urlPath)

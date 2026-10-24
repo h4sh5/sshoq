@@ -12,6 +12,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	ssh3 "github.com/h4sh5/sshoq"
@@ -234,6 +235,13 @@ const reverseTunnelRetryDelay = 5 * time.Second
 // dies - then it tries again, so that a server behind a NAT recovers by itself
 // when the public relay comes back.
 //
+// The outcome of the very first connection attempt is reported on
+// firstAttempt (and only that one): a tunnel which never got up means the -R
+// argument, the remote server or the authentication is wrong, and the caller
+// turns that into a fatal error rather than letting a server run forever with
+// a registration that never happened. Once the tunnel has been up, later
+// failures are not fatal and this loop keeps retrying them.
+//
 // The connection is kept alive and its death is detected by the QUIC layer:
 // setupQUICConnection sets a 1-second KeepAlivePeriod, which both refreshes
 // NAT or firewall bindings so an idle tunnel is not silently dropped, and
@@ -245,10 +253,26 @@ const reverseTunnelRetryDelay = 5 * time.Second
 // after reverseTunnelRetryDelay. The loop never gives up: a relay which is
 // down for hours, or a key installed hours later with -rpub on the other
 // side, is recovered without restarting sshoq-server.
-func runReverseTunnel(cfg *reverseTunnelConfig, identityFiles []string, insecure bool) {
+func runReverseTunnel(cfg *reverseTunnelConfig, identityFiles []string, insecure bool, firstAttempt chan<- error) {
 	ctx := context.Background()
+	var reported sync.Once
 	for {
-		err := reverseTunnelOnce(ctx, cfg, identityFiles, insecure)
+		// a successful attempt is reported when the tunnel comes up - not when
+		// reverseTunnelOnce returns, which for a healthy tunnel is hours later or
+		// never - and a failed one when it dies without ever having come up. The
+		// once guarantees exactly one report, whichever of the two paths wins.
+		tunnelUp := make(chan struct{})
+		go func() {
+			<-tunnelUp
+			reported.Do(func() { firstAttempt <- nil })
+		}()
+		err := reverseTunnelOnce(ctx, cfg, identityFiles, insecure, tunnelUp)
+		reported.Do(func() {
+			if err == nil {
+				err = fmt.Errorf("the tunnel to %s stopped before coming up", cfg.url)
+			}
+			firstAttempt <- err
+		})
 		if err != nil {
 			log.Warn().Msgf("reverse sshoq tunnel to %s on %s stopped: %s - retrying in %s",
 				cfg.remoteBind, cfg.url, err, reverseTunnelRetryDelay)
@@ -261,7 +285,12 @@ func runReverseTunnel(cfg *reverseTunnelConfig, identityFiles []string, insecure
 	}
 }
 
-func reverseTunnelOnce(ctx context.Context, cfg *reverseTunnelConfig, identityFiles []string, insecure bool) error {
+// reverseTunnelOnce connects to the remote sshoq server, opens the reverse
+// forwarding and serves it until the conversation dies, then returns the reason.
+// tunnelUp, when non-nil, is closed as soon as the forwarding is effectively
+// established, which is the result the very first attempt reports to the
+// caller of runReverseTunnel.
+func reverseTunnelOnce(ctx context.Context, cfg *reverseTunnelConfig, identityFiles []string, insecure bool, tunnelUp chan<- struct{}) error {
 	parsedUrl, err := url.Parse(cfg.url)
 	if err != nil {
 		return fmt.Errorf("could not parse the remote sshoq server URL %s: %s", cfg.url, err)
@@ -320,7 +349,7 @@ func reverseTunnelOnce(ctx context.Context, cfg *reverseTunnelConfig, identityFi
 		if status == 0 {
 			return fmt.Errorf("the connection to %s was refused and reconnection is required", cfg.url)
 		}
-		return fmt.Errorf("could not set up the QUIC transport to %s (use -R-insecure if its self-signed certificate is unknown to %s)", cfg.url, knownHostsPath)
+		return fmt.Errorf("could not reach %s over QUIC: the host may be unreachable or its UDP port closed; if the server is up but uses a self-signed certificate, it is unknown to %s - use -R-insecure or install it there", cfg.url, knownHostsPath)
 	}
 
 	roundTripper := &http3.RoundTripper{EnableDatagrams: true}
@@ -347,6 +376,9 @@ func reverseTunnelOnce(ctx context.Context, cfg *reverseTunnelConfig, identityFi
 	fmt.Fprintf(os.Stderr, "Reverse sshoq tunnel up: %s is forwarding %s to the local sshoq server at %s\n",
 		cfg.url, cfg.remoteBind, cfg.localDest)
 	log.Info().Msgf("reverse sshoq tunnel up: %s forwards %s to %s", cfg.url, cfg.remoteBind, cfg.localDest)
+	if tunnelUp != nil {
+		close(tunnelUp)
+	}
 
 	// serve the channels the remote server opens for every user connecting to
 	// the forwarded port; returns when the conversation is gone
