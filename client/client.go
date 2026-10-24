@@ -1484,18 +1484,27 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, forcePTYAlloc bo
 			log.Debug().Msgf("New channel type %s \n", typ)
 
 			if strings.HasPrefix(typ, "open-request-reverse-udp") {
-				//return nil, nil, fmt.Errorf("not a reverse-udp channel: %q", typ)
+				// reverse UDP channels are opened by the server for -reverse-udp and this loop
+				// owns them from the moment they are accepted: the forwarding goroutine takes
+				// the channel over, so it must not fall through to the switch below, which
+				// would close it as an unknown channel type. Closing it here removed the
+				// channel from the conversation table right after the forwarding started, and
+				// every datagram of that forwarding was then lost on its way in.
 				localUDPAddr, remoteUDPAddr, err := parseAddrsFromChannelType(typ)
-				log.Debug().Msgf("start reverse TCP forwarding from %s to %s \n", localUDPAddr, remoteUDPAddr)
+				if err != nil {
+					log.Error().Msgf("received an invalid reverse UDP forwarding channel: %s", err)
+					channel.Close()
+					continue
+				}
+				log.Debug().Msgf("start reverse UDP forwarding from %s to %s", localUDPAddr, remoteUDPAddr)
 				conn, err := net.DialUDP("udp", nil, remoteUDPAddr)
 				if err != nil {
-					return
+					log.Error().Msgf("could not dial reverse UDP destination %s: %s", remoteUDPAddr, err)
+					channel.Close()
+					continue
 				}
 				forwardReverseUDPInBackground(ctx, channel, conn)
-				if err != nil {
-					channel.Close()
-					return
-				}
+				continue
 			}
 
 			switch {
