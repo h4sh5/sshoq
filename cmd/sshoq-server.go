@@ -1392,7 +1392,60 @@ func ServerMain() int {
 	if unix_util.PasswordAuthAvailable() {
 		flag.BoolVar(&enablePasswordLogin, "enable-password-login", false, "if set, enable password authentication (disabled by default)")
 	}
+	remoteForward := flag.String("R", "", "connect to an existing remote sshoq server and ask it to open a port on its localhost, " +
+		"forwarding the traffic of that port to this local sshoq server. Syntax: user@host:port/url-path%remote-port " +
+		"(e.g. user@example.com:4443/sshoq-remote%4444). Users can then point a normal sshoq client at " +
+		"the remote host's localhost:remote-port to reach this server, even when it sits behind a NAT. " +
+		"The destination on this host defaults to this server's own -bind port and may be spelled out as " +
+		"user@host:port/url-path%remote-port@localip@localport.")
+	flag.StringVar(remoteForward, "remote-forward", "", "alias for -R")
+	var remotePublicKeys stringSliceFlag
+	flag.Var(&remotePublicKeys, "rpub", "authorize a public key in the memory of this server run only, without adding it to " +
+		"~/.ssh3/authorized_identities, so that whoever holds the matching private key can connect - typically through the -R " +
+		"forwarded port - without a password and without the key being installed on any file, on either side of the connection. " +
+		"The argument is either the public key itself (\"ssh-ed25519 AAAA... comment\") or the name of a file containing one. " +
+		"May be specified multiple times.")
+	flag.Var(&remotePublicKeys, "remote-public-key", "alias for -rpub")
+	var cmdlinePubkeys stringSliceFlag
+	flag.Var(&cmdlinePubkeys, "pubkey", "authorize a public key for this server run only, exactly like -rpub, but with no " +
+		"relation to -R: the key is held in the memory of the server, it is never added to ~/.ssh3/authorized_identities " +
+		"nor to ~/.ssh/authorized_keys, and it stops being accepted as soon as the server stops. " +
+		"The argument is either the public key itself (\"ssh-ed25519 AAAA... comment\") or the name of a file containing one. " +
+		"May be specified multiple times.")
+	var remoteForwardIdentities stringSliceFlag
+	flag.Var(&remoteForwardIdentities, "R-identity", "private key file used to authenticate to the remote sshoq server given with -R. "+
+		"May be specified multiple times; the default ~/.ssh keys are used when absent.")
+	remoteForwardInsecure := flag.Bool("R-insecure", false, "if set, skip the server certificate verification of the remote sshoq server connected to with -R")
 	flag.Parse()
+
+	// validate the -R argument before anything else, so that a bad spec fails
+	// the startup rather than being noticed only in the log file, minutes after
+	// the certificates were loaded and the server announced itself
+	var reverseTunnelCfg *reverseTunnelConfig
+	if *remoteForward != "" {
+		var err error
+		reverseTunnelCfg, err = parseReverseTunnelSpec(*remoteForward, *bindAddr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s\n", err)
+			return -1
+		}
+	}
+
+	// the public keys given with -pubkey and -rpub are authorized in the memory of
+	// this server run only: nothing is ever added to ~/.ssh3/authorized_identities,
+	// on either side of a -R connection. They are registered before the server can
+	// accept anything, direct or forwarded, so that the first connection through
+	// the tunnel already finds the key it is going to authenticate with.
+	if len(cmdlinePubkeys)+len(remotePublicKeys) > 0 {
+		identityLines, err := collectStaticAuthorizedIdentities(append(append([]string{}, cmdlinePubkeys...), remotePublicKeys...))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s\n", err)
+			return -1
+		}
+		server_auth.AddStaticAuthorizedIdentities(identityLines...)
+		fmt.Fprintf(os.Stderr, "Authorized %d public key(s) from -pubkey/-rpub for this server run only (no identities file was modified)\n",
+			len(identityLines))
+	}
 
 	if *displayVersion {
 		fmt.Fprintln(os.Stdout, filepath.Base(os.Args[0]), "version", ssh3.GetCurrentSoftwareVersion())
@@ -1704,6 +1757,27 @@ func ServerMain() int {
 	}
 	mux.HandleFunc(*urlPath, handler)
 	server.Handler = mux
+
+	// -R: dial out to the remote sshoq server in the background and keep the
+	// reverse forwarding of this server's port alive across reconnects. It is
+	// started before ListenAndServe because the tunnel only serves traffic to
+	// the local socket once it exists, and connections to the destination are
+	// opened lazily, per remote user.
+	if reverseTunnelCfg != nil {
+		tunnelFirstAttempt := make(chan error, 1)
+		go runReverseTunnel(reverseTunnelCfg, remoteForwardIdentities, *remoteForwardInsecure, tunnelFirstAttempt)
+		// if the very first connection to the remote sshoq server fails, say so
+		// and die: a server started with -R exists to be reachable through that
+		// remote, and a mistyped URL, an unreachable relay or a rejected key must
+		// not look like a successful startup. Once the tunnel has been up, later
+		// failures are transient and the loop reconnects by itself.
+		if err := <-tunnelFirstAttempt; err != nil {
+			fmt.Fprintf(os.Stderr, "-R: could not connect to the remote sshoq server %s: %s\n", reverseTunnelCfg.url, err)
+			log.Error().Msgf("-R: first connection to %s failed: %s", reverseTunnelCfg.url, err)
+			return -1
+		}
+	}
+
 	outputMessage := fmt.Sprintf("Server started, listening on %s%s", *bindAddr, *urlPath)
 	fmt.Fprintln(os.Stderr, outputMessage)
 	log.Info().Msg(outputMessage)

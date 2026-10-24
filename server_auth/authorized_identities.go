@@ -253,6 +253,8 @@ func GetAuthorizedIdentities(user *unix_util.User) ([]IdentityVerifier, error) {
 			return nil, err
 		}
 	}
+	// keys authorized on the command line (-pubkey, -rpub), held in memory only
+	identities = append(identities, parseStaticIdentities(user)...)
 	return identities, nil
 }
 

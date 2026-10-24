@@ -1229,6 +1229,76 @@ func (c *Client) ReverseUDP(ctx context.Context, localUDPAddr *net.UDPAddr, remo
 	return remoteUDPAddr, nil
 }
 
+// ServeReverseForwarding accepts and serves the channels the remote server
+// opens for the reverse forwardings requested with ReverseTCP/ReverseUDP, and
+// pipes them to the local destination encoded in the channel type. It is the
+// forwarding part of RunSession alone, for callers which never open a shell -
+// sshoq-server -R for instance - and blocks until the conversation is gone.
+func (c *Client) ServeReverseForwarding(ctx context.Context) error {
+	// AcceptChannel only watches the context it is given, and the reconnection
+	// loop of sshoq-server passes a background one: without this bridge, the
+	// accept would keep blocking long after the QUIC connection died - a relay
+	// killed without a goodbye, a network which blackholes the tunnel - and the
+	// reconnection would never start. The conversation context is done as soon
+	// as the connection is gone (it derives from qconn.Context()), and dying
+	// conversations must interrupt this loop, which they do through cancel().
+	acceptCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	conversationDone := c.Context().Done()
+	go func() {
+		select {
+		case <-conversationDone:
+			cancel()
+		case <-acceptCtx.Done():
+		}
+	}()
+
+	for {
+		channel, err := c.AcceptChannel(acceptCtx)
+		if err != nil {
+			// ctx canceled, the conversation/connection is gone, or fatal;
+			// the reverse forwardings are dead and must be re-established
+			return err
+		}
+
+		typ := channel.ChannelType()
+		log.Debug().Msgf("new channel type %s", typ)
+
+		switch {
+		case strings.HasPrefix(typ, "open-request-reverse-udp"):
+			_, remoteUDPAddr, err := parseAddrsFromChannelType(typ)
+			if err != nil {
+				log.Error().Msgf("received an invalid reverse UDP forwarding channel: %s", err)
+				channel.Close()
+				continue
+			}
+			conn, err := net.DialUDP("udp", nil, remoteUDPAddr)
+			if err != nil {
+				log.Error().Msgf("could not dial reverse UDP destination %s: %s", remoteUDPAddr, err)
+				channel.Close()
+				continue
+			}
+			forwardReverseUDPInBackground(ctx, channel, conn)
+		case strings.HasPrefix(typ, "open-request-reverse-tcp"):
+			reverseTCPDestAddr, err := parseReverseTCPDestFromChannelType(typ)
+			if err != nil {
+				log.Error().Msgf("received an invalid reverse TCP forwarding channel: %s", err)
+				channel.Close()
+				continue
+			}
+			conn, err := net.DialTCP("tcp", nil, reverseTCPDestAddr)
+			if err != nil {
+				log.Error().Msgf("could not dial reverse TCP destination %s: %s", reverseTCPDestAddr, err)
+				channel.Close()
+				continue
+			}
+			forwardReverseTCPInBackground(ctx, channel, conn)
+		default:
+			channel.Close()
+		}
+	}
+}
+
 func parseAddrsFromChannelType(typ string) (*net.UDPAddr, *net.UDPAddr, error) {
 	// Prefer HasPrefix to avoid accidental matches.
 
@@ -1414,18 +1484,27 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, forcePTYAlloc bo
 			log.Debug().Msgf("New channel type %s \n", typ)
 
 			if strings.HasPrefix(typ, "open-request-reverse-udp") {
-				//return nil, nil, fmt.Errorf("not a reverse-udp channel: %q", typ)
+				// reverse UDP channels are opened by the server for -reverse-udp and this loop
+				// owns them from the moment they are accepted: the forwarding goroutine takes
+				// the channel over, so it must not fall through to the switch below, which
+				// would close it as an unknown channel type. Closing it here removed the
+				// channel from the conversation table right after the forwarding started, and
+				// every datagram of that forwarding was then lost on its way in.
 				localUDPAddr, remoteUDPAddr, err := parseAddrsFromChannelType(typ)
-				log.Debug().Msgf("start reverse TCP forwarding from %s to %s \n", localUDPAddr, remoteUDPAddr)
+				if err != nil {
+					log.Error().Msgf("received an invalid reverse UDP forwarding channel: %s", err)
+					channel.Close()
+					continue
+				}
+				log.Debug().Msgf("start reverse UDP forwarding from %s to %s", localUDPAddr, remoteUDPAddr)
 				conn, err := net.DialUDP("udp", nil, remoteUDPAddr)
 				if err != nil {
-					return
+					log.Error().Msgf("could not dial reverse UDP destination %s: %s", remoteUDPAddr, err)
+					channel.Close()
+					continue
 				}
 				forwardReverseUDPInBackground(ctx, channel, conn)
-				if err != nil {
-					channel.Close()
-					return
-				}
+				continue
 			}
 
 			switch {
