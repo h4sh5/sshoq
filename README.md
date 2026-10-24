@@ -136,6 +136,58 @@ sudo systemctl status sshoq
 
 That should install the service and start it and show the status.
 
+### Remote registration of an SSHOQ server (`sshoq-server -R`)
+
+A server that sits behind a NAT or a firewall can dial *out* to a public SSHOQ
+server and ask it to open a port on its localhost which reaches the private
+server, using the `-R` (`-remote-forward`) parameter of `sshoq-server`:
+
+`sshoq-server -R user@example.com:4443/sshoq-remote%4444 -R-identity ~/.ssh/id_ed25519`
+
+This connects to the SSHOQ server running on `example.com` on port 4443 at the
+URL path `/sshoq-remote`, authenticating as `user` with the private key given
+by `-R-identity` (repeatable; the default `~/.ssh` keys are used if absent),
+and opens UDP port **4444** on the remote host's **localhost** only. From then
+on, anybody on the remote host can use port 4444 to reach this server as if it
+were a normal SSHOQ server, pointing their client at the URL path of the
+*local* server:
+
+`sshoq user@localhost:4444/sshoq-local-path -i /path/to/private_key "hostname"`
+
+Because the users connecting through the forwarded port still authenticate on
+the local server, as the very user which runs `sshoq-server`, the `-rpub`
+(`-remote-public-key`) parameter authorizes the public key they will use:
+
+`sshoq-server -R user@example.com:4443/sshoq-remote%4444 -R-identity ~/.ssh/id_ed25519 -rpub "ssh-ed25519 AAAA... alice-laptop" -rpub /home/me/bob.pub`
+
+`-rpub` takes either a public key given directly as a string or the name of a
+file containing one (any algorithm OpenSSH keys support: `rsa`, `dsa`,
+`ecdsa`, `ed25519`, and the security-key variants); it may be repeated.
+
+The `-pubkey` flag does the same for any server, with no relation to `-R`:
+
+`sshoq-server -pubkey "ssh-ed25519 AAAA... carol-server"`
+
+**Nothing is ever written to `~/.ssh3/authorized_identities`** (nor to
+`~/.ssh/authorized_keys`), on either side of the connection: `-rpub` and
+`-pubkey` keys are authorized in the memory of the running server only, and
+stop being accepted as soon as it stops. This works on the `-R` side (keys for
+the users connecting through the forwarded port) as well as on the relay side
+(a key for the tunnel itself, in place of an `authorized_keys` entry), and
+survives restarts simply by repeating the flag.
+
+Notes:
+- `-R-insecure` skips the certificate verification of the remote server, which
+  is handy with self-signed certificates; otherwise the remote certificate must
+  be verifiable by the system CAs or known from `~/.ssh3/known_hosts`.
+- The tunnel reconnects automatically if the remote server or the network goes
+  down; the port on the remote side lives as long as the tunnel connection.
+- The destination on the local host defaults to this server's own `-bind` port
+  on localhost and can be spelled out explicitly:
+  `-R user@example.com:4443/sshoq-remote%4444@127.0.0.1@8443`.
+- Since the forwarding carries QUIC datagrams, the usual MTU caveats of SSHOQ
+  UDP forwarding apply.
+
 ### Authorized keys and authorized identities
 By default, the SSHOQ server will look for identities in the `~/.ssh/authorized_keys` and `~/.ssh3/authorized_identities` files for each user.
 `~/.ssh3/authorized_identities` allows new identities such as OpenID Connect (`oidc`) discussed [below](#openid-connect-authentication-still-experimental).

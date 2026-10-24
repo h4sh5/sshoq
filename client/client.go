@@ -1229,6 +1229,57 @@ func (c *Client) ReverseUDP(ctx context.Context, localUDPAddr *net.UDPAddr, remo
 	return remoteUDPAddr, nil
 }
 
+// ServeReverseForwarding accepts and serves the channels the remote server
+// opens for the reverse forwardings requested with ReverseTCP/ReverseUDP, and
+// pipes them to the local destination encoded in the channel type. It is the
+// forwarding part of RunSession alone, for callers which never open a shell -
+// sshoq-server -R for instance - and blocks until the conversation is gone.
+func (c *Client) ServeReverseForwarding(ctx context.Context) error {
+	for {
+		channel, err := c.AcceptChannel(ctx)
+		if err != nil {
+			// ctx canceled, conn closed, or fatal; the reverse forwardings are dead
+			return err
+		}
+
+		typ := channel.ChannelType()
+		log.Debug().Msgf("new channel type %s", typ)
+
+		switch {
+		case strings.HasPrefix(typ, "open-request-reverse-udp"):
+			_, remoteUDPAddr, err := parseAddrsFromChannelType(typ)
+			if err != nil {
+				log.Error().Msgf("received an invalid reverse UDP forwarding channel: %s", err)
+				channel.Close()
+				continue
+			}
+			conn, err := net.DialUDP("udp", nil, remoteUDPAddr)
+			if err != nil {
+				log.Error().Msgf("could not dial reverse UDP destination %s: %s", remoteUDPAddr, err)
+				channel.Close()
+				continue
+			}
+			forwardReverseUDPInBackground(ctx, channel, conn)
+		case strings.HasPrefix(typ, "open-request-reverse-tcp"):
+			reverseTCPDestAddr, err := parseReverseTCPDestFromChannelType(typ)
+			if err != nil {
+				log.Error().Msgf("received an invalid reverse TCP forwarding channel: %s", err)
+				channel.Close()
+				continue
+			}
+			conn, err := net.DialTCP("tcp", nil, reverseTCPDestAddr)
+			if err != nil {
+				log.Error().Msgf("could not dial reverse TCP destination %s: %s", reverseTCPDestAddr, err)
+				channel.Close()
+				continue
+			}
+			forwardReverseTCPInBackground(ctx, channel, conn)
+		default:
+			channel.Close()
+		}
+	}
+}
+
 func parseAddrsFromChannelType(typ string) (*net.UDPAddr, *net.UDPAddr, error) {
 	// Prefer HasPrefix to avoid accidental matches.
 
