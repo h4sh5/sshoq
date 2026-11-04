@@ -444,7 +444,17 @@ assurance that region can get from a test.
    about string slicing and concatenation, where the prover has no theory (see F5's notes).
 5. **Phase 4** — `message/` wire parsing (bounded slicing for every message type) and the
    SFTP path handling in `sftp/server.go`, where directory traversal and permissions are the
-   interesting properties.
+   interesting properties. What the toolchain offers for that, measured rather than hoped: it
+   stubs `encoding/binary` with *pure* `Uint16`/`Uint32`/`Uint64` over `[]byte` for both byte
+   orders — which is exactly the primitive the wire format's length prefixes need — but it does not
+   stub `io` or `bufio`, and both `message/message.go` and `message/channel_request.go` import
+   `fmt` as well. So `ReadFrom(io.Reader)` cannot be verified as it stands, and the Phase 4 shape is
+   the one this catalogue already used three times: split the *decision* out of the reader — a pure
+   `parse(data []byte) (msg, rest []byte, ok bool)`-shaped function that says what a byte sequence
+   means and how long it is — verify that, keep the I/O beside it unverified, and cover the seam with
+   a conformance test. The bound that matters (`a length field may not make us read past the datagram,
+   and may not be trusted to size an allocation before it is checked against what arrived`) is a
+   statement about `data`, so it survives the split intact.
 6. **Phase 5** — the conversation/channel state machine: transitions under concurrency
    (predicates, mutexes, goroutines — Gobra is good at this), which is where the remaining
    use-after-close and double-close class of bugs lives.
