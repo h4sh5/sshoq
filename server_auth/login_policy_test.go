@@ -2,6 +2,7 @@ package server_auth
 
 import (
 	"fmt"
+	"math/rand"
 	"strings"
 	"testing"
 	"time"
@@ -134,6 +135,64 @@ func TestLoginThrottleIsBounded(t *testing.T) {
 	if size > passwordThrottleEntries {
 		t.Fatalf("the throttle grew to %d entries, above its bound of %d: an attacker must not be able to use it "+
 			"as a memory sink", size, passwordThrottleEntries)
+	}
+}
+
+// size returns how many sources the throttle remembers.
+func (t *loginThrottle) size() int {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+	return len(t.entries)
+}
+
+// TestLoginThrottleCapacityHoldsWhenSourcesAreForgotten is the memory bound seen from the
+// other side: success() deletes an entry, but the name stays in the eviction ring, so the
+// eviction step can pick a name which is no longer in the table and forget nothing. The
+// bound the type documents ("capacity bounds the number of remembered sources") then
+// breaks, and a client who keeps alternating a failure with a success keeps growing the
+// table.
+func TestLoginThrottleCapacityHoldsWhenSourcesAreForgotten(t *testing.T) {
+	clock := &fakeClock{now: time.Now()}
+	throttle := newLoginThrottle(passwordFailureWindow, 3, passwordDelayStep, passwordMaxDelay)
+	throttle.now = clock.Now
+	// the ring is full, one source is forgiven, and two more failures come in: the second
+	// one has to evict something, and what it used to evict was already gone
+	throttle.failure("2001:db8::1|alice")
+	throttle.failure("2001:db8::2|bob")
+	throttle.failure("2001:db8::3|carol")
+	throttle.success("2001:db8::2|bob")
+	throttle.failure("2001:db8::4|dave")
+	throttle.failure("2001:db8::2|bob")
+	if size := throttle.size(); size > 3 {
+		t.Fatalf("the throttle holds %d entries against a capacity of 3: a source which is "+
+			"forgotten must not leave the table over its bound", size)
+	}
+}
+
+// TestLoginThrottleCapacityHoldsUnderMixedTraffic is the same bound under a repeatable
+// pseudo-random mix of failures, successes and window rollovers, checked after every
+// operation: the spray test above only exercises the eviction of sources which are still
+// remembered.
+func TestLoginThrottleCapacityHoldsUnderMixedTraffic(t *testing.T) {
+	const capacity = 8
+	clock := &fakeClock{now: time.Now()}
+	throttle := newLoginThrottle(passwordFailureWindow, capacity, passwordDelayStep, passwordMaxDelay)
+	throttle.now = clock.Now
+	generator := rand.New(rand.NewSource(2024))
+	for i := 0; i < 20000; i++ {
+		key := fmt.Sprintf("2001:db8::%d|user%d", generator.Intn(4*capacity), generator.Intn(3))
+		switch generator.Intn(10) {
+		case 0:
+			throttle.success(key)
+		case 1:
+			clock.now = clock.now.Add(passwordFailureWindow / 2)
+		default:
+			throttle.failure(key)
+		}
+		if size := throttle.size(); size > capacity {
+			t.Fatalf("after %d operations the throttle holds %d entries, above its bound of %d",
+				i, size, capacity)
+		}
 	}
 }
 

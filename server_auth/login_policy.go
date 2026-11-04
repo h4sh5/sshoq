@@ -152,6 +152,13 @@ func (t *loginThrottle) success(key string) {
 // costs nothing), then by evicting the oldest remembered source. It must be called with
 // the lock held.
 func (t *loginThrottle) startWindowLocked(key string, now time.Time) *throttleEntry {
+	if entry, remembered := t.entries[key]; remembered {
+		// reopening the window of a source which is already remembered cannot grow the
+		// table, so it does not have to evict anything
+		entry.failures = 0
+		entry.windowStart = now
+		return entry
+	}
 	if len(t.entries) >= t.capacity {
 		for staleKey, entry := range t.entries {
 			if now.Sub(entry.windowStart) > t.window {
@@ -160,11 +167,36 @@ func (t *loginThrottle) startWindowLocked(key string, now time.Time) *throttleEn
 		}
 	}
 	if len(t.entries) >= t.capacity {
-		// the ring is full: the key it points at is the longest remembered one, it is the
-		// least interesting to keep
-		victim := t.order[t.ringPos]
-		if victim != "" && victim != key {
+		// the key the ring points at is the longest remembered one and the least interesting
+		// to keep - but the ring is a hint and not a mirror: a source which was forgiven by
+		// success() left its name here, so walk on until a name the table really holds turns
+		// up. Evicting on the first slot regardless used to forget nothing at all, and the
+		// table grew over its capacity without limit.
+		for attempts := 0; attempts < len(t.order); attempts++ {
+			victim := t.order[t.ringPos]
+			t.ringPos = (t.ringPos + 1) % t.capacity
+			if victim == "" || victim == key {
+				continue
+			}
+			if _, live := t.entries[victim]; !live {
+				continue
+			}
 			delete(t.entries, victim)
+			break
+		}
+	}
+	if len(t.entries) >= t.capacity {
+		// every slot of the ring had been rewritten with names which are gone: fall back to
+		// the entry whose window opened first, which is the same choice in essence and the
+		// one which keeps the bound whatever the ring looks like
+		oldestKey, oldestWindow := "", now
+		for other, entry := range t.entries {
+			if oldestKey == "" || entry.windowStart.Before(oldestWindow) {
+				oldestKey, oldestWindow = other, entry.windowStart
+			}
+		}
+		if oldestKey != "" {
+			delete(t.entries, oldestKey)
 		}
 	}
 	entry := &throttleEntry{windowStart: now}
