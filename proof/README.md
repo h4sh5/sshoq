@@ -28,7 +28,7 @@ claim about coverage is written:
 |---|---|---|
 | `proved:model` + conformant | 16 | a Gobra unit proves the decision over all modelled inputs, and a test says the modelled function still behaves that way |
 | `proved:shipped` + conformant | 7 | the same, except the proof is of the function the server calls: SR-PERM-04 and SR-PERM-05 in `identity_checks.go`, SR-PERM-06 in `source_check.go`, SR-AUTH-08 in `server_auth/throttle_rules.go`, SR-TR-04 in `server_auth/truncate.go`, SR-PARSE-03 in `util/varint.go`, SR-TR-03 in `version_rules.go`. The model of each is a second opinion now, not the argument |
-| `conformant` | 3 | checked in Go alone, because the prover cannot hold the shape of the whole claim (the recursive glob: findings **F5**, **F6**) — `glob.go` does have a proved *part* of one of them, termination, in the shipped file |
+| `conformant` | 4 | checked in Go alone, because the prover cannot hold the shape of the whole claim (the recursive glob: findings **F5**, **F6**) — `glob.go` does have a proved *part* of one of them, termination, in the shipped file |
 | `partial` | 2 | the decision function is proved, the surrounding machinery is a premise named in the row |
 | `out-of-scope` | 2 | QUIC conversation state; integration and unit tests are the control |
 | `open` | 1 | SR-PERM-11 / finding **F2**: a decision the maintainer owes, not a proof that is missing |

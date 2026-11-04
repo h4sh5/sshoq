@@ -102,6 +102,7 @@ pre-authentication input.
 | SR-PARSE-01 | Parsing a channel request never reads past the declared payload length and never panics on truncated input. | `message/channel_request.go` | **[phase-4]** phase 4 (see roadmap); the existing fuzz corpus is the interim control. The *arithmetic* it leans on — what a length means, how wide it is encoded, what ceiling it must clear — is proved in `util/varint.go` under **SR-PARSE-03**; what is left here is the slicing and the `io` around it |
 | SR-PARSE-03 | A length announced by a peer is bounded **before** it is used to allocate, and the length arithmetic on the wire is exact: `VarIntLen` promises the number of bytes `AppendVarInt` writes, a reader's ceiling is the tighter of `MaxFieldLength` and whatever bound it knows itself, a field above that ceiling is refused rather than allocated, and the two readers that take a length (`ParseSSHString`, `ParseSSHBytes`) apply exactly that decision. Without it, ten bytes on the wire announce 2^62−1 and the process either exhausts its address space or panics inside `make` ("makeslice: len out of range"), which takes down every connection on the server, not just the hostile one. | `util/varint.go` (verified where it ships), `util/wire.go` (the readers), `util/varint_conformance_test.go` (the seam) | **[proved:shipped]** `proved` on the shipped arithmetic: `announcementIsBounded` states and proves the composed claim — for every announcement and every reader bound, an accepted field is at most `MaxFieldLength` and a refused one is above the ceiling that reader applies — with `fieldCeiling`'s and `fieldLengthAcceptable`'s bidirectional clauses beneath it, plus `VarIntLen`'s four ranges boundary-inclusive and `SSHStringLen`/`SSHBytesLen`'s "prefix plus payload, strictly more than the payload". `conformant` for everything the prover cannot see: `TestConformanceVarIntLenIsWhatAppendVarIntWrites` (a disagreement is a framing desynchronisation on a *locally chosen* value, invisible on the wire), `TestConformanceFieldLengthIsCheckedBeforeAllocating` (the 2^62−1 bomb, refused through the real readers, and the accept/refuse boundary at ceiling−1, ceiling, ceiling+1 for three reader bounds), `TestConformanceSSHFieldLensAreTheBytesWritten` (exact fit accepted, one byte short refused), and the canonical-encoding and padded-width tests. The encoder's half of the promise -- `AppendVarInt` writes exactly `VarIntLen(i)` more bytes than it was given -- is `conformant`, and not for the reason one would guess: it is not the `fmt.Sprintf` in its out-of-range panic that keeps it out of the verified file (a struct value would do, as `VarIntLen` a few lines away already shows) but `append`, which this Gobra frontend will not accept in a verified function in any spelling the Go surface offers -- "append expects first argument of type perm followed by a slice of type []Type and a variadic type Type... but got []byte, uint8" -- and annotating the parameter `acc(b)` or `acc(b, 1/2)` does not change the diagnosis. **A verified function may read, slice and compare bytes; it may not grow a slice**, which rules out encoders outright and rules out any parser that accumulates into a buffer: phase 4's verified half is confined to functions whose result is a decision or a view of what arrived. **Premise, named rather than assumed:** that the length handed to the guard is the length that was parsed and that nothing allocates in between — that ordering is four lines inside `ParseSSHString`/`ParseSSHBytes`, in a file the prover cannot read (`io`, `fmt`), and the tests above are what pin it |
 | SR-PARSE-02 | `ParseBearerAuth` never panics for an `Authorization` value shorter than the prefix and only strips the prefix when it is really present (case-insensitive, ASCII). | `server_auth/handlers.go`, `util/util.go` (`EqualFold`) | **[proved:model]** `proved` (model: `proof/bearer/model.gobra`: memory safety for every header and every prefix length; the length guard is exactly the prefix length and is what refuses a short header; `ok` implies the prefix is really there and the token is byte-for-byte the remainder; a refused header yields the empty token; the fold is per-byte, reflexive, symmetric and ASCII-only, so the prefix cannot be smuggled in through Unicode case-variants) + `conformant` (`server_auth/bearer_conformance_test.go`). The one fact Gobra cannot check — that the prefix constant *is* the seven ASCII bytes — is pinned by that test, which also drives the real `ParseBearerAuth`, `HandleBearerAuth` and `util.EqualFold`. |
+| SR-PARSE-04 | A remote or local file name that tab completion writes back into the command line comes back out of the tokeniser as **the same name, as one argument**: completion can neither split a name into two arguments, nor change the path a command receives, nor have a hostile name rejected as an unterminated quote (**F11**). | `sftp/quoting.go` (`makeargv`, `escapePath`, `unescape`, `undoGlobEscape`), `sftp/client.go` (the completion writer and the seven literal-path call sites), `sftp/quoting_roundtrip_conformance_test.go` | **[conformant]** Exhausted in Go, over every string of up to four bytes drawn from the ten characters the tokeniser gives a meaning to -- `'`, `"`, `\\`, `?`, `*`, `[`, `#`, space, tab, and `a` for the ordinary case -- in all three shapes `client.go` writes (unquoted, single-quoted, double-quoted): 33333 cases each. Five properties, one per test: `unescape(escapePath(s, q)) == s`; `makeargv` in strict mode accepts the completed line and yields exactly one argument for it, with a span that covers the completed text and nothing else; for the commands that must not glob, `undoGlobEscape(argument)` is the name that was completed -- this is the value that reaches `os.Chdir` and `resolveLocalPath`; for the commands that do glob, `path.Match(escapePath(s, 0), s)` holds, so a name containing `*` lists that file and not the directory; and strict and sloppy mode agree on every completed name, which is what makes the line on screen the line that runs. Not proved: the tokeniser itself, which is a state machine over bytes that grows four accumulators -- `append` is not in a pure function's repertoire, so Gobra cannot read it where it runs (see `util/varint.go`'s header for the measurement); a model of `makeargv` would be a rewrite, not a transcription, and the exhaustive enumeration above is the honest substitute at this size. What the enumeration does *not* cover is a name longer than four bytes: the alphabet is per-position, so five bytes would be 111111 cases, still tractable, and a name whose hostile character sits at position nine is out by assumption rather than by experiment. |
 
 ---
 
@@ -459,6 +460,44 @@ this finding is about is discharged by the checker rather than by a reader, beca
 a split multi-byte character may index `s[cut]` only under the loop invariant that places `cut` inside the
 string. Putting `[:100]` back fails `make proof`; `TestConformanceTruncateMatchesTheModel` holds the
 surviving prefix to the model, which is the half the prover cannot reach.
+
+### F11: the largest pure surface in the tree had no requirement row (SR-PARSE-04)
+
+`makeargv` is four functions and roughly two hundred and fifty lines of state machine -- the OpenSSH
+command-line tokeniser, reimplemented here -- and it sits between a name the server chose and `os.Chdir`,
+`resolveLocalPath` and the seven `undoGlobEscape` call sites in `client.go` that hand a string to the
+filesystem. It had no row in this catalogue. Neither did `escapePath`, the function whose *entire reason to
+exist* is that a name which tab completion writes back into the line must survive being tokenised again.
+
+The absence was not an absence of tests. `sftp/quoting_test.go` has nineteen of them and they are good:
+single and double quotes, mismatched quotes inside quotes, comments, spans, unterminated quotes in strict
+and sloppy mode, the glob metacharacters preserved for `glob(3)`. What none of them said is the one
+sentence the pair is for -- that escaping a name and parsing it back yields the name, once, unchanged. The
+tests describe the rules; nothing described the guarantee the rules add up to, which is the difference
+between "completing a file called `a b`" and "completing `a`, adding an argument called `b`, and `cd`-ing
+into neither".
+
+The guarantee holds, and is now exhausted rather than asserted: 33333 strings over the ten characters the
+tokeniser reads specially, in the three shapes `client.go` writes, five properties, every case passing.
+The interesting part of writing it is a composition that is *not* the identity and must not be "fixed":
+`unescape(undoGlobEscape(escapePath(s)))` drops a trailing backslash, because `unescape` sees the `\` that
+`undoGlobEscape` has just produced as an escape with nothing after it. The shipped pipeline is
+`makeargv` then `undoGlobEscape`, and the tokeniser has already removed the non-glob escapes by then, so
+the code is right and the plausible one-line property is wrong -- which is exactly the sort of thing a
+future reader, seeing `unescape` unused next to `undoGlobEscape`, would be tempted to tidy. It is written
+in the test file's header instead of living in someone's memory.
+
+Why a model was not written for this one is in the row: `makeargv` grows four accumulators with `append`,
+and a pure Gobra function cannot, so a unit would be a rewrite of the state machine rather than a
+transcription of it, and a rewrite that agrees with itself proves nothing about the Go. The exhaustive
+enumeration is the honest substitute, with its limit stated -- four bytes, so a hostile character at
+position nine is out by assumption rather than by experiment.
+
+The method note is the same as **F8**'s, which makes it a pattern rather than a slip: rows written from a
+list of decision points miss the places where the code makes a promise in a *name* -- a constant with a
+ceiling, a function called `escape` -- because those do not read as decisions. Both were found by walking
+the pure functions and asking what each one promises, and both were added as rows afterwards. The next
+time, the walk comes first.
 
 ## Roadmap
 
