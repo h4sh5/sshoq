@@ -46,8 +46,13 @@ source "$TOOLS_DIR/env.sh"
 # Shipped files with their own annotations. Listed, not discovered: a file belongs to the proof when
 # its specs do, and a file that stops compiling because someone added an import is a proof that
 # silently stopped covering anything.
+#
+# identity_checks.go reached that list by separating a decision from the message that goes with it --
+# the fmt stub makes that the only way into this list for a file that refuses things -- and the same
+# move is what every remaining Phase 3 candidate needs.
 INPLACE_UNITS=(
 	"$REPO_ROOT/glob.go"
+	"$REPO_ROOT/identity_checks.go"
 )
 
 mapfile -t UNITS < <(

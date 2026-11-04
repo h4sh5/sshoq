@@ -12,15 +12,17 @@ make proof                # Gobra checks every proof obligation in proof/*/model
 
 ## State of the programme
 
-Eleven verified files — ten model units (`proof/*/model.gobra`) plus [`../glob.go`](../glob.go), a
-shipped function carrying its own specs — and 42 `TestConformance...` tests in
+Twelve verified files — ten model units (`proof/*/model.gobra`) plus two shipped ones carrying their
+own specs, [`../glob.go`](../glob.go) and [`../identity_checks.go`](../identity_checks.go) — and 46
+`TestConformance...` tests in
 the packages of the code they check, and a catalogue of 31 requirements
 ([`SECURITY_REQUIREMENTS.md`](SECURITY_REQUIREMENTS.md)) whose status column is the only place a
 claim about coverage is written:
 
 | status | rows | what it means |
 |---|---|---|
-| proved (model) + conformant | 19 | a Gobra unit proves the decision over all modelled inputs, and a test says the modelled function still behaves that way |
+| proved (model) + conformant | 17 | a Gobra unit proves the decision over all modelled inputs, and a test says the modelled function still behaves that way |
+| proved (shipped) + conformant | 2 | the same, except the proof is of the function the server calls: SR-PERM-04 and SR-PERM-05, in `identity_checks.go`. The model of each is a second opinion now, not the argument |
 | conformant | 3 | checked in Go alone, because the prover cannot hold the shape of the whole claim (the recursive glob: findings **F5**, **F6**) — `glob.go` does have a proved *part* of one of them, termination, in the shipped file |
 | partially proved | 4 | the decision function is proved, the surrounding machinery is a premise named in the row |
 | out of scope for Gobra | 3 | QUIC conversation state and version parsing; integration and unit tests are the control |
@@ -49,11 +51,13 @@ assumptions the argument rests on, listed as such rather than buried in a model 
 
 ## Verification in place: the specs live in the shipped file
 
-[`../glob.go`](../glob.go) is not a model. It is the `from=` matcher the server calls, moved out of
-`identity_options.go` verbatim and annotated there, and `make proof` verifies it: the code that runs
-in production is the code the proof talks about, with no transcription step in between. That is
-roadmap Phase 3, and the reason the matcher is the file that got there first is its **imports**, not
-its difficulty:
+Two files in the proof are not models. [`../glob.go`](../glob.go) is the `from=` matcher the server
+calls, moved out of `identity_options.go` and annotated where it ships.
+[`../identity_checks.go`](../identity_checks.go) is the channel-request and channel-open gate -- the
+code that enforces `no-pty`, `restrict`, `no-port-forwarding` and a forced command -- separated from
+the messages it produces and annotated there. `make proof` verifies both: the code that runs in
+production is the code the proof talks about, with no transcription step in between. That is roadmap
+Phase 3, and what decides whether a file can join it is **imports**, not difficulty:
 
 * Gobra v26.09 ships stubs with real specs for `strings`, `net`, `strconv`, `errors`, `time`, `sync`,
   `bytes` and `encoding` (`.proof-tools/src/gobra/src/main/resources/stubs/`), so a file that uses
@@ -62,8 +66,11 @@ its difficulty:
 * For `fmt` the stub says "We do not support members defined in this package", so any file that
   formats an error with `fmt.Errorf` — which is every decision file in this server that refuses
   something — cannot be verified where it lives until the formatting is separated from the decision.
-  The next step is therefore not "annotate `identity_options.go`" but "split the decision from the
-  message, then annotate the decision".
+  `identity_checks.go` is that separation carried out: the gate returns an enum, the method in
+  `identity_options.go` switches over the enum to produce the wording, and the proof is of the gate.
+  The wording is not nothing -- a refusal that blamed the wrong flag would be a different gate -- so
+  `TestConformanceRequestVerdictIsTheGate` and `TestConformanceChannelVerdictIsTheGate` hold each
+  refusal to the phrase it has always used, against a locally rewritten copy of the pre-split code.
 * A verified file is handed to Gobra alone (`gobra -i glob.go`), so its package-mates are not its
   problem. `scripts/run-proofs.sh` lists such files in `INPLACE_UNITS` rather than discovering them,
   so that someone adding an import to a verified file sees the proof fail rather than watching it
@@ -203,9 +210,20 @@ specific version of a specific verifier. Things that cost time to learn:
   `a == b`). Write string properties with `len` and byte indices or they will not discharge.
 * **Specs in a `.go` file are comments, one clause per line.** `// @ ensures ...` above the signature;
   loop specs (`// @ invariant`, `// @ decreases`) go *before* the `for`, not inside the body; a
-  lexicographic measure is a bare list, `decreases a, b`, not `decreases (a, b)`. gofmt reflows a
-  comment past about a hundred columns into an indented continuation Gobra cannot read, so a long
-  clause wants a named helper (`isSingleStar`, `sameText`) rather than a long line.
+  lexicographic measure is a bare list, `decreases a, b`, not `decreases (a, b)`. A clause may run on
+  over `// @`-prefixed continuation lines, and length is not a problem -- `identity_checks.go` has a
+  240-character `ensures` that verifies -- but a continuation line without the prefix is a parse
+  error, and there is no `<==>`: write `(A ==> B) && (B ==> A)`.
+* **A `pure` function must be one `return` of a pure expression.** No `switch`, no `if`, no loop.
+  That is why `isForwardingFamily` is a long boolean expression while the gate that uses the same set
+  is a `switch`: only the first can be named inside another function's postcondition. Note what
+  purity is *for* -- being called from a spec. `requestVerdictFor` and `channelVerdictFor` are not
+  `pure` (they are imperative, with `acc`-free value parameters), and their contracts are still
+  proved of their bodies; a function only needs `pure` if a spec has to talk about it.
+* **A contract on an impure function is still a theorem about its body.** The distinction worth
+  keeping is between proving a body satisfies its contract (what `make proof` does for every function
+  here, pure or not) and being able to *use* a function inside another spec (which needs `pure`, and
+  therefore needs the single-return shape).
 * **There is no `delete`.** The builtins are `make`, `len`, `append`, `copy`, `min`, `max`.
   A map that forgets keys has to be rebuilt in a loop under a ghost "visited" set, which is
   why the throttle's *memory* bound is a Go test rather than a lemma.

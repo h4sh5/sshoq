@@ -231,22 +231,16 @@ func (o *IdentityOptions) CheckChannelOpen(channelType string) error {
 	}
 	// some channel types carry extra data after a comma, e.g.
 	// "open-request-reverse-tcp,<address>"
-	family := channelType
-	if i := strings.IndexByte(family, ','); i >= 0 {
-		family = family[:i]
-	}
-	switch family {
-	case "direct-tcp", "direct-udp", "request-reverse-tcp", "request-reverse-udp", "open-request-reverse-tcp", "open-request-reverse-udp":
-		if o.NoPortForwarding {
-			return fmt.Errorf("port forwarding is forbidden by the identity which authenticated this conversation")
-		}
-		if o.ForcedCommand != "" {
-			return fmt.Errorf("the identity which authenticated this conversation is restricted to the command \"%s\": forwarding is not available", o.ForcedCommand)
-		}
-	case "sftp":
-		if o.ForcedCommand != "" {
-			return fmt.Errorf("the identity which authenticated this conversation is restricted to the command \"%s\": the sftp subsystem is not available", o.ForcedCommand)
-		}
+	family := channelFamily(channelType, strings.IndexByte(channelType, ','))
+	// as above, the decision itself is channelVerdictFor and Gobra verifies it in
+	// identity_checks.go
+	switch channelVerdictFor(family, o.NoPortForwarding, o.ForcedCommand) {
+	case channelRefusedPortForwarding:
+		return fmt.Errorf("port forwarding is forbidden by the identity which authenticated this conversation")
+	case channelRefusedForwardingByCommand:
+		return fmt.Errorf("the identity which authenticated this conversation is restricted to the command \"%s\": forwarding is not available", o.ForcedCommand)
+	case channelRefusedSftpByCommand:
+		return fmt.Errorf("the identity which authenticated this conversation is restricted to the command \"%s\": the sftp subsystem is not available", o.ForcedCommand)
 	}
 	return nil
 }
@@ -258,23 +252,17 @@ func (o *IdentityOptions) CheckRequest(requestType string) error {
 	if o == nil {
 		return nil
 	}
-	switch requestType {
-	case "pty-req":
-		if o.NoPty {
-			return fmt.Errorf("a terminal was requested but the identity which authenticated this conversation forbids it (no-pty)")
-		}
-	case "env":
-		if o.NoEnv {
-			return fmt.Errorf("the identity which authenticated this conversation forbids setting environment variables (restrict)")
-		}
-	case "x11-req":
-		if o.NoX11Forwarding {
-			return fmt.Errorf("X11 forwarding is forbidden by the identity which authenticated this conversation")
-		}
-	case "agent-forwarding":
-		if o.NoAgentForwarding {
-			return fmt.Errorf("agent forwarding is forbidden by the identity which authenticated this conversation")
-		}
+	// the decision is requestVerdictFor, which Gobra verifies in identity_checks.go; what is left
+	// here is the message that goes with each refusal
+	switch requestVerdictFor(requestType, o.NoPty, o.NoEnv, o.NoX11Forwarding, o.NoAgentForwarding) {
+	case requestRefusedPty:
+		return fmt.Errorf("a terminal was requested but the identity which authenticated this conversation forbids it (no-pty)")
+	case requestRefusedEnv:
+		return fmt.Errorf("the identity which authenticated this conversation forbids setting environment variables (restrict)")
+	case requestRefusedX11:
+		return fmt.Errorf("X11 forwarding is forbidden by the identity which authenticated this conversation")
+	case requestRefusedAgent:
+		return fmt.Errorf("agent forwarding is forbidden by the identity which authenticated this conversation")
 	}
 	return nil
 }
