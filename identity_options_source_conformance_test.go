@@ -451,3 +451,193 @@ func TestConformanceFromListFactsAreTheModelPremises(t *testing.T) {
 }
 
 var _ = fmt.Sprintf
+
+// TestConformanceNegationHelpers keeps isNegated -- the helper whose behaviour the proof of the
+// source rule takes for granted -- equal to the strings method the loop used to call directly. It
+// matters because the shipped loop now asks the named helper, so this line is what makes "which
+// patterns are exclusions" in the proof mean "starts with an exclamation mark" in the wire format.
+func TestConformanceNegationHelpers(t *testing.T) {
+	patterns := []string{
+		"", "!", "!!", "!10.0.0.0/8", "10.0.0.0/8", "10.*", "!10.*", "a!", " !x", "! ",
+		"\t!", "example.com", "!example.com", "＊", "！x", "\x00!", "!*",
+	}
+	for _, pattern := range patterns {
+		if got, want := isNegated(pattern), strings.HasPrefix(pattern, "!"); got != want {
+			t.Errorf("isNegated(%q) = %v but strings.HasPrefix(%q, \"!\") = %v", pattern, got, pattern, want)
+		}
+	}
+}
+
+// TestConformanceSourceMatchesSplits is the single loop CheckSource used to run, taken apart: the
+// per-pattern work moved to sourceMatches and the combination to sourceVerdictFor, and this says the
+// two halves still compute exactly what the one loop computed -- the same exclusion flags, the same
+// match results (against a body with the "!" trimmed), and the same accepted/excluded pair the loop
+// would have reached. Exhaustive over the interesting pattern spellings, including a doubled "!",
+// which is an exclusion whose body is a pattern that can match nothing.
+func TestConformanceSourceMatchesSplits(t *testing.T) {
+	patterns := []string{
+		"10.0.0.0/8", "!10.9.9.9", "10.1.2.3", "!10.1.2.3", "10.*", "*", "!*",
+		"::1", "!::1", "example.com", "!example.com", "", "!", "!!10.1.2.3",
+	}
+	addresses := []net.IP{
+		net.ParseIP("10.1.2.3"), net.ParseIP("10.9.9.9"), net.ParseIP("192.0.2.7"),
+		net.ParseIP("::1"), nil,
+	}
+	for _, ip := range addresses {
+		negated, matched := sourceMatches(patterns, ip)
+		if len(negated) != len(patterns) || len(matched) != len(patterns) {
+			t.Fatalf("sourceMatches returned %d and %d flags for %d patterns", len(negated), len(matched), len(patterns))
+		}
+		positive, excluded := false, false
+		for i, pattern := range patterns {
+			wantNegated := strings.HasPrefix(pattern, "!")
+			wantMatched := matchesSourcePattern(strings.TrimPrefix(pattern, "!"), ip)
+			if negated[i] != wantNegated {
+				t.Errorf("sourceMatches flag %d (%q): exclusion=%v, want %v", i, pattern, negated[i], wantNegated)
+			}
+			if matched[i] != wantMatched {
+				t.Errorf("sourceMatches flag %d (%q): matched=%v, want %v", i, pattern, matched[i], wantMatched)
+			}
+			if wantMatched {
+				if wantNegated {
+					excluded = true
+				} else {
+					positive = true
+				}
+			}
+		}
+		// the loop returned early on an exclusion; the split scans everything and the verdict
+		// below has to agree with what that early return decided
+		got := sourceVerdictFor(true, ip != nil, negatedMatch(negated, matched, 0), inclusionMatch(negated, matched, 0))
+		want := sourceRefusedNotListed
+		switch {
+		case ip == nil:
+			want = sourceRefusedNoAddress
+		case excluded:
+			want = sourceRefusedExcluded
+		case positive:
+			want = sourcePermitted
+		}
+		if got != want {
+			t.Errorf("split decision for address %v is %d, the original loop reaches %d", ip, got, want)
+		}
+	}
+}
+
+// TestConformanceSourceVerdictIsTheRule walks the whole input space of the proved decision function
+// and checks each of the sixteen combinations against the rule as a reader of docs/server_config.md
+// would state it. This is what the unit in source_check.go proves -- exhaustively here is the same
+// set -- and it is the half of the correspondence that does not depend on any address parsing.
+func TestConformanceSourceVerdictIsTheRule(t *testing.T) {
+	for _, restricted := range []bool{false, true} {
+		for _, known := range []bool{false, true} {
+			for _, excluded := range []bool{false, true} {
+				for _, listed := range []bool{false, true} {
+					want := sourcePermitted
+					switch {
+					case !restricted:
+						want = sourcePermitted
+					case !known:
+						want = sourceRefusedNoAddress
+					case excluded:
+						want = sourceRefusedExcluded
+					case listed:
+						want = sourcePermitted
+					default:
+						want = sourceRefusedNotListed
+					}
+					if got := sourceVerdictFor(restricted, known, excluded, listed); got != want {
+						t.Errorf("sourceVerdictFor(restricted=%v, known=%v, excluded=%v, listed=%v) = %d, want %d",
+							restricted, known, excluded, listed, got, want)
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestConformanceVerdictsAreReachableAndWorded ties each verdict the proof reasons about to the one
+// CheckSource message that reports it, with the wording the messages have always had. An operator
+// tells "not in your network" from "your address is not known" from "you are excluded" by that text,
+// so the mapping is part of the behaviour the split must not change.
+func TestConformanceVerdictsAreReachableAndWorded(t *testing.T) {
+	cases := []struct {
+		from    []string
+		addr    string
+		verdict sourceVerdict
+		message string // "" means no error, i.e. the permitted verdict
+		through string
+	}{
+		{[]string{"10.0.0.0/8"}, "10.1.2.3:443", sourcePermitted, "", "a network that describes the address"},
+		{[]string{"10.0.0.0/8"}, "nonsense", sourceRefusedNoAddress,
+			"cannot determine the source address of the peer, which is required by the from=\"...\" restriction of this identity",
+			"an address the server cannot name"},
+		{[]string{"10.0.0.0/8", "!10.1.2.3"}, "10.1.2.3:443", sourceRefusedExcluded,
+			"source address 10.1.2.3 is excluded by the from=\"...\" restriction of this identity",
+			"an exclusion that the inclusion also describes"},
+		{[]string{"10.0.0.0/8"}, "192.0.2.7:443", sourceRefusedNotListed,
+			"source address 192.0.2.7 is not allowed by the from=\"...\" restriction of this identity",
+			"an address no pattern describes"},
+	}
+	for _, c := range cases {
+		err := (&IdentityOptions{From: c.from}).CheckSource(c.addr)
+		if c.verdict == sourcePermitted {
+			if err != nil {
+				t.Errorf("CheckSource(%q) with from=%q: %v, want acceptance (%s)", c.addr, c.from, err, c.through)
+			}
+			continue
+		}
+		if err == nil {
+			t.Errorf("CheckSource(%q) with from=%q accepted, want verdict %d (%s)", c.addr, c.from, c.verdict, c.through)
+			continue
+		}
+		if err.Error() != c.message {
+			t.Errorf("CheckSource(%q) with from=%q said %q, want %q (%s)", c.addr, c.from, err.Error(), c.message, c.through)
+		}
+	}
+	// and the verdict CheckSource reaches is the one the split computes for the same input
+	for _, c := range cases {
+		ip := parsePeerIP(c.addr)
+		negated, matched := sourceMatches(c.from, ip)
+		got := sourceVerdictFor(len(c.from) > 0, ip != nil, negatedMatch(negated, matched, 0), inclusionMatch(negated, matched, 0))
+		if got != c.verdict {
+			t.Errorf("from=%q addr=%q: the decision is %d but CheckSource reported %d (%s)",
+				c.from, c.addr, got, c.verdict, c.through)
+		}
+	}
+}
+
+// TestConformanceMatchPredicatesAreTheScan checks the two proved predicates against the scan they
+// summarise, over every array of flags up to length four and from every starting index -- including
+// the empty array, where both must say no, and the all-matched array, where an exclusion in the last
+// position must still win.
+func TestConformanceMatchPredicatesAreTheScan(t *testing.T) {
+	for length := 0; length <= 4; length++ {
+		for mask := 0; mask < 1<<(2*length); mask++ {
+			negated := make([]bool, length)
+			matched := make([]bool, length)
+			for i := 0; i < length; i++ {
+				negated[i] = mask&(1<<(2*i)) != 0
+				matched[i] = mask&(1<<(2*i+1)) != 0
+			}
+			for start := 0; start <= length; start++ {
+				wantExcluded, wantListed := false, false
+				for i := start; i < length; i++ {
+					if matched[i] {
+						if negated[i] {
+							wantExcluded = true
+						} else {
+							wantListed = true
+						}
+					}
+				}
+				if got := negatedMatch(negated, matched, start); got != wantExcluded {
+					t.Errorf("negatedMatch(%v, %v, %d) = %v, want %v", negated, matched, start, got, wantExcluded)
+				}
+				if got := inclusionMatch(negated, matched, start); got != wantListed {
+					t.Errorf("inclusionMatch(%v, %v, %d) = %v, want %v", negated, matched, start, got, wantListed)
+				}
+			}
+		}
+	}
+}

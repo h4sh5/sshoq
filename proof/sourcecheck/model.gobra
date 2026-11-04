@@ -3,6 +3,13 @@
 // address, a CIDR block, or a glob over the textual address) and CheckSource (the list of
 // possibly-negated patterns).
 //
+// Tracked files: identity_options.go (CheckSource, sourceMatches, matchesSourcePattern, parsePeerIP),
+// source_check.go (sourceVerdictFor, negatedMatch, inclusionMatch, isNegated), glob.go (matchGlob),
+// identity_options_source_conformance_test.go (the correspondence). The list decision proved below is
+// now also proved on shipped code in source_check.go, so this unit is a second opinion on the same
+// rule rather than the only argument for it; the address layer underneath it stays modelled here, as
+// it can only be.
+//
 // The layers that consult `net` are modelled by the facts they return, because Gobra cannot ingest
 // them: isCidr says "net.ParseCIDR accepted the pattern", contains says "the network holds the
 // address", parsesAsIp says "net.ParseIP accepted it", ipEquals is net.IP.Equal, wildcard is

@@ -12,8 +12,9 @@ make proof                # Gobra checks every proof obligation in proof/*/model
 
 ## State of the programme
 
-Twelve verified files — ten model units (`proof/*/model.gobra`) plus two shipped ones carrying their
-own specs, [`../glob.go`](../glob.go) and [`../identity_checks.go`](../identity_checks.go) — and 46
+Thirteen verified files — ten model units (`proof/*/model.gobra`) plus three shipped ones carrying
+their own specs, [`../glob.go`](../glob.go), [`../identity_checks.go`](../identity_checks.go) and
+[`../source_check.go`](../source_check.go) — and 51
 `TestConformance...` tests in
 the packages of the code they check, and a catalogue of 31 requirements
 ([`SECURITY_REQUIREMENTS.md`](SECURITY_REQUIREMENTS.md)) whose status column is the only place a
@@ -21,8 +22,8 @@ claim about coverage is written:
 
 | status | rows | what it means |
 |---|---|---|
-| proved (model) + conformant | 17 | a Gobra unit proves the decision over all modelled inputs, and a test says the modelled function still behaves that way |
-| proved (shipped) + conformant | 2 | the same, except the proof is of the function the server calls: SR-PERM-04 and SR-PERM-05, in `identity_checks.go`. The model of each is a second opinion now, not the argument |
+| proved (model) + conformant | 16 | a Gobra unit proves the decision over all modelled inputs, and a test says the modelled function still behaves that way |
+| proved (shipped) + conformant | 3 | the same, except the proof is of the function the server calls: SR-PERM-04 and SR-PERM-05 in `identity_checks.go`, SR-PERM-06 in `source_check.go`. The model of each is a second opinion now, not the argument |
 | conformant | 3 | checked in Go alone, because the prover cannot hold the shape of the whole claim (the recursive glob: findings **F5**, **F6**) — `glob.go` does have a proved *part* of one of them, termination, in the shipped file |
 | partially proved | 4 | the decision function is proved, the surrounding machinery is a premise named in the row |
 | out of scope for Gobra | 3 | QUIC conversation state and version parsing; integration and unit tests are the control |
@@ -51,13 +52,16 @@ assumptions the argument rests on, listed as such rather than buried in a model 
 
 ## Verification in place: the specs live in the shipped file
 
-Two files in the proof are not models. [`../glob.go`](../glob.go) is the `from=` matcher the server
+Three files in the proof are not models. [`../glob.go`](../glob.go) is the `from=` matcher the server
 calls, moved out of `identity_options.go` and annotated where it ships.
 [`../identity_checks.go`](../identity_checks.go) is the channel-request and channel-open gate -- the
 code that enforces `no-pty`, `restrict`, `no-port-forwarding` and a forced command -- separated from
-the messages it produces and annotated there. `make proof` verifies both: the code that runs in
+the messages it produces and annotated there.
+[`../source_check.go`](../source_check.go) is the decision underneath `from=`: the rule that turns
+"which patterns are exclusions, which matched, is the address known" into a verdict, plus the pure
+predicates that read the flag arrays. `make proof` verifies all three: the code that runs in
 production is the code the proof talks about, with no transcription step in between. That is roadmap
-Phase 3, and what decides whether a file can join it is **imports**, not difficulty:
+Phase 3, and what decides whether a file can join it is **what the prover can read**, not difficulty:
 
 * Gobra v26.09 ships stubs with real specs for `strings`, `net`, `strconv`, `errors`, `time`, `sync`,
   `bytes` and `encoding` (`.proof-tools/src/gobra/src/main/resources/stubs/`), so a file that uses
@@ -72,9 +76,31 @@ Phase 3, and what decides whether a file can join it is **imports**, not difficu
   `TestConformanceRequestVerdictIsTheGate` and `TestConformanceChannelVerdictIsTheGate` hold each
   refusal to the phrase it has always used, against a locally rewritten copy of the pre-split code.
 * A verified file is handed to Gobra alone (`gobra -i glob.go`), so its package-mates are not its
-  problem. `scripts/run-proofs.sh` lists such files in `INPLACE_UNITS` rather than discovering them,
-  so that someone adding an import to a verified file sees the proof fail rather than watching it
-  quietly shrink.
+  problem — and are not available to it either: a verified file may not call a function that lives in
+  another file of package `ssh3`, which is why the address parsing stays behind. That also means such
+  a file must be self-contained, and `-i` reports the opposite as "got unknown identifier".
+  `scripts/run-proofs.sh` lists such files in `INPLACE_UNITS` rather than discovering them, so that
+  someone adding an import to a verified file sees the proof fail rather than watching it quietly
+  shrink.
+* The third boundary is **permissions**, and `source_check.go` is the shape the answer took. Slice
+  elements are heap in a spec, so `exists k :: negated[k] && matched[k]` written in an ordinary
+  function's contract is refused ("Method contract is not well-formed. Permission to negated[k] might
+  not suffice"); a pure function may ask for the array reads (`forall i :: acc(&negated[i])`, the form
+  Gobra's own `net/ip` stub uses) and then verifies; but an *impure* caller holding that quantified
+  permission cannot satisfy a pure callee's precondition — "Precondition of call
+  `negatedMatch(...)` might not hold. Permission to negated[i] might not suffice" — and that is a
+  Silicon limitation with quantified permissions, not a missing annotation. So the array readers are
+  pure and take the arrays plus the permissions, and the proved rule takes their answers as plain
+  `bool`s: every clause of SR-PERM-06 is then proved with no heap in sight.
+
+What `source_check.go` proves is the partition: its `ensures` clauses are bidirectional, so the four
+verdicts are shown to divide the four input facts exactly rather than merely to imply each other in
+the safe direction, and the fail-closed rule of SR-PERM-06 appears as a *precedence* — `!addressKnown`
+is asked before either match, so an address the server cannot name cannot be waved through by an empty
+pattern list. What it cannot prove is any of the address work: `net`'s stubs demand the address as an
+ownership predicate (`len(ip) == 4 || len(ip) == 16 && forall i :: acc(&ip[i])`) and have no
+`SplitHostPort`, so `parsePeerIP` and `matchesSourcePattern` stay on the message side, where
+`TestConformanceMatchesSourcePatternStrategies` asserts what they return row by row.
 
 What the annotations on `matchGlob` prove, and what they do not, is written in the file. In short:
 termination on a two-component measure (so the linear-time claim of **F5** is a theorem and not a
@@ -171,7 +197,8 @@ One Gobra package per unit, one unit per requirement cluster:
 | `sourcecheck/` | SR-PERM-06, SR-PERM-07 | `matchesSourcePattern` and `CheckSource` — the `from=` restriction's guards, three matching strategies and negated list |
 
 `scripts/run-proofs.sh` discovers `proof/*/model.gobra` and runs Gobra once per unit, so a
-timeout or a failure in one unit cannot hide the verdict of another.
+timeout or a failure in one unit cannot hide the verdict of another. The three shipped units
+(`glob.go`, `identity_checks.go`, `source_check.go`) are listed separately, in `INPLACE_UNITS`.
 
 ## Writing one, notes from the ones here
 
@@ -195,6 +222,9 @@ specific version of a specific verifier. Things that cost time to learn:
   the next line must break *after* an operator: `a &&` newline `b` parses, `a` newline `|| b` is
   read as two statements and dies with "unexpected || in block, expecting '}'."
 * **Every `pure func` needs a `decreases` clause, even a non-recursive one** (`decreases 0`).
+* **Quantified variables need types in the Go frontend**: `forall k int ::`, `exists k int ::`. Bare
+  `forall k ::` is a parse error ("no viable alternative at input ':'"), which is easy to misread as a
+  problem with the clause rather than with the binder.
 * **A recursive `pure func` is checked and then opaque.** Its `decreases` measure is verified, but
   no concrete call can be proved of it afterwards: recursion over `int` unfolds (`f(3)` verifies),
   recursion over `string` does not (`gm("a", "a", 0, 0)` stays unknown), recursion with several

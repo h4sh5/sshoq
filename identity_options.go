@@ -151,12 +151,30 @@ func unquoteIdentityOptionValue(value string) string {
 
 // parsePeerIP extracts the IP of a peer address given as a string, generally
 // "ip:port" as http.Request.RemoteAddr is set by the HTTP/3 server.
+//
+// It stays on this side of the split because Gobra's stubs for net have no
+// SplitHostPort; see source_check.go for what the split is and why.
 func parsePeerIP(remoteAddr string) net.IP {
 	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
 		host = remoteAddr
 	}
 	return net.ParseIP(strings.Trim(host, "[]"))
+}
+
+// sourceMatches walks the "from=" patterns of an identity and reports, for each
+// one in order, whether it is an exclusion and whether it describes the address.
+// The verdict itself is sourceVerdictFor in source_check.go, which is proved;
+// this is the part that needs an address, and TestConformanceSourceMatchesSplits
+// keeps it equal to the single loop this file used to have.
+func sourceMatches(from []string, ip net.IP) (negated []bool, matched []bool) {
+	negated = make([]bool, len(from))
+	matched = make([]bool, len(from))
+	for i, pattern := range from {
+		negated[i] = isNegated(pattern)
+		matched[i] = matchesSourcePattern(strings.TrimPrefix(pattern, "!"), ip)
+	}
+	return negated, matched
 }
 
 // matchesSourcePattern tells whether ip is described by a single "from=" pattern:
@@ -206,25 +224,24 @@ func (o *IdentityOptions) CheckSource(remoteAddr string) error {
 	if ip == nil {
 		return fmt.Errorf("cannot determine the source address of the peer, which is required by the from=\"...\" restriction of this identity")
 	}
-	accepted := false
-	for _, pattern := range o.From {
-		negated := strings.HasPrefix(pattern, "!")
-		trimmed := strings.TrimPrefix(pattern, "!")
-		if matchesSourcePattern(trimmed, ip) {
-			if negated {
-				return fmt.Errorf("source address %s is excluded by the from=\"...\" restriction of this identity", ip)
-			}
-			accepted = true
-		}
-	}
-	if !accepted {
+	// Everything past the two guards is the proved rule: sourceVerdictFor in
+	// source_check.go decides from four facts, and the first two of them are what
+	// those guards just established -- that a restriction exists and that its
+	// address can be named -- so they arrive as true rather than being recomputed.
+	// The other two come from the pure predicates over the per-pattern flags.
+	// Choosing to refuse here rather than inside the rule is only about the wording,
+	// and TestConformanceVerdictsAreReachableAndWorded holds each verdict to the
+	// wording it has always had.
+	negated, matched := sourceMatches(o.From, ip)
+	switch sourceVerdictFor(true, true, negatedMatch(negated, matched, 0), inclusionMatch(negated, matched, 0)) {
+	case sourceRefusedExcluded:
+		return fmt.Errorf("source address %s is excluded by the from=\"...\" restriction of this identity", ip)
+	case sourceRefusedNotListed:
 		return fmt.Errorf("source address %s is not allowed by the from=\"...\" restriction of this identity", ip)
 	}
 	return nil
 }
 
-// CheckChannelOpen tells whether a channel of the given type may be opened by a
-// client which authenticated with this identity.
 func (o *IdentityOptions) CheckChannelOpen(channelType string) error {
 	if o == nil {
 		return nil

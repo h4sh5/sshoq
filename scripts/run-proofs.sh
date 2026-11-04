@@ -53,6 +53,7 @@ source "$TOOLS_DIR/env.sh"
 INPLACE_UNITS=(
 	"$REPO_ROOT/glob.go"
 	"$REPO_ROOT/identity_checks.go"
+	"$REPO_ROOT/source_check.go"
 )
 
 mapfile -t UNITS < <(
