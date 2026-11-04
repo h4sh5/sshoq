@@ -20,10 +20,10 @@ their own specs, [`../glob.go`](../glob.go), [`../identity_checks.go`](../identi
 [`../util/equalfold.go`](../util/equalfold.go),
 [`../util/unix_util/account_rules.go`](../util/unix_util/account_rules.go),
 [`../util/varint.go`](../util/varint.go) and
-[`../version_rules.go`](../version_rules.go) — and 141
-`TestConformance...` tests (135 in the default build and 14 more where the password
-implementation is picked by build tag, so 149 runs of the target) in
-the packages of the code they check, and a catalogue of 40 requirements
+[`../version_rules.go`](../version_rules.go) — and **158 runs** of
+`TestConformance...` tests: 145 in the default build plus a second run of `./util/unix_util/`
+(13 more) against the other password implementation, in the packages of the code they check, and a
+catalogue of 41 requirements
 ([`SECURITY_REQUIREMENTS.md`](SECURITY_REQUIREMENTS.md)) whose status column is the only place a
 claim about coverage is written:
 
@@ -31,7 +31,7 @@ claim about coverage is written:
 |---|---|---|
 | `proved:model` + conformant | 16 | a Gobra unit proves the decision over all modelled inputs, and a test says the modelled function still behaves that way |
 | `proved:shipped` + conformant | 8 | the same, except the proof is of the function the server calls: SR-PERM-04 and SR-PERM-05 in `identity_checks.go`, SR-PERM-06 in `source_check.go`, SR-AUTH-08 in `server_auth/throttle_rules.go`, SR-TR-04 in `server_auth/truncate.go`, SR-PARSE-03 in `util/varint.go`, SR-PARSE-05 in `util/equalfold.go`, SR-TR-03 in `version_rules.go`. The model of each is a second opinion now, not the argument |
-| `conformant` | 9 | checked in Go alone, because the prover cannot hold the shape of the whole claim (the recursive glob: findings **F5**, **F6**) — `glob.go` does have a proved *part* of one of them, termination, in the shipped file — and rows where the claim is about strings, tokens or the filesystem rather than arithmetic, so enumeration is the honest control: SR-TR-05, the name a server is trusted under (**F13**), and SR-AUTH-12, the public-key credential, whose verifier had no test at all before it (**F15**); and SR-AUTH-13, the password comparison, where what is pinned is a two-line guard whose deletion would let any password open a locked account (**F16**); and SR-AUTH-14, the identity files themselves, whose three unasked questions -- a 64 KiB line ceiling that deletes the rest of the file without an error, an account with no home reading keys out of the server's working directory, and nobody asking who may write the file -- are **F17** |
+| `conformant` | 10 | checked in Go alone, because the prover cannot hold the shape of the whole claim (the recursive glob: findings **F5**, **F6**) — `glob.go` does have a proved *part* of one of them, termination, in the shipped file — and rows where the claim is about strings, tokens or the filesystem rather than arithmetic, so enumeration is the honest control: SR-TR-05, the name a server is trusted under (**F13**), and SR-AUTH-12, the public-key credential, whose verifier had no test at all before it (**F15**); and SR-AUTH-13, the password comparison, where what is pinned is a two-line guard whose deletion would let any password open a locked account (**F16**); and SR-AUTH-14, the identity files themselves, whose three unasked questions -- a 64 KiB line ceiling that deletes the rest of the file without an error, an account with no home reading keys out of the server's working directory, and nobody asking who may write the file -- are **F17**; SR-PARSE-06, the SFTP frames, where the decode side survived 100% of truncations and single-byte mutations and the encode side turns out to announce a string over 64 KiB with a wrapped length (**F18**) |
 | `partial` | 3 | the decision function is proved, the surrounding machinery is a premise named in the row. The strongest of the three is SR-AUTH-11, the account policy gate, whose decisions are verified in the shipped `util/unix_util/account_rules.go`; what keeps it `partial` is that the fields come from `shadow(5)`, the day from a clock, and the two `nologin(8)` questions from the filesystem |
 | `out-of-scope` | 2 | QUIC conversation state; integration and unit tests are the control |
 | `open` | 1 | SR-PERM-11 / finding **F2**: a decision the maintainer owes, not a proof that is missing |
