@@ -46,7 +46,7 @@ func modelCheckChannelOpen(o *IdentityOptions, channelType string) bool {
 		!(o.ForcedCommand != "" && family == "sftp")
 }
 
-func TestIdentityOptionGatesMatchTheProvedDecisionTable(t *testing.T) {
+func TestConformanceIdentityOptionGatesMatchTheModel(t *testing.T) {
 	requestTypes := []string{"pty-req", "env", "x11-req", "agent-forwarding", "shell", "subsystem",
 		"window-change", ""}
 	channelTypes := []string{"session", "direct-tcp", "direct-udp", "request-reverse-tcp",
@@ -124,7 +124,7 @@ var unenforcedOptionNames = []string{
 	"no-ptyy", "No-PTY-Extra", "command", "from",
 }
 
-func TestParseIdentityOptionsIsFailClosedLikeTheProvedModel(t *testing.T) {
+func TestConformanceParseIdentityOptionsIsFailClosed(t *testing.T) {
 	// every enforced name, alone, parses and sets exactly what it says and nothing else
 	for _, name := range enforcedOptionNames {
 		options, err := ParseIdentityOptions([]string{name})

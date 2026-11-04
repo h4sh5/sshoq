@@ -98,7 +98,7 @@ pre-authentication input.
 | ID | Requirement | Code | Status |
 |----|-------------|------|--------|
 | SR-PARSE-01 | Parsing a channel request never reads past the declared payload length and never panics on truncated input. | `message/channel_request.go` | phase 3 (see roadmap); the existing fuzz corpus is the interim control |
-| SR-PARSE-02 | `ParseBearerAuth` never panics for an `Authorization` value shorter than the prefix and only strips the prefix when it is really present (case-insensitive, ASCII). | `server_auth/handlers.go`, `util/util.go` (`EqualFold`) | **open** — small unit (`proof/bearer`), worth doing next: it is pre-authentication input on the Bearer path. The length guard exists in the code and is exercised by `server_auth` tests, not yet by a proof. |
+| SR-PARSE-02 | `ParseBearerAuth` never panics for an `Authorization` value shorter than the prefix and only strips the prefix when it is really present (case-insensitive, ASCII). | `server_auth/handlers.go`, `util/util.go` (`EqualFold`) | **Proved (model) + Tested** (`proof/bearer`, `server_auth/bearer_conformance_test.go`). Memory safety for every header and every prefix length; the length guard is exactly the prefix length and refuses short headers; `ok` implies the prefix is really there and the token is byte-for-byte the remainder; a refused header yields the empty token; the fold is per-byte, reflexive, symmetric and ASCII-only, so the prefix cannot be smuggled in through Unicode case-variants. The one fact Gobra cannot check — that the prefix constant *is* the seven ASCII bytes — is pinned by the conformance test, which also drives the real `ParseBearerAuth`, `HandleBearerAuth` and `util.EqualFold`. |
 
 ---
 
@@ -177,26 +177,67 @@ Pinned by `TestLoginThrottleCapacityHoldsWhenSourcesAreForgotten` (that witness)
 window rollovers, bound asserted after every operation). Both failed before the fix; the
 20 000-operation one broke at operation 118.
 
+### F2: two disagreeing `identity_option` values resolve silently (SR-IDENT-02)
+
+The docs say `identity_option` may be repeated. `ParseIdentityOptions` does iterate all
+values, so a *set* of restrictions accumulates — that part matches. But `identity_type` and
+`client_id` are scalar fields assigned by each occurrence, so for
+
+```
+identity_option=identity_type:users,identity_option=identity_type:certs
+```
+
+the last value wins and the first is dropped with no error and no log line. The identityopts
+unit documents this (`parseIsFailClosed` states it: every listed option is processed, scalars
+by last assignment) rather than proving it away, because the model must describe the code that
+runs.
+
+This is a deviation from the documented behaviour, not a memory-safety or authorisation bug:
+the winning value is still one the administrator wrote, and an empty `client_id` is still
+caught by `checkSourceIP`. It is recorded because "silently ignore half of an administrator's
+configuration" is the kind of thing an operator finds out the hard way. Options are to reject
+a repeated scalar with conflicting values (fail closed, like a bad option value already does)
+or to merge them and say so in the docs; either way the unit should prove whichever contract is
+chosen. Not changed here, because it changes behaviour for configurations that exist today.
+
+### F3: `-force-command-mismatch-exit=0` turns a restriction into advice (SR-PERM-03)
+
+With that flag, a request whose command differs from `force_command` is *allowed*, and the
+client is told the command it ran anyway. The restriction therefore holds only when the flag
+keeps its default. That is deliberate (it is how a forced-command server can be used
+interactively without losing the log line), but it means SR-PERM-03 is conditional on a
+command-line flag, which the requirement text and `docs/server_config.md` do not say. The
+identityopts unit models the refusing behaviour, so the flag is one of the places where the
+proof and the deployed server can diverge; noted in that requirement's row.
+
 ## Roadmap
 
 1. **Phase 1 (this work)** — toolchain (`scripts/setup-gobra.sh`, `make proof`,
-   `make proof-conformance`, the `proof.yml` workflow), this catalogue, and the five
-   verification units (`authflow`, `truncation`, `throttle`, `identityopts`, `replay`)
-   plus the canary. Any bug a proof or a conformance test surfaces gets
-   fixed and recorded here with the requirement ID it violates (F1).
+   `make proof-conformance`, the `proof.yml` workflow), this catalogue, and the six
+   verification units (`authflow`, `truncation`, `throttle`, `identityopts`, `replay`,
+   `bearer`) plus the canary. Any bug a proof or a conformance test surfaces gets
+   fixed and recorded here with the requirement ID it violates (F1, and F2/F3 for the
+   two decisions the tests pinned rather than changed).
 2. **Phase 2** — the units marked **open**, in the order that buys the most: `known_hosts`
-   (SR-TR-01), `bearer` (SR-PARSE-02), `source_check` (SR-PERM-06/07), then the
-   case-folding conformance check (SR-PERM-08). The token *validation* path around the replay
-   store (SR-AUTH-01..04: signature, `iss`, `aud`, `exp`) is the largest remaining hole in the
-   authentication story and needs a model of the JWKS fetch, which is why it is not in this
-   phase.
-3. **Phase 3** — push specifications into the production files themselves where Gobra can
+   (SR-TR-01), `source_check` (SR-PERM-06/07), then the case-folding conformance check
+   (SR-PERM-08) and the client's `CheckHost` (SR-TR-02). The token *validation* path around
+   the replay store (SR-AUTH-01..04: signature, `iss`, `aud`, `exp`) is the largest remaining
+   hole in the authentication story and needs a model of the JWKS fetch, which is why it is
+   not in this phase. The remaining piece of SR-AUTH-11 (the extension negotiation lists only
+   algorithms that are also implemented) is a conformance test over two tables and needs no
+   verifier at all — the cheapest open item here.
+3. **Fix the two known deviations** before adding more proofs: SR-IDENT-02 (two
+   `identity_option` values that disagree silently keep the last one — pick reject-or-merge,
+   and have the identityopts unit prove whichever contract is chosen) and SR-PERM-03
+   (`-force-command-mismatch-exit=0` turns the force-command restriction into an advisory,
+   with the catalogue updated to say so).
+4. **Phase 3** — push specifications into the production files themselves where Gobra can
    read them (`identity_options.go` is the best candidate: no cgo, no reflection, and the
    decision logic is already separated from `net` by three small functions), so that the
    annotated code *is* the verified code and no transcription is involved.
-4. **Phase 4** — `message/` wire parsing (bounded slicing for every message type) and the
+5. **Phase 4** — `message/` wire parsing (bounded slicing for every message type) and the
    SFTP path handling in `sftp/server.go`, where directory traversal and permissions are the
    interesting properties.
-5. **Phase 5** — the conversation/channel state machine: transitions under concurrency
+6. **Phase 5** — the conversation/channel state machine: transitions under concurrency
    (predicates, mutexes, goroutines — Gobra is good at this), which is where the remaining
    use-after-close and double-close class of bugs lives.

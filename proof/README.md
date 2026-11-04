@@ -30,6 +30,21 @@ keeps the rest honest:
   compares the real `CheckRequest`, `CheckChannelOpen` and `ParseIdentityOptions` with the
   decision table, written out in Go, that the Gobra `ensures` clauses state.
 * `server_auth/truncate_conformance_test.go` does the same for `truncate`.
+* `server_auth/bearer_conformance_test.go` checks `ParseBearerAuth`, `HandleBearerAuth` and
+  `util.EqualFold`: the accepted spellings of the scheme, the boundary at seven bytes, the
+  verbatim token, the fact that the fold is ASCII-only rather than Unicode, and that an
+  unparseable header produces 401 without the verifier ever being called. It also pins the
+  seven ASCII bytes of the prefix, the one fact Gobra cannot check because it does not
+  evaluate string literals.
+* `auth/oidc/replay_conformance_test.go` drives the real store over a seeded token stream,
+  including the cases the model's invariant is really about: a replay attempt must not evict,
+  a store of capacity one must still catch a replay, and a remembered token whose expiry claim
+  is unreadable must be refused on sight.
+
+Every one of them is named `TestConformance...`, which is how `make proof-conformance` selects
+exactly the correspondence checks and nothing else. The two tests that bound the throttle's
+memory and its lock-out live in `server_auth/login_policy_test.go` without that prefix, since
+they check no model output; Gobra cannot express them because it has no `delete`.
 
 Change the code without changing the table and `make proof-conformance` fails; change the
 model without changing the code and the same test fails from the other side. What remains
@@ -52,6 +67,7 @@ One Gobra package per unit, one unit per requirement cluster:
 | `truncation/` | SR-TR-04, SR-RES-02 | `truncate`, the pre-authentication `User-Agent` path |
 | `throttle/` | SR-AUTH-08, SR-RES-04 | the delay and lock-out arithmetic of `loginThrottle` |
 | `replay/` | SR-AUTH-07, SR-RES-03 | `AcceptedTokenStore.Accept`, `evictExpired`, `NewAcceptedTokenStore` |
+| `bearer/` | SR-PARSE-02 | `ParseBearerAuth`, `util.EqualFold`, `util.lower` — pre-authentication header parsing |
 
 `scripts/run-proofs.sh` discovers `proof/*/model.gobra` and runs Gobra once per unit, so a
 timeout or a failure in one unit cannot hide the verdict of another.

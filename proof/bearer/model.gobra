@@ -1,0 +1,216 @@
+// SR-PARSE-02: the Authorization header on the Bearer path.
+//
+// This models server_auth/handlers.go:ParseBearerAuth together with util/util.go:EqualFold
+// and util:lower. The input is a header value the client controls completely, and this is
+// the first thing the server does with it, before any authentication: read seven bytes off
+// the front, compare them case-insensitively with "Bearer ", hand the rest to the JWT
+// verifier.
+//
+// The decision itself is modelled over `string`, exactly like the real function: len(),
+// indexing and slicing are byte-oriented in Go, so the byte semantics below are the real
+// ones, and Gobra owes a proof for every index and every slice - which is what makes
+// "never panics on a short header" a discharged obligation here rather than a claim about
+// the tests. One Gobra limitation shapes the layout: string literals are not evaluated, so
+// no concrete header can be reduced inside a proof. The consequences are handled by
+// writing the claims as lemmas over *symbolic* headers (which proves them for every header
+// of the described shape, strictly stronger than examples), and by demonstrating the byte
+// level of the case fold over byte sequences, where literals do evaluate.
+//
+// What is proved:
+//   * memory safety of the header read, for every header and every prefix length;
+//   * the length guard is exactly the prefix length: a header shorter than it is refused,
+//     and the guard is what refuses it, not an accident of the comparison;
+//   * ok implies the prefix is really there (first seven bytes ASCII-fold to "Bearer ")
+//     and the returned token is byte-for-byte the remainder - no off-by-one, so the JWT
+//     verifier never sees a token with a byte of the prefix eaten or left behind;
+//   * a refused header yields the empty token, so nothing partial reaches the verifier;
+//   * the fold is a per-byte relation between equal-length strings: it can never make a
+//     short header look as long as the prefix, and it is reflexive, symmetric and
+//     length-preserving;
+//   * the fold is ASCII-only, so the prefix cannot be smuggled in through the letters
+//     Unicode calls case-variants (U+017F long s, U+212A Kelvin): those bytes are just
+//     bytes, the header is refused, and a non-ASCII byte inside the token is passed
+//     through untouched because the fold never looks at it.
+//
+// Not proved here, and deliberately left to server_auth/bearer_conformance_test.go: that the
+// prefix constant really is the seven ASCII bytes 66 101 97 114 101 114 32, because Gobra does
+// not evaluate string literals (asserting prefix[0] == 'B' fails, and so does its negation).
+// That test runs the real ParseBearerAuth, HandleBearerAuth and util.EqualFold, so the pair is
+// the argument: the unit proves the shape for any prefix, the test pins the prefix and the
+// implementation's behaviour.
+package bearer
+
+const prefix = "Bearer "
+
+// upperCase reports whether b is an ASCII upper-case letter, the only thing util:lower
+// reacts to.
+decreases
+ensures res == (65 <= b && b <= 90)
+pure func upperCase(b byte) (res bool) {
+	return 'A' <= b && b <= 'Z'
+}
+
+// lowerIs says when two bytes have the same ASCII-lowercase image, which is what
+// util:lower plus a comparison decides. Written as a relation between the two bytes, it is
+// what makes the claims below checkable without reasoning about the arithmetic of lower.
+decreases
+ensures res == ((upperCase(a) && upperCase(b) && a == b) ||
+	(upperCase(a) && !upperCase(b) && b == a + 32) ||
+	(upperCase(b) && !upperCase(a) && a == b + 32) ||
+	(!upperCase(a) && !upperCase(b) && a == b))
+pure func lowerIs(a byte, b byte) (res bool) {
+	return a == b || (upperCase(a) && b == a + 32) || (upperCase(b) && a == b + 32)
+}
+
+// foldFrom is the loop body of util:EqualFold started at index i: it compares byte by byte
+// and stops at the first difference. The caller has already established equal lengths.
+requires len(s) == len(t)
+requires 0 <= i && i <= len(s)
+ensures res == forall k int :: {s[k], t[k]} i <= k && k < len(s) ==> lowerIs(s[k], t[k])
+decreases len(s) - i
+pure func foldFrom(s string, t string, i int) (res bool) {
+	return i >= len(s) || (lowerIs(s[i], t[i]) && foldFrom(s, t, i+1))
+}
+
+// equalFold is util:EqualFold. The length test comes first in the real code, so strings of
+// different lengths are never folded at all: the fold is strictly weaker than Unicode case
+// folding, and in particular no short header compares equal to the prefix.
+ensures res == (len(s) == len(t) && forall k int :: {s[k], t[k]} 0 <= k && k < len(s) ==> lowerIs(s[k], t[k]))
+decreases
+pure func equalFold(s string, t string) (res bool) {
+	return len(s) == len(t) && foldFrom(s, t, 0)
+}
+
+// prefixFoldMatches compares the header with the seven-byte prefix without reading past the
+// end of the header, so it means something for a header of any length. It is vacuously true
+// for a header which runs out first; the length guard in parseBearerAuth is what turns that
+// around into a refusal.
+requires 0 <= i
+ensures res == forall k int :: {prefix[k]} i <= k && k < 7 && k < len(auth) ==> lowerIs(auth[k], prefix[k])
+decreases 7 - i
+pure func prefixFoldMatches(auth string, i int) (res bool) {
+	return i >= 7 || i >= len(auth) || (lowerIs(auth[i], prefix[i]) && prefixFoldMatches(auth, i+1))
+}
+
+// parseBearerAuth is server_auth/handlers.go:ParseBearerAuth. The contract is SR-PARSE-02 in
+// full: the guard, the exactness of the strip, and the empty token on refusal.
+ensures ok == (len(auth) >= 7 && prefixFoldMatches(auth, 0))
+ensures !ok ==> bearer == ""
+ensures ok ==> len(bearer) == len(auth) - 7
+ensures ok ==> bearer == auth[len(prefix):]
+ensures len(auth) < 7 ==> !ok
+ensures len(auth) == 7 ==> ok == equalFold(auth, prefix)
+func parseBearerAuth(auth string) (bearer string, ok bool) {
+	if len(auth) < len(prefix) || !prefixFoldMatches(auth, 0) {
+		return "", false
+	}
+	return string(auth[len(prefix):]), true
+}
+
+// thePrefixIsSevenBytes pins the constant every claim above is written against. Edit the
+// prefix in the real code and these numbers stop matching.
+func thePrefixIsSevenBytes() {
+	assert len(prefix) == 7
+}
+
+// everyHeaderShorterThanThePrefixIsRefused - the historical panic class, stated for all of
+// them rather than by example: no header of length below seven is accepted, whatever it
+// contains, because the guard refuses it before anything is indexed.
+requires len(auth) < 7
+func everyHeaderShorterThanThePrefixIsRefused(auth string) {
+	bearer, ok := parseBearerAuth(auth)
+	assert !ok
+	assert bearer == ""
+}
+
+// aHeaderThatFoldsToThePrefixIsAcceptedAndNothingElse: for a header of exactly the prefix
+// length, acceptance is exactly the fold, and the token is empty rather than a panic.
+requires len(auth) == 7
+func aHeaderThatFoldsToThePrefixIsAccepted(auth string) {
+	bearer, ok := parseBearerAuth(auth)
+	assert ok == equalFold(auth, prefix)
+	// the empty token, stated as length zero: Gobra has no empty-string uniqueness, so
+	// "and nothing else was handed to the verifier" is len(bearer) == 0
+	assert !ok || len(bearer) == 0
+}
+
+// theTokenIsExactlyTheRestOfTheHeader: for a longer header, accepting means the fold held on
+// the first seven bytes and the token is the remainder, byte for byte - so the verifier is
+// handed neither one byte less nor one byte more than the credential.
+requires len(auth) > 7
+func theTokenIsExactlyTheRestOfTheHeader(auth string) {
+	bearer, ok := parseBearerAuth(auth)
+	if ok {
+		assert len(bearer) == len(auth) - 7
+		assert bearer == auth[len(prefix):]
+		assert prefixFoldMatches(auth, 0)
+	} else {
+		assert bearer == ""
+	}
+}
+
+// theFoldCannotChangeLength, and is reflexive: it is a per-byte relation between
+// equal-length strings, so no case trickery turns a five-byte header into the prefix.
+func theFoldCannotChangeLength(s string, t string) {
+	if equalFold(s, t) {
+		assert len(s) == len(t)
+	}
+	assert equalFold(s, s)
+}
+
+// theFoldIsSymmetric: nothing in it treats the client's bytes and the server's constant
+// differently, which is what makes "case insensitive" mean what it says.
+func theFoldIsSymmetric(s string, t string) {
+	assert equalFold(s, t) == equalFold(t, s)
+}
+
+// foldOfThePrefixIsBytewise: the prefix comparison holds exactly when each of the seven
+// bytes matches the prefix byte up to ASCII case. This is the one-line reading of the whole
+// function, and the lemmas above are its consequences. The bytes are written as prefix[k]
+// rather than as literals because Gobra does not evaluate string literals: the claim is the
+// same, and the byte table below is what pins those literals to the ASCII codes.
+requires len(auth) == 7
+func foldOfThePrefixIsBytewise(auth string) {
+	assert prefixFoldMatches(auth, 0) ==
+		(lowerIs(auth[0], prefix[0]) && lowerIs(auth[1], prefix[1]) && lowerIs(auth[2], prefix[2]) &&
+			lowerIs(auth[3], prefix[3]) && lowerIs(auth[4], prefix[4]) && lowerIs(auth[5], prefix[5]) &&
+			lowerIs(auth[6], prefix[6]))
+}
+
+// theCaseFoldIsAsciiOnly, demonstrated where Gobra can compute: byte sequences. 66 101 97
+// 114 101 114 32 is "Bearer ", and the fold accepts the upper-case and mixed-case spellings
+// of it and refuses anything else - including the UTF-8 encodings of the letters Unicode
+// calls case-variants of 'B' and 's', which a server doing Unicode folding would have
+// accepted. Refusing is the safe direction: a header this server does not recognise as
+// Bearer is refused, not silently treated as one.
+func theCaseFoldIsAsciiOnly() {
+	ghost var bearerSeq seq[byte] = seq[byte]{66, 101, 97, 114, 101, 114, 32}
+	ghost var lowerSeq seq[byte] = seq[byte]{98, 101, 97, 114, 101, 114, 32}
+	ghost var mixedSeq seq[byte] = seq[byte]{98, 69, 65, 114, 101, 82, 32}
+	ghost var basicSeq seq[byte] = seq[byte]{66, 97, 115, 105, 99, 32, 120}
+	ghost var longSSeq seq[byte] = seq[byte]{197, 191, 101, 114, 101, 114, 32}
+	assert foldSeq(bearerSeq, bearerSeq, 0)
+	assert foldSeq(lowerSeq, bearerSeq, 0)
+	assert foldSeq(mixedSeq, bearerSeq, 0)
+	assert !foldSeq(longSSeq, bearerSeq, 0)
+	// the byte that makes the difference, spelled out: 0xC5 0xBF is U+017F, and neither
+	// half of it is 'B' up to ASCII case - which is also how the refusal of a wrong prefix
+	// is argued here, byte by byte: Gobra unfolds the sequence comparison one step for a
+	// mismatch at the first byte and not deeper, so mismatches further along are settled at
+	// the byte level rather than by folding the whole sequence
+	assert !lowerIs(197, 66) && !lowerIs(191, 66)
+	assert !lowerIs(97, 101) && !lowerIs(115, 114)
+	// a non-ASCII byte inside the token is untouched, because the fold only ever reads the
+	// prefix: 0xC5 0xBF as the whole token comes back as two bytes
+	assert lowerIs(197, 197) && lowerIs(191, 191)
+}
+
+// foldSeq is the byte-sequence form of the fold, used only for the computations above (a
+// seq[byte] literal reduces, a string literal does not).
+ghost
+requires 0 <= i && len(s) == len(t)
+ensures res == forall k int :: {s[k], t[k]} i <= k && k < len(s) ==> lowerIs(s[k], t[k])
+decreases len(s) - i
+pure func foldSeq(ghost s seq[byte], ghost t seq[byte], i int) (res bool) {
+	return i >= len(s) || (lowerIs(s[i], t[i]) && foldSeq(s, t, i+1))
+}

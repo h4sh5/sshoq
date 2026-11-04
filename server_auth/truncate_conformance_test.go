@@ -20,7 +20,7 @@ func isASCIILong(s string) bool {
 	return len(s) > 300 && !strings.ContainsFunc(s, func(r rune) bool { return r >= 0x80 })
 }
 
-func TestTruncateMatchesTheProvedModel(t *testing.T) {
+func TestConformanceTruncateMatchesTheModel(t *testing.T) {
 	inputs := []string{
 		strings.Repeat("a", 300),
 		strings.Repeat("é", 200), // 2 bytes each: every odd cut splits a character

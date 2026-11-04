@@ -22,6 +22,10 @@ TESTUSER_ECDSA_PRIVKEY ?= $(SSH3_INTEGRATION_TESTS_KEY_DIR)/testuser_id_ecdsa
 TESTUSER_USERNAME ?= ssh3-testuser
 ECDSATESTUSER_USERNAME ?= ssh3-ecdsa-testuser
 
+# `proof` is also a directory, so without this `make proof` silently does nothing.
+.PHONY: default build clean lint test integration-tests integration-tests-setup \
+        proof-setup proof proof-conformance proof-all install
+
 default: build
 
 clean:
