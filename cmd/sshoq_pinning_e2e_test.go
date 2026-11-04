@@ -8,7 +8,6 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -78,49 +77,67 @@ func buildSshoqBinaries(t *testing.T) (client string, server string) {
 // The client key is authorized with -rpub, in the memory of this run only: the
 // file the server would otherwise read belongs to the home of the OS user, which
 // is not somewhere a test should write in.
+// The port is left to the server (-bind ...:0) and read back from its own
+// announcement: a port picked by the test has to be opened, closed and hoped
+// for, and sshoq listens on UDP, so a TCP probe says nothing about the socket
+// the server is going to ask for - a server which cannot bind answers nothing,
+// or worse, answers with whatever else holds that port. The certificate is
+// written in the home of this run for the same reason: reusing the ./cert.pem of
+// the repository would give every server, this one and the leftovers of earlier
+// runs, the same host hash, so a client reaching a stranger would pass its pin
+// and fail on authentication instead of saying the certificate is not the one.
 // It returns the announced hash and the URL to connect to.
 func startPinningServer(t *testing.T, serverBinary string, home string, authorizedKey string) (hash string, url string) {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("could not find a free port: %s", err)
-	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	if err := listener.Close(); err != nil {
-		t.Fatalf("could not release the port: %s", err)
-	}
 
 	command := exec.Command(serverBinary,
-		"-bind", fmt.Sprintf("127.0.0.1:%d", port),
+		"-bind", "127.0.0.1:0",
 		"-url-path", "/test",
 		"-generate-selfsigned-cert",
+		"-cert", filepath.Join(home, "cert.pem"),
+		"-key", filepath.Join(home, "priv.key"),
 		"-rpub", authorizedKey,
 	)
-	command.Env = append(os.Environ(), "HOME="+home)
+	// the log of the server goes next to its certificate: the default is a file in
+	// the working directory, which a test should not leave in a source tree
+	command.Env = append(os.Environ(), "HOME="+home, "SSH3_LOG_FILE="+filepath.Join(home, "sshoq.log"))
 	var output lockedBuffer
 	command.Stderr = &output
 	if err := command.Start(); err != nil {
 		t.Fatalf("could not start the server: %s", err)
 	}
+	// Wait belongs to this goroutine - command.ProcessState stays nil as long as
+	// nobody calls it, so it is the channel below, and not that field, which tells
+	// whether the server is still alive while the test waits for its announcement.
+	exited := make(chan error, 1)
+	go func() { exited <- command.Wait() }()
 	t.Cleanup(func() {
 		_ = command.Process.Kill()
-		_, _ = command.Process.Wait()
+		select {
+		case <-exited:
+		case <-time.After(5 * time.Second):
+		}
 	})
 
 	announced := regexp.MustCompile(`Server host hash: (SHA256 [A-Za-z0-9+/=]+)`)
+	// the address the server says it listens on is the one it bound, port included
+	listening := regexp.MustCompile(`Server started, listening on [^ /]+:(\d+)/test`)
 	deadline, cancel := context.WithDeadline(context.Background(), time.Now().Add(30*time.Second))
 	defer cancel()
 	for deadline.Err() == nil {
-		if command.ProcessState != nil && command.ProcessState.Exited() {
-			break
+		select {
+		case err := <-exited:
+			// A server which dies instead of announcing is an environment missing what
+			// a server needs - users, permissions, PAM - not a broken host hash: say so.
+			t.Skipf("the server exited before announcing its host hash (%v): %s", err, output.String())
+		default:
 		}
-		if match := announced.FindStringSubmatch(output.String()); match != nil {
-			return match[1], fmt.Sprintf("root@127.0.0.1:%d/test", port)
+		seen := output.String()
+		if match, port := announced.FindStringSubmatch(seen), listening.FindStringSubmatch(seen); match != nil && port != nil {
+			return match[1], fmt.Sprintf("root@127.0.0.1:%s/test", port[1])
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
-	// A server which does not come up at all is an environment missing what a
-	// server needs - users, permissions, PAM - not a broken host hash: say so.
 	t.Skipf("the server did not announce its host hash: %s", output.String())
 	return "", ""
 }
@@ -207,6 +224,18 @@ func writeTestIdentity(t *testing.T, path string) string {
 	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(public)))
 }
 
+// serverTestHome creates the home a test server runs with, so that the files it
+// writes - its certificate, its log - land in the temporary directory of the test
+// instead of the working directory, which is a source tree.
+func serverTestHome(t *testing.T, root string) string {
+	t.Helper()
+	home := filepath.Join(root, "server")
+	if err := os.MkdirAll(filepath.Join(home, ".ssh3"), 0700); err != nil {
+		t.Fatalf("could not create the config dir of the server: %s", err)
+	}
+	return home
+}
+
 func TestPinnedHostHashEndToEnd(t *testing.T) {
 	if testing.Short() {
 		t.Skip("end to end test of the pinned host hash, skipped with -short")
@@ -216,10 +245,7 @@ func TestPinnedHostHashEndToEnd(t *testing.T) {
 	// One server for every scenario below - the scenarios differ by the HOME of
 	// the client, which is where the pin, the ssh config and known_hosts live.
 	root := t.TempDir()
-	serverHome := filepath.Join(root, "server")
-	if err := os.MkdirAll(filepath.Join(serverHome, ".ssh3"), 0700); err != nil {
-		t.Fatalf("could not create the config dir of the server: %s", err)
-	}
+	serverHome := serverTestHome(t, root)
 	keyPath := filepath.Join(root, "id_ed25519")
 	authorizedKey := writeTestIdentity(t, keyPath)
 
@@ -328,4 +354,55 @@ func TestPinnedHostHashEndToEnd(t *testing.T) {
 			t.Fatalf("a HostHash directive which does not match must refuse the connection:\n%s", output)
 		}
 	})
+}
+
+// The startup announcement of a server is a promise that its port answers: the
+// "Server started, listening on" line and the host hash printed next to it used
+// to come before the UDP socket was opened, so a server whose port was taken
+// announced a startup it did not have and then died quietly, and whoever read
+// that announcement - a script, a test, a user - talked to whatever else held the
+// port, under a certificate which had nothing to do with the server just started.
+func TestServerAnnouncesOnlyWhatItBound(t *testing.T) {
+	if testing.Short() {
+		t.Skip("end to end test of the server startup announcement, skipped with -short")
+	}
+	_, serverBinary := buildSshoqBinaries(t)
+
+	root := t.TempDir()
+	home := serverTestHome(t, root)
+	keyPath := filepath.Join(root, "id_ed25519")
+	authorizedKey := writeTestIdentity(t, keyPath)
+
+	// the first server takes a port of its own, and says which one it got
+	_, url := startPinningServer(t, serverBinary, home, authorizedKey)
+	port := url[strings.LastIndex(url, ":")+1 : strings.LastIndex(url, "/")]
+
+	// A second server on that very port cannot have it. It has to fail, and it has
+	// to fail without claiming it started: an announcement of a port it never bound
+	// is what makes a client trust somebody else.
+	timeout, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	command := exec.CommandContext(timeout, serverBinary,
+		"-bind", "127.0.0.1:"+port,
+		"-url-path", "/test",
+		"-generate-selfsigned-cert",
+		"-cert", filepath.Join(home, "cert.pem"),
+		"-key", filepath.Join(home, "priv.key"),
+	)
+	command.Env = append(os.Environ(), "HOME="+home, "SSH3_LOG_FILE="+filepath.Join(home, "second.log"))
+	combined, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatalf("a server on a port somebody else holds should fail to start, it said:\n%s", combined)
+	}
+	output := string(combined)
+	for _, expected := range []string{"could not listen", "already in use"} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("the reason the port could not be bound should be said (missing %q):\n%s", expected, output)
+		}
+	}
+	for _, unexpected := range []string{"Server started", "Server host hash"} {
+		if strings.Contains(output, unexpected) {
+			t.Fatalf("a server which never bound its port must not announce %q:\n%s", unexpected, output)
+		}
+	}
 }

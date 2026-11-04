@@ -1813,11 +1813,42 @@ func ServerMain() int {
 	mux.HandleFunc(*urlPath, handler)
 	server.Handler = mux
 
+	// Open the UDP socket of the server BEFORE announcing anything, and serve on
+	// it: ListenAndServe used to create it by itself, after the announcement, so a
+	// server whose port was already taken printed "Server started, listening on"
+	// for a socket it never got, and a client connecting to that port - a script,
+	// a test, a user with a typo - reached whatever else listened there. The two
+	// lines below are exactly the socket ListenAndServe made (quic-go resolves and
+	// opens a single UDP socket), and binding first means what is announced is
+	// reachable, including the port the kernel assigned when -bind spells 0.
+	listenUDPAddr, err := net.ResolveUDPAddr("udp", *bindAddr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "could not resolve the bind address %s: %s\n", *bindAddr, err)
+		log.Error().Msgf("could not resolve the bind address %s: %s", *bindAddr, err)
+		return -1
+	}
+	udpListener, err := net.ListenUDP("udp", listenUDPAddr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "could not listen on %s: %s\n", *bindAddr, err)
+		log.Error().Msgf("could not listen on %s: %s", *bindAddr, err)
+		return -1
+	}
+	defer udpListener.Close()
+	// announce, and answer Alt-Svc with, the address actually bound, which differs
+	// from the one typed when its port was 0
+	boundAddr := udpListener.LocalAddr().String()
+	server.Addr = boundAddr
+	// a -R tunnel forwarding to "this server's own port" cannot read it out of a
+	// -bind argument spelling port 0: it is this one
+	if reverseTunnelCfg != nil && reverseTunnelCfg.localDest.Port == 0 {
+		reverseTunnelCfg.localDest.Port = udpListener.LocalAddr().(*net.UDPAddr).Port
+	}
+
 	// -R: dial out to the remote sshoq server in the background and keep the
 	// reverse forwarding of this server's port alive across reconnects. It is
-	// started before ListenAndServe because the tunnel only serves traffic to
-	// the local socket once it exists, and connections to the destination are
-	// opened lazily, per remote user.
+	// started once the local socket exists, since traffic arriving on the remote
+	// port has somewhere to go from that point on; connections to the destination
+	// are opened lazily, per remote user.
 	if reverseTunnelCfg != nil {
 		tunnelFirstAttempt := make(chan error, 1)
 		go runReverseTunnel(reverseTunnelCfg, remoteForwardIdentities, *remoteForwardInsecure, tunnelFirstAttempt)
@@ -1833,7 +1864,7 @@ func ServerMain() int {
 		}
 	}
 
-	outputMessage := fmt.Sprintf("Server started, listening on %s%s", *bindAddr, *urlPath)
+	outputMessage := fmt.Sprintf("Server started, listening on %s%s", boundAddr, *urlPath)
 	fmt.Fprintln(os.Stderr, outputMessage)
 	log.Info().Msg(outputMessage)
 	// announce the host hash next to it: it is the one thing a client needs to
@@ -1843,13 +1874,13 @@ func ServerMain() int {
 		fmt.Fprintln(os.Stderr, message)
 		log.Info().Msg(message)
 	}
-	err = server.ListenAndServe()
+	// Serve on the socket bound above (Serve leaves it open, the defer above closes it).
+	err = server.Serve(udpListener)
 
 	if err != nil {
 		// print to stderr as well as the log file: the "Server started" message
 		// has already been displayed, and users should not have to inspect the
-		// log file to understand why the server failed to start (e.g. another
-		// server is already listening on the same address)
+		// log file to understand why the server stopped serving
 		fmt.Fprintf(os.Stderr, "error while serving HTTP connection: %s\n", err)
 		log.Error().Msgf("error while serving HTTP connection: %s", err)
 		return -1
