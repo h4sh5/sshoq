@@ -79,7 +79,7 @@ the classic way a restriction fails open.
 |----|-------------|------|--------|
 | SR-TR-01 | The client does not accept a server certificate for a hostname it does not already know, unless the user pinned that exact host hash; `Knows`/`KnowsHash` decide it, and both are total and never panic. | `known_hosts.go`, `cmd/sshoq.go` | `proved` (model: `proof/knownhosts/model.gobra`) + `conformant` (`known_hosts_conformance_test.go`). The store is modelled by the two answers the decision reads about one (host, certificate) pair, and proved: an empty store answers no to both (a missing `known_hosts` cannot trust the first certificate it sees); a known hash implies a known host; recording a pair sets both and never clears either, so **a server that changes certificate leaves the old one on file** and verification keeps failing instead of the client following the newest line; a rejected line leaves the store exactly as it was. The decision is one boolean — accepts exactly when a pin matched, or when there is no pin, no entry, a terminal and a yes — from which: a pin is never overruled by an answer, an unknown host with no terminal is refused, a host whose installed certificate fails to verify is refused, and there is no fourth way to connect. The TLS callbacks themselves are exercised by `cmd/sshoq_pinning_e2e_test.go`. |
 | SR-TR-02 | `ParseKnownHosts` classifies malformed lines as invalid instead of trusting them, and a line whose base64 or certificate does not parse never enters the map. | `known_hosts.go` | `proved` (model: `proof/knownhosts/model.gobra`, classifier: three fields, the `x509-certificate` tag, and decodable data; the third field is only named when the count is three, so a truncated line is reported rather than read out of bounds) + `conformant` (`known_hosts_conformance_test.go`, which parses a real file with good lines interleaved with two-field, four-field, wrong-tag, non-base64 and non-certificate lines and asserts the invalid line numbers exactly). The `x509`/base64 layer itself stays outside Gobra, so `decodes` is a premise in the model: every claim holds whatever that layer decides, and the test says what it decides. |
-| SR-TR-03 | A peer whose protocol version is not supported is refused before authentication. | `server_auth/auth.go` | out of scope for Gobra (version parsing lives in `version.go` with `strings`); covered by unit tests |
+| SR-TR-03 | A peer whose protocol version is not supported is refused before authentication. | `server_auth/auth.go` | **proved on the shipped code** + `conformant` — `versionSupported` in `version_rules.go` is `IsVersionSupported`'s decision, moved unchanged; `IsVersionSupported` is now the field handoff, because `version.go` imports `fmt` and a logger. The clauses: a protocol major/minor other than this server's is never accepted whatever else the announcement claims, so no software version or legacy allowance can smuggle a peer onto another protocol revision; a spec version other than `alpha-00` or the empty legacy one is never accepted, with no prefix matching and no "newer is fine"; inside the legacy family the answer is exactly "patch at least 3". `version_rules_conformance_test.go` holds the handoff against a copy of the pre-split gate over 108 000 announcements, the verdict table, the window's four boundaries, the claim that the software version is irrelevant away from the family, and 5 000 random announcements. It is the first test this gate ever had (**F9**); the *parsing* of the announcement stays outside the verified set — the `strconv` and `strings` stubs say nothing about what `Atoi` and `Split` return, so the numbers a parse produced are not facts a proof can use, and `TestConformanceVersionStringsRoundTripIntoTheGate` is the floor instead |
 | SR-TR-04 | The untrusted `User-Agent` is never reflected in a response body and is logged truncated, so a pre-authentication reject cannot panic the server. | `server_auth/truncate.go` (`truncate`, verified where it ships), `server_auth/auth.go` | `proved` on the shipped function, in two ways at once. The checker's own obligations are the F10 panic class: the scan that backs off a multi-byte character may index `s[cut]` only because the loop invariant puts `cut` inside the string, so a bounds failure is a proof failure now. Three clauses state what an attacker-chosen header obeys — a non-positive bound gives the empty string, a header that fits comes back **identically** (the sentence the old `s[:100]` could not make), and a truncated line is between 3 and `max+3` bytes, which is the bound on how long one header can make a log line. What is not provable here is *which* prefix survives: Gobra knows the length of a string concatenation but has no rule for its characters — `(a + b)[i] == a[i]` for `i < len(a)` is not in its theory, so `prefixEq(res, s, len(res)-3)` is refused — and that half is `conformant`: `TestConformanceTruncateMatchesTheModel` pins it against `proof/truncation` over inputs whose boundary falls inside two- and three-byte characters, `TestTruncateUserAgent` keeps the UTF-8 claim, and the model remains the argument for the character-boundary property. |
 
 ## 4. Resource exhaustion — `RES`
@@ -381,6 +381,38 @@ refusal is exact (`length > ceiling`) and the acceptance is exact too (`length <
 means the ceiling never silently refused fields it should have served. An off-by-one in either
 direction, introduced later, now fails both the prover and `TestConformanceCheckFieldLengthAgreesWithThePredicate`.
 
+### F9: the version gate's row claimed it was covered by unit tests, and nothing tested it (SR-TR-03)
+
+SR-TR-03 said *"out of scope for Gobra ... covered by unit tests"* from the day this catalogue was
+written. The first half was right — `version.go` imports `fmt` and the zerolog logger, so the prover
+could not read the file where the decision lived. The second half was not. `grep` for
+`IsVersionSupported`, `ParseVersionString` and `AVAILABLE_CLIENT_VERSIONS` across every `*_test.go` in
+the repository found no caller of any of the three. The gate that decides, before a password, a token or
+a certificate is offered, whether a peer may proceed at all had never been asserted about; the status
+cell described tests somebody had assumed existed.
+
+The tests written alongside the proof are the first, and they found nothing to fix and two things worth
+recording. The first is that the legacy window is a window and not a floor. Inside protocol 3.0 with an
+empty spec version, this project's own 0.1.3, 0.1.4 and 0.1.5 are accepted and 0.1.2 is refused as too
+old — but so is 0.1.6, because the branch is guarded by `patch <= 5` and falls through to a comparison
+that an empty spec version cannot satisfy. That is correct today (no 0.1.6 ever announced an empty spec
+version) and it is *history* rather than policy: a hypothetical release that forgot to announce a spec
+version would be refused rather than accepted as newer. Nothing in the code said so, and the boundary is
+now a spec line with a literal in it plus four rows of a table, so the next reader learns the window
+instead of redrawing it.
+
+The second is that the same history is written down twice, in two different forms: the list
+`AVAILABLE_CLIENT_VERSIONS` (the versions this project's client may announce) and the comparison inside
+the gate. They agree today — every version in the list is one the gate accepts — and they are maintained
+by different means, so `TestConformanceEveryVersionTheClientMayAnnounceIsSupportedByTheServer` is what
+stops an edit to one of them producing a client that announces a version its own server refuses.
+
+The corrective is procedural, and it is the second one this catalogue has had to write about itself.
+**F8** was a requirement missed by inventorying decision points; **F9** is a coverage claim missed by not
+looking. A status cell that says "covered by tests" is now written only after a `grep` for the symbol in
+`*_test.go`, because the column is the argument's ledger and an unchecked entry in it is worse than an
+admitted gap.
+
 ## Roadmap
 
 1. **Phase 1 (this work)** — toolchain (`scripts/setup-gobra.sh`, `make proof`,
@@ -394,10 +426,10 @@ direction, introduced later, now fails both the prover and `TestConformanceCheck
    refusal count was off by one, fixed in the comment and now stated in a spec), and F2, F3, F4
    (behaviours the tests pinned rather than changed, each waiting on a product decision).
 
-   The list above is what Phase 1 delivered. `make proof` now runs sixteen units: the ten models
+   The list above is what Phase 1 delivered. `make proof` now runs seventeen units: the ten models
    above plus six shipped files that carry their own specs — `glob.go`, `identity_checks.go`,
-   `source_check.go`, `server_auth/throttle_rules.go`, `server_auth/truncate.go` and
-   `util/varint.go`.
+   `source_check.go`, `server_auth/throttle_rules.go`, `server_auth/truncate.go`,
+   `util/varint.go` and `version_rules.go`.
 2. **Phase 2** — what is left of the non-crypto surface, in the order that buys the most: the
    x509/base64 layer of `ParseKnownHosts` (SR-TR-02 is proved for the classifier; whether a line's
    data decodes to a certificate is a premise there and a test elsewhere). Persistence needs no

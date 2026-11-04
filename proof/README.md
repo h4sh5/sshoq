@@ -12,12 +12,13 @@ make proof                # Gobra checks every proof obligation in proof/*/model
 
 ## State of the programme
 
-Sixteen verified files — ten model units (`proof/*/model.gobra`) plus six shipped ones carrying
+Seventeen verified files — ten model units (`proof/*/model.gobra`) plus seven shipped ones carrying
 their own specs, [`../glob.go`](../glob.go), [`../identity_checks.go`](../identity_checks.go),
 [`../source_check.go`](../source_check.go),
 [`../server_auth/throttle_rules.go`](../server_auth/throttle_rules.go),
-[`../server_auth/truncate.go`](../server_auth/truncate.go) and
-[`../util/varint.go`](../util/varint.go) — and 66
+[`../server_auth/truncate.go`](../server_auth/truncate.go),
+[`../util/varint.go`](../util/varint.go) and
+[`../version_rules.go`](../version_rules.go) — and 73
 `TestConformance...` tests in
 the packages of the code they check, and a catalogue of 32 requirements
 ([`SECURITY_REQUIREMENTS.md`](SECURITY_REQUIREMENTS.md)) whose status column is the only place a
@@ -26,10 +27,10 @@ claim about coverage is written:
 | status | rows | what it means |
 |---|---|---|
 | proved (model) + conformant | 15 | a Gobra unit proves the decision over all modelled inputs, and a test says the modelled function still behaves that way |
-| proved (shipped) + conformant | 6 | the same, except the proof is of the function the server calls: SR-PERM-04 and SR-PERM-05 in `identity_checks.go`, SR-PERM-06 in `source_check.go`, SR-AUTH-08 in `server_auth/throttle_rules.go`, SR-TR-04 in `server_auth/truncate.go`, SR-PARSE-03 in `util/varint.go`. The model of each is a second opinion now, not the argument |
+| proved (shipped) + conformant | 7 | the same, except the proof is of the function the server calls: SR-PERM-04 and SR-PERM-05 in `identity_checks.go`, SR-PERM-06 in `source_check.go`, SR-AUTH-08 in `server_auth/throttle_rules.go`, SR-TR-04 in `server_auth/truncate.go`, SR-PARSE-03 in `util/varint.go`, SR-TR-03 in `version_rules.go`. The model of each is a second opinion now, not the argument |
 | conformant | 3 | checked in Go alone, because the prover cannot hold the shape of the whole claim (the recursive glob: findings **F5**, **F6**) — `glob.go` does have a proved *part* of one of them, termination, in the shipped file |
 | partially proved | 3 | the decision function is proved, the surrounding machinery is a premise named in the row |
-| out of scope for Gobra | 3 | QUIC conversation state and version parsing; integration and unit tests are the control |
+| out of scope for Gobra | 2 | QUIC conversation state; integration and unit tests are the control |
 | open | 1 | SR-PERM-11 / finding **F2**: a decision the maintainer owes, not a proof that is missing |
 | phase 4 | 1 | SR-PARSE-01: the frame parser, where the slicing and the `io` around it still have to be split out of a file the prover cannot read. Its arithmetic half is already proved, in shipped code, as SR-PARSE-03 |
 
@@ -44,6 +45,14 @@ A fourth came out of writing a sentence down: the comment above the login thrott
 refused after *more than* `maxFailures` failures while the code, and the model, have always said
 `>=` — one guessing attempt per window in the wrong direction, in a comment nobody tested (**F7**,
 `server_auth/login_policy.go`). The boundary is three spec lines and a test now.
+
+Two more came out of checking this document against the repository rather than trusting it. The
+allocation ceiling in `util/wire.go` was a remote denial of service with no requirement row and no
+direct test (**F8**), and SR-TR-03 claimed the version gate was "covered by unit tests" when no test in
+the tree called it — the gate that decides whether a peer may authenticate at all had never been
+asserted about (**F9**). Both rows are now backed by proofs and by the first tests their symbols have
+ever had; what is recorded in the catalogue is the method fix that comes with each, because a ledger
+with an unchecked entry in it is worse than an admitted gap.
 
 Three further findings are behaviour
 documented rather than changed, each needing a product decision: **F2** above, **F3**
@@ -79,8 +88,16 @@ scan inside the string is the F10 panic class turned into a proof obligation.
 [`../util/varint.go`](../util/varint.go) is the first piece of the wire format: the arithmetic a peer
 chooses for you -- how wide a length is encoded, how big a ceiling it must clear before anything is
 allocated, how many bytes a length-prefixed field will cost -- proved over every announcement and
-every reader bound, with the readers themselves left beside it and pinned by tests. `make proof`
-verifies all six: the code that runs
+every reader bound, with the readers themselves left beside it and pinned by tests.
+[`../version_rules.go`](../version_rules.go) is the gate that answers a peer's version announcement
+before a password, a token or a certificate is offered: `IsVersionSupported` in `version.go` is now the
+field-by-field handoff, and the constants that identify this release moved next to the proof because the
+spec is written against them. Its clauses are the ones SR-TR-03 needs — the protocol major and minor are
+checked strictly and nothing later can override them, so the legacy allowance cannot smuggle a peer onto
+another protocol revision; a spec version that is neither `alpha-00` nor the empty legacy one is refused,
+with no prefix matching and no "newer is fine"; and inside the legacy family the answer is exactly "patch
+at least 3", with a literal pinning `0.1.2` refused as well, because that boundary is history and a
+reader cannot recover it from first principles (**F9**). `make proof` verifies all seven: the code that runs
 in production is the code the proof talks about, with no transcription step in between. That is
 roadmap Phase 3, and what decides whether a file can join it is **what the prover can read**, not
 difficulty:
@@ -325,6 +342,29 @@ specific version of a specific verifier. Things that cost time to learn:
 * **Quantifiers over slices want triggers** (`exists j int :: { names[j] } ...`) or the
   prover never instantiates them.
 * `none` is a keyword.
+* **A claim about two calls of the same function under a hypothesis will not discharge.** "Away from the
+  legacy family the verdict does not depend on the software version" is true of the version gate, and its
+  shape is: call the gate twice, compare the two results, guard the claim with a condition over both
+  argument tuples. Silicon answers "Postcondition might not hold" — and keeps answering it with the
+  guarding condition written out inline instead of calling the pure predicate, which rules out pure-call
+  inlining as the cause and leaves no annotation to fix. Write such claims as Go enumeration instead
+  (`TestConformanceSoftwareVersionIsIrrelevantAwayFromTheLegacyFamily`, 304 pairs) and leave a note in the verified
+  file saying the universal form was tried, so the next person does not spend an afternoon on it.
+* **The prover reads the code better than a first reading of the prose.** The first draft of
+  `versionSupported`'s legacy clause said "inside the legacy family the verdict is `patch >= 3`". That is
+  false: the family is defined over the *software* version, while the gate's first check is over the
+  *protocol* version, so an announcement of protocol 2.0 with software 0.1.4 is inside the family and is
+  refused. Silicon reported the postcondition failing rather than letting the sentence through. The rule
+  it teaches: a clause about a nested branch has to carry the enclosing branch's condition in its
+  antecedent, and writing clauses in the order the code evaluates them is what makes you notice.
+* **Where a spec names constants, keep one literal somewhere.** `version_rules.go` holds the constants
+  that identify this release and states every clause against them, which is what a proof should do — but
+  it also means bumping `PROTOCOL_EXPERIMENTAL_SPEC_VERSION` leaves the unit verifying, because the gate
+  and its spec move together and only the wire meaning changed. The tests notice (`bump_spec` fails
+  `TestConformanceVerdictTable`), and one clause therefore pins a literal boundary
+  (`... && peerSoftwarePatch == 2 ==> !supported`) so a boundary constant cannot drift without someone
+  deciding to. Prover protects the shape of the rule, tests protect the numbers in it; say which is which
+  in the file.
 
 The style that works: state the decision as an exact table (`ensures res == <the whole
 formula>`), then write the security claims as small `func`s that build a case and `assert`

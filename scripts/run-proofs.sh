@@ -57,6 +57,7 @@ INPLACE_UNITS=(
 	"$REPO_ROOT/server_auth/throttle_rules.go"
 	"$REPO_ROOT/server_auth/truncate.go"
 	"$REPO_ROOT/util/varint.go"
+	"$REPO_ROOT/version_rules.go"
 )
 
 mapfile -t UNITS < <(

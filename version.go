@@ -18,14 +18,6 @@ import (
 // Once IETF drafts get published, we plan on having versions such as
 // 3.0_draft-michel-ssh3-XX when implementing the IETF specification from
 // draft-michel-ssh3-XX.
-const PROTOCOL_MAJOR int = 3
-const PROTOCOL_MINOR int = 0
-const PROTOCOL_EXPERIMENTAL_SPEC_VERSION string = "alpha-00"
-
-const SOFTWARE_IMPLEMENTATION_NAME string = "h4sh5/sshoq"
-const SOFTWARE_MAJOR int = 0
-const SOFTWARE_MINOR int = 2
-const SOFTWARE_PATCH int = 1
 
 const SOFTWARE_RC int = 0
 
@@ -55,28 +47,17 @@ func ThisVersion() Version {
 
 // Tells if the this version (a.k.a. the version returned by ThisVersion())
 // is compatible with `other`.
+//
+// The decision itself is `versionSupported` in `version_rules.go`, verified there: this function is
+// the field-by-field handoff from the struct the parsers build to the seven values the gate reads.
+// Keeping it a handoff is what lets the gate be verified at all -- `version.go` imports `fmt`, and
+// Gobra v26.09 reports "unsupported element Class (Package)" for a file that does, so the verified
+// statement has to live in a file that imports nothing.
 func IsVersionSupported(other Version) bool {
-	this := ThisVersion()
-	// right now, no check for protocol name as it is subject to change
-
-	// strict protocol version checking
-	if other.protocolVersion.Major != this.protocolVersion.Major || other.protocolVersion.Minor != this.protocolVersion.Minor {
-		return false
-	}
-
-	// special case: to our knowledge, experimental spec version older than alpha-00 are only implemented by us (i.e. francoismichel/ssh3)
-	// this should be removed in the near future, once we remove support for these legacy servers
-	if other.protocolVersion.ExperimentalSpecVersion == "" && other.softwareVersion.ImplementationName == "h4sh5/sshoq" &&
-		other.softwareVersion.Major == 0 && other.softwareVersion.Minor == 1 && other.softwareVersion.Patch <= 5 {
-		// then, only support software version >= 0.1.3
-		return other.softwareVersion.Patch >= 3
-	}
-
-	// Starting from here, we have proper experimental spec version signalling.
-	// this version is version alpha-00, other versions are not supported.
-	// If a server receives a request with an unsupported spec version, the client should
-	// start a new request with a compatible version.
-	return other.protocolVersion.ExperimentalSpecVersion == "alpha-00"
+	return versionSupported(
+		other.protocolVersion.Major, other.protocolVersion.Minor, other.protocolVersion.ExperimentalSpecVersion,
+		other.softwareVersion.ImplementationName, other.softwareVersion.Major,
+		other.softwareVersion.Minor, other.softwareVersion.Patch)
 }
 
 type SoftwareVersion struct {
