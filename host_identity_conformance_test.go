@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -329,4 +330,124 @@ func TestConformanceCanonicalHostFormatDoesNotDependOnUnusedConfigFields(t *test
 			t.Errorf("username %q came back as %q", user, cfg.Username())
 		}
 	}
+}
+
+// splitCanonicalKey recovers the three parts of an identity string. The rule is "the last colon before the
+// first slash separates host from port": a path always begins with a slash, so it is the boundary, and the
+// port in between is digits. Whether the recovery is *unique* is the question
+// TestConformanceCanonicalHostFormatIsInjectiveOnRealisticHosts asks; this is the function that states it.
+func splitCanonicalKey(t *testing.T, key string) (host string, port int, path string) {
+	t.Helper()
+	slash := strings.IndexByte(key, '/')
+	if slash < 0 {
+		t.Fatalf("identity %q has no path: the empty path is supposed to become /", key)
+	}
+	colon := strings.LastIndexByte(key[:slash], ':')
+	if colon < 0 {
+		t.Fatalf("identity %q has no port separator before its path", key)
+	}
+	n, err := strconv.Atoi(key[colon+1 : slash])
+	if err != nil {
+		t.Fatalf("identity %q: %q is not a port: %v", key, key[colon+1:slash], err)
+	}
+	return key[:colon], n, key[slash:]
+}
+
+// TestConformanceCanonicalHostFormatIsInjectiveOnRealisticHosts is the claim that a trust anchor belongs to
+// one server: among names, IPv4 and IPv6 literals -- with and without the brackets a person might type --
+// over the ports with arithmetic in them and paths with and without their leading slash, queries, fragments
+// and a colon, no two configurations share an identity string unless they agree on host and port and on the
+// path after normalisation. In other words: pinning one of these cannot pin another, and a certificate
+// recorded for one cannot be found when asking about another.
+//
+// The pathological case is the *next* test, not this one: what makes this domain safe is that the host
+// contains neither a colon nor a slash, so the separator between host and port is the only colon before the
+// path. That is a property of hostnames, not of the formatting function, and it is why the row stays
+// `conformant` rather than `proved:shipped` -- see the note on library postconditions in proof/README.md.
+func TestConformanceCanonicalHostFormatIsInjectiveOnRealisticHosts(t *testing.T) {
+	hosts := []string{
+		"example.org", "sub.example.org", "localhost", "127.0.0.1", "10.0.0.1",
+		"::1", "[::1]", "2001:db8::1", "[2001:db8::1]", "0", "a.example",
+	}
+	ports := []int{0, 1, 22, 80, 443, 8443, 65535}
+	paths := []string{"", "/", "ssh", "/ssh", ":1", "/:1", "/ssh/others", "/a?b=c#d", "8443/", "/8443/"}
+
+	byKey := map[string]string{}
+	for _, host := range hosts {
+		for _, port := range ports {
+			for _, path := range paths {
+				cfg := conformanceConfig(host, port, path)
+				key := cfg.CanonicalHostFormat()
+				// the parts must survive a round trip through the identity string
+				gotHost, gotPort, gotPath := splitCanonicalKey(t, key)
+				if gotHost != host || gotPort != port {
+					t.Errorf("%q: splits into host=%q port=%d, want host=%q port=%d", key, gotHost, gotPort, host, port)
+				}
+				if want := normalisedPath(path); gotPath != want {
+					t.Errorf("%q: path part %q, want the normalised path %q", key, gotPath, want)
+				}
+				where := fmt.Sprintf("host=%q port=%d path=%q", host, port, normalisedPath(path))
+				if other, seen := byKey[key]; seen && other != where {
+					t.Errorf("identity %q is claimed by %s and by %s", key, other, where)
+				}
+				byKey[key] = where
+			}
+		}
+	}
+	// every host, port and *normalised* path is its own identity, and nothing else is: the paths in the
+	// list above spell six distinct ones, so that is how many keys the sweep must produce.
+	normalised := map[string]bool{}
+	for _, path := range paths {
+		normalised[normalisedPath(path)] = true
+	}
+	if want := len(hosts) * len(ports) * len(normalised); len(byKey) != want {
+		t.Errorf("%d distinct identities from %d hosts, %d ports and %d paths, want %d",
+			len(byKey), len(hosts), len(ports), len(normalised), want)
+	}
+}
+
+// TestConformanceCanonicalHostFormatIsNotInjectiveOnHostsThatAreNotHosts characterises the other half: when
+// the "hostname" carries a slash or a colon of its own -- what a mistyped URL leaves behind -- the separator
+// the identity string relies on stops being unique, and two different servers can be trusted under one name.
+// This is not a bug report so much as a fence: it is the reason the guard belongs where the hostname is
+// taken in, and if someone puts that guard in, this test will fail and send them to the paragraph it
+// describes.
+func TestConformanceCanonicalHostFormatIsNotInjectiveOnHostsThatAreNotHosts(t *testing.T) {
+	a := conformanceConfig("example.org:443/", 1, "/")
+	b := conformanceConfig("example.org", 80, "/:443/1")
+	if a.CanonicalHostFormat() != "example.org:443/:1/" {
+		t.Fatalf("identity of the mistyped host is %q", a.CanonicalHostFormat())
+	}
+	if b.CanonicalHostFormat() != "example.org:80/:443/1" {
+		t.Fatalf("identity of the path-with-colon host is %q", b.CanonicalHostFormat())
+	}
+	collision := [][3]interface{}{
+		{"example.org:443/", 1, "/"},
+		{"example.org", 443, "/:1/"},
+	}
+	keys := map[string]bool{}
+	for _, c := range collision {
+		key := conformanceConfig(c[0].(string), c[1].(int), c[2].(string)).CanonicalHostFormat()
+		if keys[key] {
+			continue
+		}
+		keys[key] = true
+	}
+	if len(keys) != 1 {
+		t.Fatalf("expected the two configurations to share the identity %v, got %v", keys, collision)
+	}
+}
+
+// normalisedPath is what `NewConfig` makes of the path argument: the empty path becomes "/", and a path
+// written without its leading slash gets one. The identity string is built from the result, so this is the
+// function the tests above compare against -- and the reason "" and "/" and "ssh" and "/ssh" are two
+// spellings of at most two identities rather than four.
+func normalisedPath(path string) string {
+	if path == "" {
+		return "/"
+	}
+	if path[0] != '/' {
+		return "/" + path
+	}
+	return path
 }
