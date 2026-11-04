@@ -48,7 +48,7 @@ session (shell, SFTP, forwarding) without having proved who they are.
 | SR-AUTH-04 | An unknown user is rejected before any identity verifier is consulted, so a nonexistent account cannot be used to consume verifier work or to probe which verification method is configured. | `server_auth/auth.go` | `proved` (model: `proof/authflow/model.gobra`) |
 | SR-AUTH-05 | A Bearer/JWT credential is only accepted against one of the identities authorized for the asserted user; an empty authorized-identity set never authenticates. | `server_auth/handlers.go` (`HandleJWTAuth`) | `proved` (model: `proof/authflow/model.gobra`) |
 | SR-AUTH-06 | An OIDC token that carries no conversation-binding claim (`ssh3_conv_id`, `jti`) is **rejected**; a token bound to another conversation is rejected. A captured ID token is therefore not replayable on an arbitrary conversation. | `server_auth/authorized_identities.go` (`OpenIDConnectIdentity.Verify`) | **open** — no unit yet. The binding decision is small enough to model (`proof/oidc_binding` planned); signature and claim verification stays out of Gobra's reach either way (it goes through `go-jose` discovery). |
-| SR-AUTH-07 | **Replay**: for a token identified by `(issuer, id)`, `Accept` returns true at most once while the remembered entry has not expired; an empty `id` is always refused. | `auth/oidc/replay.go` (`AcceptedTokenStore.Accept`) | **open** — no unit yet (`proof/replay` planned). The decision is small; what makes it worth proving is the interaction between the memory bound (SR-RES-03) and the replay horizon — the same trade SR-RES-01 shows can be got wrong. |
+| SR-AUTH-07 | **Replay**: for a token identified by `(issuer, id)`, `Accept` returns true at most once while the remembered entry has not expired; an empty `id` is always refused. | `auth/oidc/replay.go` (`AcceptedTokenStore.Accept`) | partially `proved` — `proof/replay/model.gobra` proves, for every store state and every token: an empty `id` is never accepted; a token is refused exactly when it is remembered and still live; a refusal leaves the store exactly as it was (so replay traffic can neither evict nor grow it); and the store stays inside its capacity for *every* trace of tokens. Not modelled: the signature/`iss`/`aud`/`exp` validation which happens before the store is consulted (SR-AUTH-01..04, still open) and the clock itself, which enters the model only as the two booleans the code actually asks it. + `conformant` (`auth/oidc/replay_conformance_test.go`) |
 | SR-AUTH-08 | **Password guessing is bounded**: within one failure window, a key that already failed `maxFailures` times is refused (`429`) *before* the password is checked, so further guessing costs no hashing. A successful login clears the counter for that key. | `server_auth/login_policy.go` (`loginThrottle.check/failure/success`) | partially `proved` — `proof/throttle/model.gobra` proves the delay and lock-out arithmetic over every failure count, window length and capacity. The window *reset* keeps the table, so it is not modelled there; `server_auth/login_policy_test.go` covers it. |
 | SR-AUTH-09 | Early data (0-RTT) is never authenticated: requests arriving before the TLS handshake completed are refused (`425 Too Early`), which is what makes the replay-resistance claims above meaningful. | `server_auth/auth.go` | **out of scope for Gobra** (quic-go `ConnectionState()`); covered by integration tests |
 
@@ -90,7 +90,7 @@ pre-authentication input.
 |----|-------------|------|--------|
 | SR-RES-01 | The login throttle remembers at most `capacity` keys; `startWindowLocked` evicts before inserting, so the memory an attacker can force is independent of the number of source addresses they spoof. | `server_auth/login_policy.go` | `proved` (`proof/throttle/model.gobra`: the delay handed to an attacker never exceeds `maxDelay`, for every failure count, step and cap) |
 | SR-RES-02 | `truncate(s, max)` returns a string of length at most `max + 3`, equal to `s` when `len(s) <= max`, empty when `max <= 0`, and never indexes out of bounds. | `server_auth/login_policy.go` | `proved` (`proof/truncation/model.gobra`: the cut lands on a character boundary, `len(res) <= max+3`, and memory safety for every `s` and `max`) + `conformant` (`server_auth/truncate_conformance_test.go`) |
-| SR-RES-03 | The OIDC replay store holds at most `maxEntries` tokens, and `maxEntries < 1` is normalised to 1 at construction, so it cannot grow with network input nor degenerate into an accept-everything store. | `auth/oidc/replay.go` | **open** — no unit yet, see SR-AUTH-07. |
+| SR-RES-03 | The OIDC replay store holds at most `maxEntries` tokens, and `maxEntries < 1` is normalised to 1 at construction, so it cannot grow with network input nor degenerate into an accept-everything store. | `auth/oidc/replay.go` | `proved` (`proof/replay/model.gobra`: `run` proves `len <= capacity` for every trace, and `len <= len(trace)`; the normalisation is proved to leave a store that still catches the replay of the token just accepted) + `conformant` (`auth/oidc/replay_conformance_test.go`). Unlike the login throttle (SR-RES-01), this store's stale-order rebuild keeps its bound — checked, not assumed. |
 | SR-RES-04 | Delay granted to an attacker per failed attempt is capped by `maxDelay` (so throttling cannot be turned into an amplification/lock-up of server workers). | `server_auth/login_policy.go` | `proved` (`proof/throttle/model.gobra`: the delay never exceeds `maxDelay`, for every failure count, step and cap) |
 
 ## 5. Untrusted wire data — `PARSE`
@@ -180,13 +180,16 @@ window rollovers, bound asserted after every operation). Both failed before the 
 ## Roadmap
 
 1. **Phase 1 (this work)** — toolchain (`scripts/setup-gobra.sh`, `make proof`,
-   `make proof-conformance`, the `proof.yml` workflow), this catalogue, and the four
-   verification units plus the canary. Any bug a proof or a conformance test surfaces gets
+   `make proof-conformance`, the `proof.yml` workflow), this catalogue, and the five
+   verification units (`authflow`, `truncation`, `throttle`, `identityopts`, `replay`)
+   plus the canary. Any bug a proof or a conformance test surfaces gets
    fixed and recorded here with the requirement ID it violates (F1).
-2. **Phase 2** — the units marked **open**, in the order that buys the most: `replay`
-   (SR-AUTH-07/SR-RES-03, where the bound and the replay horizon interact), `known_hosts`
+2. **Phase 2** — the units marked **open**, in the order that buys the most: `known_hosts`
    (SR-TR-01), `bearer` (SR-PARSE-02), `source_check` (SR-PERM-06/07), then the
-   case-folding conformance check (SR-PERM-08).
+   case-folding conformance check (SR-PERM-08). The token *validation* path around the replay
+   store (SR-AUTH-01..04: signature, `iss`, `aud`, `exp`) is the largest remaining hole in the
+   authentication story and needs a model of the JWKS fetch, which is why it is not in this
+   phase.
 3. **Phase 3** — push specifications into the production files themselves where Gobra can
    read them (`identity_options.go` is the best candidate: no cgo, no reflection, and the
    decision logic is already separated from `net` by three small functions), so that the

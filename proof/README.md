@@ -51,6 +51,7 @@ One Gobra package per unit, one unit per requirement cluster:
 | `identityopts/` | SR-PERM-01..05 | `IdentityOptions`, `ParseIdentityOptions`, `CheckRequest`, `CheckChannelOpen` |
 | `truncation/` | SR-TR-04, SR-RES-02 | `truncate`, the pre-authentication `User-Agent` path |
 | `throttle/` | SR-AUTH-08, SR-RES-04 | the delay and lock-out arithmetic of `loginThrottle` |
+| `replay/` | SR-AUTH-07, SR-RES-03 | `AcceptedTokenStore.Accept`, `evictExpired`, `NewAcceptedTokenStore` |
 
 `scripts/run-proofs.sh` discovers `proof/*/model.gobra` and runs Gobra once per unit, so a
 timeout or a failure in one unit cannot hide the verdict of another.
@@ -66,9 +67,26 @@ specific version of a specific verifier. Things that cost time to learn:
 * **`==` binds tighter than `&&` in specs.** `ensures res == !a && !b` is read as
   `(res == !a) && !b`, i.e. it demands `!b` unconditionally. Parenthesise the right-hand
   side of an equivalence.
+* **A helper predicate can swallow a claim.** `ensures gatesOk(...) && false` in an earlier
+  draft made three outcomes vacuous: fold decisions into an explicit table instead.
 * **There is no `delete`.** The builtins are `make`, `len`, `append`, `copy`, `min`, `max`.
   A map that forgets keys has to be rebuilt in a loop under a ghost "visited" set, which is
   why the throttle's *memory* bound is a Go test rather than a lemma.
+* **Ghost sequences are the right shape for set-like state.** `ghost` + `seq[T]` gives a
+  store model with no permissions at all, eviction as `s[1:len(s)]` and insertion as
+  `s ++ seq[string]{k}`, so a memory bound is literally `len(res) <= capacity` and a
+  trace theorem is a recursive function (`run` in `replay/`) whose `ensures` holds for every
+  trace. Three catches, all learned the slow way: a function whose parameters or result are
+  ghost types needs the `ghost` modifier *first*, above its other annotations; a `pure func`
+  returning an `int`/`bool` cannot have a ghost body, so define conditionals with `&&`/`||`
+  or a ternary only where the result is itself ghost; and `s[1:]` on a sequence is not
+  accepted where `s[1:len(s)]` is.
+* **Membership and `++` do not mix by induction.** A `mem` defined by peeling the *last*
+  element discharges `mem(s ++ seq{k}, k)` in one step but cannot relate `mem(drop(s), k)` to
+  `mem(s, k)`. State eviction results as structural equalities and index facts
+  (`res == drop(s) ++ seq[string]{k}`, `res[0] == s[1]`) rather than as quantified
+  membership; guard every index in a contract (`1 < len(s) ==> res[0] == s[1]`), since
+  contracts are checked for well-formedness before the case split.
 * **Spec reads need a matching permission.** Every field or slice element a contract reads
   must be covered by an `acc` in the same state, and a folded predicate is not always
   unfolded where the contract needs it. Models that pass restriction sets *by value*
