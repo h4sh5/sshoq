@@ -12,10 +12,11 @@ make proof                # Gobra checks every proof obligation in proof/*/model
 
 ## State of the programme
 
-Fourteen verified files — ten model units (`proof/*/model.gobra`) plus four shipped ones carrying
+Fifteen verified files — ten model units (`proof/*/model.gobra`) plus five shipped ones carrying
 their own specs, [`../glob.go`](../glob.go), [`../identity_checks.go`](../identity_checks.go),
-[`../source_check.go`](../source_check.go) and
-[`../server_auth/throttle_rules.go`](../server_auth/throttle_rules.go) — and 58
+[`../source_check.go`](../source_check.go),
+[`../server_auth/throttle_rules.go`](../server_auth/throttle_rules.go) and
+[`../server_auth/truncate.go`](../server_auth/truncate.go) — and 58
 `TestConformance...` tests in
 the packages of the code they check, and a catalogue of 31 requirements
 ([`SECURITY_REQUIREMENTS.md`](SECURITY_REQUIREMENTS.md)) whose status column is the only place a
@@ -23,8 +24,8 @@ claim about coverage is written:
 
 | status | rows | what it means |
 |---|---|---|
-| proved (model) + conformant | 16 | a Gobra unit proves the decision over all modelled inputs, and a test says the modelled function still behaves that way |
-| proved (shipped) + conformant | 4 | the same, except the proof is of the function the server calls: SR-PERM-04 and SR-PERM-05 in `identity_checks.go`, SR-PERM-06 in `source_check.go`, SR-AUTH-08 in `server_auth/throttle_rules.go`. The model of each is a second opinion now, not the argument |
+| proved (model) + conformant | 15 | a Gobra unit proves the decision over all modelled inputs, and a test says the modelled function still behaves that way |
+| proved (shipped) + conformant | 5 | the same, except the proof is of the function the server calls: SR-PERM-04 and SR-PERM-05 in `identity_checks.go`, SR-PERM-06 in `source_check.go`, SR-AUTH-08 in `server_auth/throttle_rules.go`, SR-TR-04 in `server_auth/truncate.go`. The model of each is a second opinion now, not the argument |
 | conformant | 3 | checked in Go alone, because the prover cannot hold the shape of the whole claim (the recursive glob: findings **F5**, **F6**) — `glob.go` does have a proved *part* of one of them, termination, in the shipped file |
 | partially proved | 3 | the decision function is proved, the surrounding machinery is a premise named in the row |
 | out of scope for Gobra | 3 | QUIC conversation state and version parsing; integration and unit tests are the control |
@@ -58,7 +59,7 @@ assumptions the argument rests on, listed as such rather than buried in a model 
 
 ## Verification in place: the specs live in the shipped file
 
-Four files in the proof are not models. [`../glob.go`](../glob.go) is the `from=` matcher the server
+Five files in the proof are not models. [`../glob.go`](../glob.go) is the `from=` matcher the server
 calls, moved out of `identity_options.go` and annotated where it ships.
 [`../identity_checks.go`](../identity_checks.go) is the channel-request and channel-open gate -- the
 code that enforces `no-pty`, `restrict`, `no-port-forwarding` and a forced command -- separated from
@@ -69,7 +70,12 @@ predicates that read the flag arrays.
 [`../server_auth/throttle_rules.go`](../server_auth/throttle_rules.go) is the arithmetic of the login
 throttle -- when a window closes, when a count refuses, how long an attempt waits, how much of the
 window a refusal reports -- lifted out of `loginThrottle.check` and written in integer nanoseconds,
-because there is no `time` stub for Gobra to read. `make proof` verifies all four: the code that runs
+because there is no `time` stub for Gobra to read.
+[`../server_auth/truncate.go`](../server_auth/truncate.go) is the `User-Agent` truncation that runs
+before any authentication, moved out of `login_policy.go` for the `fmt` reason; its specs are the
+bound on what one attacker-chosen header can do to a log line, and the bounds check that keeps the
+scan inside the string is the F10 panic class turned into a proof obligation. `make proof` verifies
+all five: the code that runs
 in production is the code the proof talks about, with no transcription step in between. That is
 roadmap Phase 3, and what decides whether a file can join it is **what the prover can read**, not
 difficulty:

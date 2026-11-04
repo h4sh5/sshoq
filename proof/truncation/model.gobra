@@ -1,6 +1,13 @@
 // SR-RES-02 and SR-TR-04: truncation of the untrusted User-Agent.
 //
-// This models server_auth/login_policy.go:truncate, which runs before any
+// Tracked files: server_auth/truncate.go (the shipped truncate, which now carries its own
+// proof of memory safety and of the length and identity clauses) and
+// server_auth/truncate_conformance_test.go (the correspondence). What this unit still proves on
+// its own is the character-boundary claim -- that the cut never splits a multi-byte character --
+// which the shipped file cannot state because the prover has no rule for the characters of a
+// string concatenation.
+//
+// This models server_auth/truncate, which runs before any
 // authentication on a header the client controls completely. Slicing it with [:100]
 // used to panic for every shorter header - that is, for every client which is not this
 // project's own - turning a clean pre-authentication 403 into an H3_INTERNAL_ERROR.

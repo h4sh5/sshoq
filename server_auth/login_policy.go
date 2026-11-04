@@ -13,21 +13,9 @@ import (
 // echoed back to the peer.
 const maxLoggedUserAgentLength = 100
 
-// truncate shortens s to at most max bytes, cutting on a rune boundary so that a
-// header made of multi-byte characters cannot produce invalid UTF-8 in the log.
-func truncate(s string, max int) string {
-	if max <= 0 {
-		return ""
-	}
-	if len(s) <= max {
-		return s
-	}
-	cut := max
-	for cut > 0 && (s[cut]&0xC0) == 0x80 {
-		cut--
-	}
-	return s[:cut] + "..."
-}
+// truncate -- the function that shortens an untrusted User-Agent for the log -- is in
+// truncate.go, where it carries the specs Gobra checks: this file imports fmt, and nothing in a
+// file that does can be verified where it lives.
 
 // loginThrottle is a small fixed-window failure counter used to slow down and
 // eventually refuse repeated failed logins.

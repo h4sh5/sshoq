@@ -55,6 +55,7 @@ INPLACE_UNITS=(
 	"$REPO_ROOT/identity_checks.go"
 	"$REPO_ROOT/source_check.go"
 	"$REPO_ROOT/server_auth/throttle_rules.go"
+	"$REPO_ROOT/server_auth/truncate.go"
 )
 
 mapfile -t UNITS < <(
