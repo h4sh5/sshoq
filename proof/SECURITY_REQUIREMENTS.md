@@ -51,6 +51,7 @@ session (shell, SFTP, forwarding) without having proved who they are.
 | SR-AUTH-07 | **Replay**: for a token identified by `(issuer, id)`, `Accept` returns true at most once while the remembered entry has not expired; an empty `id` is always refused. | `auth/oidc/replay.go` (`AcceptedTokenStore.Accept`) | **[partial]** partially `proved` — `proof/replay/model.gobra` proves, for every store state and every token: an empty `id` is never accepted; a token is refused exactly when it is remembered and still live; a refusal leaves the store exactly as it was (so replay traffic can neither evict nor grow it); and the store stays inside its capacity for *every* trace of tokens. Not modelled: the signature/`iss`/`aud`/`exp` validation which happens before the store is consulted (SR-AUTH-01..04, still open) and the clock itself, which enters the model only as the two booleans the code actually asks it. + `conformant` (`auth/oidc/replay_conformance_test.go`) |
 | SR-AUTH-08 | **Password guessing is bounded**: within one failure window, a key that already failed `maxFailures` times is refused (`429`) *before* the password is checked, so further guessing costs no hashing. A successful login clears the counter for that key. | `server_auth/throttle_rules.go` (`windowElapsed`, `attemptIsRefused`, `failureDelay`, `retryAfter`, `failureDelayGrowsWithFailures`), `server_auth/login_policy.go` (`loginThrottle.check/failure/success/startWindowLocked`) | **[proved:shipped]** `proved` on the shipped arithmetic: the four questions `check` asks of its state are functions with contracts in `throttle_rules.go` — a window closes *strictly* after its length (so an exactly-as-old window still counts, and a clock that steps backwards hands nobody a fresh window); `attemptIsRefused` is `failures >= maxFailures` with the boundary stated on both sides, which is what finding **F7** is about; the delay is `failures x step` capped at `max`, never negative, zero exactly when there were no failures; and `RetryAfter` is floored at zero, because a refusal that reports a negative wait tells the client to come back before now. `failureDelayGrowsWithFailures` is the monotonicity lemma, kept next to the rule it quantifies over. `conformant` around them: `TestConformanceCheckAppliesTheRules` drives the real `check()` — table, window reset, refusal and delay — over four windows x four steps x four caps x eight clock positions x six failure counts, comparing with the pre-split expressions as finding **F6** requires; `throttle_rules_conformance_test.go`'s `TestConformanceThrottleRulesAreTheExpressions` checks each rule against the lines it replaced *in the same units the call sites use*, and `TestConformanceThrottleDelayIsInTheUnitsItLooksLike` says a step of one second still produces three seconds after three failures rather than three nanoseconds; `TestConformanceRefusalBoundaryIsTheLimit`, `TestConformanceThrottleDelayProperties`, `TestConformanceWindowExpiryIsTheComparison` and `TestConformanceFailureDelayAtTheOverflowBoundary` cover the boundary, the shape, the two consequences of strictness and the one place the cap is a premise. Outside the proof: the table, the mutex and the clock reading itself. `time` is not the obstacle — Gobra stubs it with real specs, `Duration` arithmetic included, so the rules speak Durations and convert nothing at the seam; `fmt` is the obstacle, which is why they are not in `login_policy.go` at all (below), and `TestConformanceThrottleDelayIsInTheUnitsItLooksLike` is the check that a split which moved no conversions could still have broken in units. The window *reset* keeping the table bounded is SR-RES-01 (**F1**) and `login_policy_test.go` covers it; `proof/throttle/model.gobra` remains as a second opinion. |
 | SR-AUTH-09 | Early data (0-RTT) is never authenticated: requests arriving before the TLS handshake completed are refused (`425 Too Early`), which is what makes the replay-resistance claims above meaningful. | `server_auth/auth.go` | **[out-of-scope]** **out of scope for Gobra** (quic-go `ConnectionState()`); covered by integration tests |
+| SR-AUTH-10 | The set of things that may authenticate a user is fixed before the server serves, and no plugin can widen it by accident: registration after the registry is closed is refused with `util.ClosedPluginsRegistry` and changes nothing; a duplicate plugin name fails loudly and the plugin registered *first* is the one that survives; a plugin that errors, or that returns no identity for a line it does not recognise, contributes no identity -- an identity exists only because a verifier a plugin returned accepts it, and an empty registry authenticates nobody (**F12**). | `internal/plugins.go` (`pluginsRegistry.registerPlugin`, `closeRegistry`, `FindIdentitiesFromAuthorizedIdentityString`, `GetPluginsCLIArgs`), `auth/plugins/plugins.go`, `server_auth/auth.go` (`WrappedPluginVerifier`), `internal/plugins_conformance_test.go` | **[conformant]** Five tests, the first this package has had. `TestConformanceRegistrationIsRefusedAfterClose` refuses a late registration, checks the error *is* `util.ClosedPluginsRegistry` rather than merely non-nil, checks the map is untouched, and checks that closing twice neither reopens nor drops anything; `TestConformanceDuplicateNameFailsLoudlyAndKeepsTheFirstPlugin` pins the direction of the collision -- the panic happens before the map write, so the first plugin is still the one that answers that identity line -- and that the mutex is not left held, so the registry still works afterwards; `TestConformanceNilRegistryPanics` covers the two degenerate registries; `TestConformanceIdentitySearchIsFailClosed` runs the search fifty times over a registry holding a broken plugin, a plugin that recognises nothing and a plugin that produces a verifier, because map iteration order is random and the answer must not be, and expects exactly one identity every time; `TestConformanceClientOptionNamesCannotCollide` is the same no-shadowing rule on the client side, where two plugins offering the same config keyword are an error and the refusal returns no half-built map. Not proved, and not modelled: the verifiers themselves are plugin code behind an interface (`auth.RequestIdentityVerifier` is a premise about whoever wrote the plugin), the registry is a mutex-guarded map so the concurrency is a premise, and the panic-on-duplicate policy is documented behaviour rather than a claim -- what is tested is *which* plugin survives it, because that is the part with a security consequence. |
 
 ## 2. Session permissions — `PERM`
 
@@ -498,6 +499,40 @@ list of decision points miss the places where the code makes a promise in a *nam
 ceiling, a function called `escape` -- because those do not read as decisions. Both were found by walking
 the pure functions and asking what each one promises, and both were added as rows afterwards. The next
 time, the walk comes first.
+
+### F12: an authentication mechanism had no requirement row (SR-AUTH-10)
+
+F8 was a promise in a comment; F11 was a promise in a function name. This one is bigger: the plugin
+authentication path -- `internal/plugins.go`, the registry that decides which code gets to say whether an
+`authorized_keys` identity line is satisfiable, and `auth/plugins`, the extension point that feeds it -- had
+no row in this catalogue and no test in the repository. `grep -i plugin proof/SECURITY_REQUIREMENTS.md`
+returned nothing in a document whose whole subject is who may authenticate.
+
+The walk that found it is the point. After F11 the obvious next question was not "what else can I prove" but
+"which functions does this catalogue not mention at all", and running that question over the tree turns up,
+besides the transport and CLI files one would expect, a registry whose contents are an authentication
+decision. A requirement list written from decision points -- parse, compare, refuse -- will keep missing
+this shape, because a registry does not look like a decision until you ask who is allowed to be in it.
+
+What the rules turn out to be, now that they are written down:
+
+  * registration after `closeRegistry` is refused with `util.ClosedPluginsRegistry` and leaves the map
+    untouched, so the plugin set is fixed for the life of the serving process;
+  * a duplicate plugin name panics -- a startup failure, which is right for a collision between two
+    `init()` functions -- and it panics *before* the map write, so the plugin that registered first is the
+    one that survives. That direction is the one with a consequence: had it written first and panicked
+    after, the same identity line would mean something different in a crashed process's successor;
+  * a plugin returning an error is logged and skipped, and a plugin recognising nothing returns a nil
+    verifier, which is likewise not an identity. The registry is not where fail-closed lives: the login path
+    accepts a request because a verifier someone returned accepted it, and an empty or broken plugin set
+    contributes the empty set, which authenticates nobody.
+
+Five tests in `internal/plugins_conformance_test.go` hold those, including fifty iterations of the identity
+search over a registry holding a broken plugin, an unrecognising plugin and a working one -- map iteration
+order is random and the answer must not be. The row is `conformant` and not more: what a plugin *is* lives
+behind `auth.RequestIdentityVerifier`, so any claim about a plugin's own verdict is a premise about code this
+repository does not contain, and the mutex-guarded map is a premise about the runtime. The panic policy is
+recorded as behaviour, not proved correct; the property tested is which plugin survives a collision.
 
 ## Roadmap
 

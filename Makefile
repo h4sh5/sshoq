@@ -91,7 +91,7 @@ proof:
 # proofs are only as meaningful as the assumption that each model still describes the Go
 # function it models.
 proof-conformance:
-	$(TEST_OPTS) go test . ./server_auth/ ./auth/oidc/ ./util/ ./sftp/ -run 'TestConformance' -count=1 -v
+	$(TEST_OPTS) go test . ./server_auth/ ./auth/oidc/ ./util/ ./sftp/ ./internal/ -run 'TestConformance' -count=1 -v
 
 proof-all: proof-setup proof-conformance proof
 
