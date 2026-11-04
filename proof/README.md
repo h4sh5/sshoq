@@ -36,6 +36,12 @@ keeps the rest honest:
   unparseable header produces 401 without the verifier ever being called. It also pins the
   seven ASCII bytes of the prefix, the one fact Gobra cannot check because it does not
   evaluate string literals.
+* `known_hosts_conformance_test.go` parses real files with real self-signed certificates through
+  the real `ParseKnownHosts`, `Knows`, `KnowsHash` and `AppendKnownHost`: the grammar with good
+  lines interleaved with two-field, four-field, wrong-tag, non-base64 and non-certificate lines
+  (invalid line numbers asserted exactly), a missing file being an empty store rather than an
+  error, and the append-only property the trust argument rests on — after a certificate is
+  replaced, both are still on file.
 * `auth/oidc/replay_conformance_test.go` drives the real store over a seeded token stream,
   including the cases the model's invariant is really about: a replay attempt must not evict,
   a store of capacity one must still catch a replay, and a remembered token whose expiry claim
@@ -68,6 +74,7 @@ One Gobra package per unit, one unit per requirement cluster:
 | `throttle/` | SR-AUTH-08, SR-RES-04 | the delay and lock-out arithmetic of `loginThrottle` |
 | `replay/` | SR-AUTH-07, SR-RES-03 | `AcceptedTokenStore.Accept`, `evictExpired`, `NewAcceptedTokenStore` |
 | `bearer/` | SR-PARSE-02 | `ParseBearerAuth`, `util.EqualFold`, `util.lower` — pre-authentication header parsing |
+| `knownhosts/` | SR-TR-01, SR-TR-02 | `Knows`, `KnowsHash`, `ParseKnownHosts`, `AppendKnownHost`, and the client's trust decision in `cmd/sshoq.go` |
 
 `scripts/run-proofs.sh` discovers `proof/*/model.gobra` and runs Gobra once per unit, so a
 timeout or a failure in one unit cannot hide the verdict of another.
@@ -85,6 +92,11 @@ specific version of a specific verifier. Things that cost time to learn:
   side of an equivalence.
 * **A helper predicate can swallow a claim.** `ensures gatesOk(...) && false` in an earlier
   draft made three outcomes vacuous: fold decisions into an explicit table instead.
+* **A `pure func` body is one `return` of a pure expression.** No `if`/`else`, and no `? :`
+  either — the conditional expression is ghost-only, so a decision function must be written as
+  boolean arithmetic (`pinned && match || !pinned && !known && terminal && yes`) with the shape of
+  the Go code kept in the comment above it. Anything that cannot be written that way becomes a
+  lemma `func` that calls the pure part and `assert`s the case.
 * **There is no `delete`.** The builtins are `make`, `len`, `append`, `copy`, `min`, `max`.
   A map that forgets keys has to be rebuilt in a loop under a ghost "visited" set, which is
   why the throttle's *memory* bound is a Go test rather than a lemma.

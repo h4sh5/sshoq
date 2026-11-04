@@ -1,0 +1,265 @@
+// SR-TR-01: host trust. The client trusts a server certificate because the user pinned its
+// host hash, or because the certificate is already in known_hosts, or because a human said yes
+// at a terminal -- and nothing else. This models known_hosts.go (Knows, KnowsHash,
+// ParseKnownHosts, AppendKnownHost) and the decision the client takes in cmd/sshoq.go when the
+// handshake comes back with a crypto error, which is where "a changed key is a hard failure"
+// either holds or does not.
+//
+// Two abstractions, stated here rather than hidden:
+//
+// The store is described by the answers the trust decision reads about one (host, certificate)
+// pair: whether the file holds any lines at all, whether this host appears in them, and whether
+// one of this host's lines carries this hash. That is all Knows and KnowsHash return and all
+// the decision reads; nothing about which *other* hosts are on file can change what happens to
+// this one. known_hosts_conformance_test.go is what checks the abstraction, driving the real
+// map[string][]*x509.Certificate with real certificates -- including that a host with several
+// certificates behaves as "entry yes, this hash no" for the ones it does not hold.
+//
+// A line of known_hosts is described by (fieldCount, tagIsKind, decodes): the number of
+// whitespace-separated fields, whether the second is the type tag, and whether the third is
+// base64 for a parseable certificate. This model does not parse x509 -- the biggest untrusted
+// parser in the client, and a unit of its own -- so `decodes` is a premise, and every claim
+// below holds whatever it is.
+//
+// What is proved:
+//   * an empty store trusts nobody, and the empty-store guard in Knows never contradicts the
+//     data: a missing or empty known_hosts cannot make the client trust the first certificate it
+//     sees, and a host named in a file that has lines is known;
+//   * knowing a hash implies knowing the host;
+//   * recording a pair sets both answers, and never clears either -- so a server that changes
+//     its certificate leaves the old one on file and verification keeps failing, instead of the
+//     client silently following the newest line. This is what "append, never replace" buys, and
+//     the reason AppendKnownHost never rewrites an entry;
+//   * a line is recorded exactly when it has three fields, the type tag and a certificate that
+//     parses; a line the parser refuses leaves the store exactly as it was, so a malformed
+//     known_hosts can neither add trust nor remove it;
+//   * the trust decision, as one boolean: it accepts exactly when a pin matched, or when there
+//     is no pin, the host has no entry, there is a terminal, and the human said yes. From that:
+//     a pin is never overruled by an answer (a changed certificate cannot be talked into being
+//     trusted), an unknown host without a terminal is refused, a host that already has an entry
+//     is refused (its certificate was supposed to verify and did not), and there is no fourth
+//     way to connect.
+package knownhosts
+
+const kindTag = "x509-certificate"
+
+// facts is the store as seen from one connection: does the file have lines, does this host have
+// one, does one of this host's lines carry this certificate's hash.
+type facts struct {
+	noLines bool // no lines on file: missing file, or a file of nothing but blanks
+	entry   bool // this host has at least one line
+	hash    bool // this host has a line with this certificate's hash
+}
+
+// knows is KnownHosts.Knows, guard included: an empty store reports no host, even for a host the
+// caller believes it saw.
+decreases 0
+pure func knows(f facts) bool {
+	return !f.noLines && f.entry
+}
+
+// knowsHash is KnownHosts.KnowsHash: it scans this host's certificate list, so an empty store
+// answers no on its own.
+decreases 0
+pure func knowsHash(f facts) bool {
+	return !f.noLines && f.hash
+}
+
+// knownHashMeansKnownHost: KnowsHash cannot answer yes for a host Knows has never heard of. The
+// real method needs no empty-map guard (indexing a nil map yields nothing) but it must satisfy
+// this implication, and it is what makes the client's "known host, wrong certificate" branch
+// reachable only for hosts that are really on file.
+requires !f.noLines && f.entry && f.hash
+ensures knowsHash(f) && knows(f)
+func knownHashMeansKnownHost(f facts) {
+	assert knowsHash(f)
+	assert knows(f)
+}
+
+// emptyStoreTrustsNobody: a missing or empty known_hosts file cannot make the client trust the
+// first certificate it sees.
+requires f.noLines
+ensures !knows(f) && !knowsHash(f)
+func emptyStoreTrustsNobody(f facts) {
+	assert !knows(f) && !knowsHash(f)
+}
+
+// entryMeansKnown: the guard in Knows only fires on an empty store, so it never contradicts the
+// data.
+requires !f.noLines && f.entry
+ensures knows(f)
+func entryMeansKnown(f facts) {
+	assert knows(f)
+}
+
+// recording a pair, as the three answers afterwards. This is AppendKnownHost -- and it is also
+// what ParseKnownHosts does with each line it accepts, since the file is the store: both add a
+// line and neither removes or rewrites one, which is why "accepted" is the one parameter here.
+decreases 0
+pure func hashRecorded(f facts, accepted bool) bool {
+	return accepted || f.hash
+}
+
+decreases 0
+pure func entryRecorded(f facts, accepted bool) bool {
+	return accepted || f.entry
+}
+
+decreases 0
+pure func stillEmpty(f facts, accepted bool) bool {
+	return !accepted && f.noLines
+}
+
+// knowsAfter is what Knows reports once a line has been processed.
+decreases 0
+pure func knowsAfter(f facts, accepted bool) bool {
+	return !stillEmpty(f, accepted) && entryRecorded(f, accepted)
+}
+
+// knowsHashAfter is what KnowsHash reports once a line has been processed.
+decreases 0
+pure func knowsHashAfter(f facts, accepted bool) bool {
+	return !stillEmpty(f, accepted) && hashRecorded(f, accepted)
+}
+
+ensures knowsAfter(f, true) && knowsHashAfter(f, true)
+func recordingMakesThePairKnown(f facts) {
+	assert knowsAfter(f, true)
+	assert knowsHashAfter(f, true)
+}
+
+// recordingIsMonotone: whatever the store said about trust before a line was recorded, it still
+// says afterwards. A server that swaps its certificate therefore does not become trusted by
+// virtue of the new line -- the old pair is still on file and still the one the verifier has to
+// match.
+ensures knows(f) ==> knowsAfter(f, accepted)
+ensures knowsHash(f) ==> knowsHashAfter(f, accepted)
+func recordingIsMonotone(f facts, accepted bool) {
+	assert knows(f) ==> knowsAfter(f, accepted)
+	assert knowsHash(f) ==> knowsHashAfter(f, accepted)
+}
+
+// rejectedLineChangesNothing: ParseKnownHosts `continue`s past a line it does not understand. A
+// malformed known_hosts therefore cannot make this client trust anything, and cannot make it
+// forget what the readable lines said either.
+requires !accepted
+ensures knowsAfter(f, accepted) == knows(f)
+ensures knowsHashAfter(f, accepted) == knowsHash(f)
+func rejectedLineChangesNothing(f facts, accepted bool) {
+	assert knowsAfter(f, accepted) == knows(f)
+}
+
+// aRejectedLineCannotCreateTrust: the same fact from the other end, stated so that it cannot be
+// missed -- trust after a rejected line means the trust was already there.
+ensures knowsAfter(f, accepted) ==> accepted || knows(f)
+ensures !knows(f) && !accepted ==> !knowsAfter(f, accepted)
+func rejectedLineCannotCreateTrust(f facts, accepted bool) {
+	assert knowsAfter(f, accepted) ==> accepted || knows(f)
+}
+
+// lineAccepted is the shape test ParseKnownHosts applies to one line: exactly three
+// whitespace-separated fields, the second the type tag, the third base64 for a certificate that
+// parses. The field count is not merely a validity rule -- it is what makes the read of the
+// third field safe, and the real code touches fields[1] and fields[2] only after checking it, so
+// a truncated line is reported invalid rather than read out of bounds.
+decreases 0
+pure func lineAccepted(fieldCount int, tagIsKind bool, decodes bool) bool {
+	return fieldCount == 3 && tagIsKind && decodes
+}
+
+ensures lineAccepted(fieldCount, tagIsKind, decodes) ==> fieldCount == 3
+func acceptedLineHasThreeFields(fieldCount int, tagIsKind bool, decodes bool) {
+	if lineAccepted(fieldCount, tagIsKind, decodes) {
+		assert fieldCount == 3
+	}
+}
+
+// shortLineIsRefused: one field short and the line is dropped. This is the case that would read
+// out of bounds without the count check.
+requires fieldCount < 3
+ensures !lineAccepted(fieldCount, tagIsKind, decodes)
+func shortLineIsRefused(fieldCount int, tagIsKind bool, decodes bool) {
+	assert !lineAccepted(fieldCount, tagIsKind, decodes)
+}
+
+// acceptedLineNeedsTheTag: three fields and decodable data is still refused when the second
+// field is not the type tag, so the store cannot be filled by a line describing some other kind
+// of record.
+requires fieldCount == 3 && decodes
+ensures lineAccepted(fieldCount, tagIsKind, decodes) == tagIsKind
+func acceptedLineNeedsTheTag(fieldCount int, tagIsKind bool, decodes bool) {
+	assert lineAccepted(fieldCount, tagIsKind, decodes) == tagIsKind
+}
+
+// acceptedLineNeedsACertificate: a line whose third field is not base64 for a parseable
+// certificate contributes nothing, whatever else it looks like.
+ensures !decodes ==> !lineAccepted(fieldCount, tagIsKind, decodes)
+func acceptedLineNeedsACertificate(fieldCount int, tagIsKind bool, decodes bool) {
+	assert !decodes ==> !lineAccepted(fieldCount, tagIsKind, decodes)
+}
+
+// accepts is the client's choice in cmd/sshoq.go when the handshake comes back with a crypto
+// error, as a pure function of the four facts that decide it: whether a host hash was pinned,
+// whether the presented certificate carries it, whether the host already has an entry in
+// known_hosts, and whether there is a terminal to ask a question in. The structure is the code's
+// -- the pin is consulted first and settles the matter without asking anyone, which is what makes
+// the client usable, and refuse-able, from a script -- collapsed to the one boolean it returns:
+// connect, or abort.
+//
+// (Gobra v26.09 will not take an if/else or a conditional expression in a pure function, which is
+// why the decision appears as one boolean expression rather than as the shape of the Go code.)
+decreases 0
+pure func accepts(pinned bool, hashMatches bool, knownEntry bool, hasTerminal bool, userSaysYes bool) bool {
+	return pinned && hashMatches || !pinned && !knownEntry && hasTerminal && userSaysYes
+}
+
+// aPinIsNeverOverruledByTheUser is the property SR-TR-01 rests on: once a hash is pinned, the
+// answer to "trust this anyway?" cannot change the outcome, so a changed certificate cannot be
+// talked into being trusted.
+ensures !accepts(true, false, knownEntry, hasTerminal, true)
+ensures !accepts(true, false, knownEntry, hasTerminal, false)
+ensures accepts(true, true, knownEntry, hasTerminal, true)
+ensures accepts(true, true, knownEntry, hasTerminal, false)
+func aPinIsNeverOverruledByTheUser(knownEntry bool, hasTerminal bool) {
+	assert accepts(true, false, knownEntry, hasTerminal, true) ==
+		accepts(true, false, knownEntry, hasTerminal, false)
+	assert accepts(true, true, knownEntry, hasTerminal, true) ==
+		accepts(true, true, knownEntry, hasTerminal, false)
+}
+
+// noSilentTrust: connecting happens either because a pin matched, or because a human said yes at
+// a terminal about a host with no entry yet. There is no fourth way, and in particular no
+// configuration in which an unknown host is trusted on the strength of nothing.
+ensures accepts(pinned, hashMatches, knownEntry, hasTerminal, userSaysYes) ==
+	((pinned && hashMatches) || (!pinned && !knownEntry && hasTerminal && userSaysYes))
+func noSilentTrust(pinned bool, hashMatches bool, knownEntry bool, hasTerminal bool, userSaysYes bool) {
+	assert accepts(pinned, hashMatches, knownEntry, hasTerminal, userSaysYes) ==>
+		(pinned && hashMatches) || (!pinned && !knownEntry && hasTerminal && userSaysYes)
+}
+
+// noTerminalNoTrust: no terminal means nobody to ask, and the answer is not "trust". This is
+// where a CI run or a piped session lands, and it is the case in which a TOFU bypass flag would
+// do the most damage.
+ensures !pinned && !knownEntry && !hasTerminal ==> !accepts(pinned, hashMatches, knownEntry, hasTerminal, userSaysYes)
+func noTerminalNoTrust(pinned bool, hashMatches bool, knownEntry bool, hasTerminal bool, userSaysYes bool) {
+	assert !pinned && !knownEntry && !hasTerminal ==> !accepts(pinned, hashMatches, knownEntry, hasTerminal, userSaysYes)
+}
+
+// knownHostWithABadCertificateIsRefused: a host that already has an entry is not asked about,
+// because its certificate was supposed to verify and did not. Refusing is the whole point --
+// this is the changed-key case.
+ensures !pinned && knownEntry ==> !accepts(pinned, hashMatches, knownEntry, hasTerminal, userSaysYes)
+func changedKeyIsHardFailure(pinned bool, hashMatches bool, knownEntry bool, hasTerminal bool, userSaysYes bool) {
+	assert !pinned && knownEntry ==> !accepts(pinned, hashMatches, knownEntry, hasTerminal, userSaysYes)
+}
+
+// pinIsSetness: pinnedHostHash in the client is `hostHash != ""`, so an absent pin and an empty
+// pin are the same case. A pin that failed to be read from ~/.ssh/config is therefore not a
+// silent downgrade -- the decision falls back to the human, which is the behaviour the
+// requirement asks for rather than one it forbids.
+ensures pinned == (pin != "")
+ensures accepts(pinned, hashMatches, knownEntry, hasTerminal, userSaysYes) ==
+	accepts(pin != "", hashMatches, knownEntry, hasTerminal, userSaysYes)
+func pinIsSetness(pin string, hashMatches bool, knownEntry bool, hasTerminal bool, userSaysYes bool) (pinned bool) {
+	pinned = pin != ""
+}

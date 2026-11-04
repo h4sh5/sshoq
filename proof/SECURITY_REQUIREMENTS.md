@@ -70,14 +70,15 @@ the classic way a restriction fails open.
 | SR-PERM-07 | `matchGlob` terminates, and a pattern containing no wildcard matches **exactly one** text (equality). `?` consumes exactly one character. | `identity_options.go` (`matchGlob`) | **open** — recursive over two strings and a good Gobra target (`decreases` on the remaining lengths gives total correctness); enumerated in `identity_options_test.go` meanwhile. |
 | SR-PERM-08 | Option names are matched case-insensitively in a way that can only *add* restrictions: the case-folded name space contains only restricting names. | `identity_options.go` | **open** — the model is handed the already case-folded name, so `strings.ToLower` sits outside it. Checkable in Go (fold every name of the supported space, assert the verdict equals the lower-case one); the next conformance test to write. |
 | SR-PERM-09 | A forced command actually replaces the executed command, and the identity options attached to a conversation are the ones of the identity that authenticated it (set once, before any channel is handled). | `channel.go`, `conversation.go` | **out of scope for Gobra** (conversation state is entangled with QUIC streams); covered by integration tests + `cmd` tests |
+| SR-PERM-11 | Repeating a scalar option (`identity_type`, `client_id`, `command`) with different values is either merged or refused, and never silently half-applied. | `identity_options.go` (`ParseIdentityOptions`) | **open** — modelled and documented as-is by the identityopts unit (`parseIsFailClosed`: every listed option is processed, scalars by last assignment), so today the contract is "last wins"; see finding **F2** for why that is a deviation from the documentation rather than a memory-safety bug. |
 | SR-PERM-10 | SFTP and tunneling are only offered on a session whose identity options allow them (subsystem/forwarding requests funnel through `CheckChannelOpen`/`CheckRequest`). | `channel.go`, `sftp/server.go` | partially proved: the decision function is `SR-PERM-04/05`; the dispatch path is out of scope |
 
 ## 3. Transport and host trust — `TR`
 
 | ID | Requirement | Code | Status |
 |----|-------------|------|--------|
-| SR-TR-01 | The client does not accept a server certificate for a hostname it does not already know, unless the user pinned that exact host hash; `Knows`/`KnowsHash` decide it, and both are total and never panic. | `known_hosts.go` | **open** — no unit yet. `proof/known_hosts` is the next one worth writing: the decision is a map lookup plus a hash comparison, and "total, never panics" is exactly what Gobra gives for free. `known_hosts_test.go` covers the behaviour today. |
-| SR-TR-02 | `ParseKnownHosts` classifies malformed lines as invalid instead of trusting them, and a line whose base64 or certificate does not parse never enters the map. | `known_hosts.go` | **open** — the line-decision model is easy; the `x509`/base64 layer stays out of Gobras reach, so the claim would be about the classifier only. |
+| SR-TR-01 | The client does not accept a server certificate for a hostname it does not already know, unless the user pinned that exact host hash; `Knows`/`KnowsHash` decide it, and both are total and never panic. | `known_hosts.go`, `cmd/sshoq.go` | `proved` (model: `proof/knownhosts/model.gobra`) + `conformant` (`known_hosts_conformance_test.go`). The store is modelled by the two answers the decision reads about one (host, certificate) pair, and proved: an empty store answers no to both (a missing `known_hosts` cannot trust the first certificate it sees); a known hash implies a known host; recording a pair sets both and never clears either, so **a server that changes certificate leaves the old one on file** and verification keeps failing instead of the client following the newest line; a rejected line leaves the store exactly as it was. The decision is one boolean — accepts exactly when a pin matched, or when there is no pin, no entry, a terminal and a yes — from which: a pin is never overruled by an answer, an unknown host with no terminal is refused, a host whose installed certificate fails to verify is refused, and there is no fourth way to connect. The TLS callbacks themselves are exercised by `cmd/sshoq_pinning_e2e_test.go`. |
+| SR-TR-02 | `ParseKnownHosts` classifies malformed lines as invalid instead of trusting them, and a line whose base64 or certificate does not parse never enters the map. | `known_hosts.go` | `proved` (model: `proof/knownhosts/model.gobra`, classifier: three fields, the `x509-certificate` tag, and decodable data; the third field is only named when the count is three, so a truncated line is reported rather than read out of bounds) + `conformant` (`known_hosts_conformance_test.go`, which parses a real file with good lines interleaved with two-field, four-field, wrong-tag, non-base64 and non-certificate lines and asserts the invalid line numbers exactly). The `x509`/base64 layer itself stays outside Gobra, so `decodes` is a premise in the model: every claim holds whatever that layer decides, and the test says what it decides. |
 | SR-TR-03 | A peer whose protocol version is not supported is refused before authentication. | `server_auth/auth.go` | out of scope for Gobra (version parsing lives in `version.go` with `strings`); covered by unit tests |
 | SR-TR-04 | The untrusted `User-Agent` is never reflected in a response body and is logged truncated, so a pre-authentication reject cannot panic the server. | `server_auth/auth.go`, `login_policy.go` (`truncate`) | `proved` (`proof/truncation/model.gobra`: memory safety for every input and bound, plus the character-boundary claim — this is the F10 panic class) + `conformant` |
 
@@ -98,7 +99,7 @@ pre-authentication input.
 | ID | Requirement | Code | Status |
 |----|-------------|------|--------|
 | SR-PARSE-01 | Parsing a channel request never reads past the declared payload length and never panics on truncated input. | `message/channel_request.go` | phase 3 (see roadmap); the existing fuzz corpus is the interim control |
-| SR-PARSE-02 | `ParseBearerAuth` never panics for an `Authorization` value shorter than the prefix and only strips the prefix when it is really present (case-insensitive, ASCII). | `server_auth/handlers.go`, `util/util.go` (`EqualFold`) | **Proved (model) + Tested** (`proof/bearer`, `server_auth/bearer_conformance_test.go`). Memory safety for every header and every prefix length; the length guard is exactly the prefix length and refuses short headers; `ok` implies the prefix is really there and the token is byte-for-byte the remainder; a refused header yields the empty token; the fold is per-byte, reflexive, symmetric and ASCII-only, so the prefix cannot be smuggled in through Unicode case-variants. The one fact Gobra cannot check — that the prefix constant *is* the seven ASCII bytes — is pinned by the conformance test, which also drives the real `ParseBearerAuth`, `HandleBearerAuth` and `util.EqualFold`. |
+| SR-PARSE-02 | `ParseBearerAuth` never panics for an `Authorization` value shorter than the prefix and only strips the prefix when it is really present (case-insensitive, ASCII). | `server_auth/handlers.go`, `util/util.go` (`EqualFold`) | `proved` (model: `proof/bearer/model.gobra`: memory safety for every header and every prefix length; the length guard is exactly the prefix length and is what refuses a short header; `ok` implies the prefix is really there and the token is byte-for-byte the remainder; a refused header yields the empty token; the fold is per-byte, reflexive, symmetric and ASCII-only, so the prefix cannot be smuggled in through Unicode case-variants) + `conformant` (`server_auth/bearer_conformance_test.go`). The one fact Gobra cannot check — that the prefix constant *is* the seven ASCII bytes — is pinned by that test, which also drives the real `ParseBearerAuth`, `HandleBearerAuth` and `util.EqualFold`. |
 
 ---
 
@@ -177,7 +178,7 @@ Pinned by `TestLoginThrottleCapacityHoldsWhenSourcesAreForgotten` (that witness)
 window rollovers, bound asserted after every operation). Both failed before the fix; the
 20 000-operation one broke at operation 118.
 
-### F2: two disagreeing `identity_option` values resolve silently (SR-IDENT-02)
+### F2: two disagreeing `identity_option` values resolve silently (SR-PERM-11)
 
 The docs say `identity_option` may be repeated. `ParseIdentityOptions` does iterate all
 values, so a *set* of restrictions accumulates — that part matches. But `identity_type` and
@@ -194,13 +195,13 @@ runs.
 
 This is a deviation from the documented behaviour, not a memory-safety or authorisation bug:
 the winning value is still one the administrator wrote, and an empty `client_id` is still
-caught by `checkSourceIP`. It is recorded because "silently ignore half of an administrator's
+caught downstream, where the identity is resolved. It is recorded because "silently ignore half of an administrator's
 configuration" is the kind of thing an operator finds out the hard way. Options are to reject
 a repeated scalar with conflicting values (fail closed, like a bad option value already does)
 or to merge them and say so in the docs; either way the unit should prove whichever contract is
 chosen. Not changed here, because it changes behaviour for configurations that exist today.
 
-### F3: `-force-command-mismatch-exit=0` turns a restriction into advice (SR-PERM-03)
+### F3: `-force-command-mismatch-exit=0` turns a restriction into advice (SR-PERM-09)
 
 With that flag, a request whose command differs from `force_command` is *allowed*, and the
 client is told the command it ran anyway. The restriction therefore holds only when the flag
@@ -210,27 +211,42 @@ command-line flag, which the requirement text and `docs/server_config.md` do not
 identityopts unit models the refusing behaviour, so the flag is one of the places where the
 proof and the deployed server can diverge; noted in that requirement's row.
 
+### F4: the code moved out from under the models, twice (process, not a bug)
+
+Between the first and the seventh unit, the identity-option code moved from `auth/oidc` to the
+root package, the Bearer header parser moved from `auth/oidc` to `server_auth/handlers.go`, and
+the JCS canonicalisation code was removed altogether — taking its proof unit and its catalogue
+rows with it. Nothing failed. That is the failure mode of modelling instead of annotating: a
+model that cites a file which no longer exists keeps verifying happily while describing nothing.
+
+What keeps it honest is mechanical, and now in place: every model header names the tracked file
+and function it models; every model has a `TestConformance...` test beside the code it models, so
+the selector in `make proof-conformance` reports "no tests to run" when code moves out of a
+package without its test — which is exactly how the drift above was caught; and the catalogue
+rows name the same files. Deleting the JCS unit was then a removal in three places rather than a
+slow rot. It was still three places, which is the argument for Phase 3: specs written into the
+production files, where moving a function moves its proof or fails to compile.
+
 ## Roadmap
 
 1. **Phase 1 (this work)** — toolchain (`scripts/setup-gobra.sh`, `make proof`,
    `make proof-conformance`, the `proof.yml` workflow), this catalogue, and the six
-   verification units (`authflow`, `truncation`, `throttle`, `identityopts`, `replay`,
-   `bearer`) plus the canary. Any bug a proof or a conformance test surfaces gets
+   seven verification units (`authflow`, `truncation`, `throttle`, `identityopts`, `replay`,
+   `bearer`, `knownhosts`) plus the canary. Any bug a proof or a conformance test surfaces gets
    fixed and recorded here with the requirement ID it violates (F1, and F2/F3 for the
    two decisions the tests pinned rather than changed).
-2. **Phase 2** — the units marked **open**, in the order that buys the most: `known_hosts`
-   (SR-TR-01), `source_check` (SR-PERM-06/07), then the case-folding conformance check
-   (SR-PERM-08) and the client's `CheckHost` (SR-TR-02). The token *validation* path around
-   the replay store (SR-AUTH-01..04: signature, `iss`, `aud`, `exp`) is the largest remaining
-   hole in the authentication story and needs a model of the JWKS fetch, which is why it is
-   not in this phase. The remaining piece of SR-AUTH-11 (the extension negotiation lists only
-   algorithms that are also implemented) is a conformance test over two tables and needs no
-   verifier at all — the cheapest open item here.
-3. **Fix the two known deviations** before adding more proofs: SR-IDENT-02 (two
+2. **Phase 2** — the units still marked **open**, in the order that buys the most:
+   `source_check` (SR-PERM-06/07, the negation/first-match decision), the case-folding
+   conformance check (SR-PERM-08), then the x509/base64 layer of `ParseKnownHosts` (SR-TR-02 is
+   proved for the classifier; whether a line's data decodes to a certificate is a premise there
+   and a test elsewhere). The token *validation* path around the replay store (SR-AUTH-01..04:
+   signature, `iss`, `aud`, `exp`) is the largest remaining hole in the authentication story and
+   needs a model of the JWKS fetch, which is why it is not in this phase.
+3. **Fix the two known deviations** before adding more proofs: SR-PERM-11 (two
    `identity_option` values that disagree silently keep the last one — pick reject-or-merge,
-   and have the identityopts unit prove whichever contract is chosen) and SR-PERM-03
-   (`-force-command-mismatch-exit=0` turns the force-command restriction into an advisory,
-   with the catalogue updated to say so).
+   and have the identityopts unit prove whichever contract is chosen) and SR-PERM-09
+   (`-force-command-mismatch-exit=0` turns the forced-command restriction into advice, with the
+   catalogue and `docs/` updated to say so).
 4. **Phase 3** — push specifications into the production files themselves where Gobra can
    read them (`identity_options.go` is the best candidate: no cgo, no reflection, and the
    decision logic is already separated from `net` by three small functions), so that the

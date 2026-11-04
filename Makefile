@@ -84,11 +84,14 @@ proof:
 	./scripts/run-proofs.sh
 
 # Model/implementation conformance: the models in proof/ must agree with the functions the
-# server actually runs. Those tests sit in the package of the code they check (the modelled
-# functions are unexported), and every one of them carries "Proved" in its name so that this
-# target can point at exactly the correspondence checks.
+# server actually runs. Those tests sit in the package of the code they check, and every one of
+# them is named TestConformance..., which is how this target selects exactly the correspondence
+# checks: the root package holds the identity-option gates and the known_hosts store, server_auth
+# the truncation and the Bearer header parser, auth/oidc the replay store. Without them the
+# proofs are only as meaningful as the assumption that each model still describes the Go
+# function it models.
 proof-conformance:
-	$(TEST_OPTS) go test . ./server_auth/ -run 'Proved' -count=1 -v
+	$(TEST_OPTS) go test . ./server_auth/ ./auth/oidc/ -run 'TestConformance' -count=1 -v
 
 proof-all: proof-setup proof-conformance proof
 
