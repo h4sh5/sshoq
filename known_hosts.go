@@ -21,12 +21,36 @@ func (kh KnownHosts) Knows(hostname string) bool {
 	return ok
 }
 
+// KnowsHash reports whether known_hosts holds, for a host, a certificate with the
+// given host hash. It differs from Knows in that it asks *which* certificate is
+// known, not merely whether the host has an entry: a pinned host hash which is
+// already on file must not be appended again, while a host whose entry holds
+// another certificate still has to get the pinned one written next to it.
+func (kh KnownHosts) KnowsHash(hostname string, hash string) bool {
+	for _, cert := range kh[hostname] {
+		if HostHash(cert) == hash {
+			return true
+		}
+	}
+	return false
+}
+
 type InvalidKnownHost struct {
 	line string
 }
 
 func (e InvalidKnownHost) Error() string {
 	return fmt.Sprintf("invalid known host line: %s", e.line)
+}
+
+// HostHash returns the "host hash" of a server certificate: the base64-encoded
+// SHA-256 of the certificate itself. It identifies the certificate the way an
+// OpenSSH host key fingerprint identifies a host key, is short enough to read on
+// a screen and to copy by eye, and is the string the client shows when it asks
+// about an unknown certificate, the one it pins with -host-hash / HostHash, and
+// the one the server prints when it starts.
+func HostHash(cert *x509.Certificate) string {
+	return util.Sha256Fingerprint(cert.Raw)
 }
 
 func ParseKnownHosts(filename string) (knownHosts KnownHosts, invalidLines []int, err error) {

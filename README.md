@@ -15,6 +15,7 @@ Notable features:
 - Invisible to port scanning attacks due to UDP
 - UDP port forwarding in addition to classical TCP port forwarding
 - SSH agent forwarding with the classical `-A` flag
+- Pinning a server certificate by its host hash (`-host-hash`, `HostHash` in `~/.ssh/config`), instead of trusting it by answering a prompt
 
 SSHOQ implements the common password-based and public-key (RSA and EdDSA/ed25519) authentication methods. It also supports new authentication methods such as OAuth 2.0 and allows logging in to your servers using your Google/Microsoft/Github accounts.
 
@@ -108,6 +109,16 @@ for your IP address using the `-cert` and `-key` arguments or generate a self-si
 If you have existing certificates and keys, you can run the server as follows to use them=
 
     sudo sshoq-server -cert /path/to/cert/or/fullchain -key /path/to/cert/private/key -url-path /secret-sshoq-server
+
+Whichever certificate it uses, a server announces its **host hash** when it starts, both on its
+terminal and in its log file:
+
+```
+Server host hash: SHA256 n4dQLnmp0xyyQ8DWnBXpB7yFjor7QNeX7b2b0nH+BJA= (clients can pin this certificate with -host-hash "SHA256 ...", or with the HostHash directive in ~/.ssh/config)
+```
+
+That hash is what the clients of this server pin it with, so that they never have to be asked whether
+they trust it: see [pinning a server certificate](#pinning-a-server-certificate--host-hash).
 
 Deploy on a different address and port:
 
@@ -231,10 +242,46 @@ with the following command:
 
       sshoq -use-password username@my-server.example.org/my-secret-path
 
+### Pinning a server certificate (`-host-hash`)
+
+SSHOQ has no host keys: what authenticates a server is its X.509 certificate. A self-signed
+certificate is trusted the way OpenSSH trusts an unknown host key, by asking the first time and
+remembering it in `~/.ssh3/known_hosts` afterwards. To decide that question in advance instead of
+answering it in front of a terminal — or to make a certificate which changed an error rather than a
+prompt — pin the server with its **host hash**:
+
+      sshoq -host-hash "SHA256 n4dQLnmp0xyyQ8DWnBXpB7yFjor7QNeX7b2b0nH+BJA=" username@my-server.example.org/my-secret-path
+
+The host hash is the base64-encoded SHA-256 of the server certificate, which is the fingerprint the
+client shows when it asks about an unknown certificate. The server prints it when it starts, on its
+terminal and in its log file, so that it can be copied to the hosts which use it:
+
+```
+Server started, listening on [::]:443/sshoq-server
+Server host hash: SHA256 n4dQLnmp0xyyQ8DWnBXpB7yFjor7QNeX7b2b0nH+BJA= (clients can pin this certificate with -host-hash "SHA256 ...", or with the HostHash directive in ~/.ssh/config)
+```
+
+With a pinned host hash:
+
+- a certificate with that hash is trusted, without any `(yes/no)` prompt, and is added to
+  `~/.ssh3/known_hosts` if that hash is not already in it;
+- a certificate with any other hash ends the connection with an error, since a certificate which is
+  not the one you pinned is what a machine-in-the-middle attack looks like; the error gives the hash
+  the server presents, so that you can update `-host-hash` (or `HostHash`) if the certificate really
+  did change;
+- nothing else changes: a certificate a public CA signed is verified as usual, and the pin is checked
+  on top of that verification.
+
+The same pin can be given per host with the `HostHash` directive of `~/.ssh/config`; the `-host-hash`
+argument wins over it, since it is typed for this very connection. As any SSHOQ-only directive, add
+it to the `IgnoreUnknown` line of your `~/.ssh/config` so that OpenSSH keeps ignoring it quietly.
+
 ### Config-based session establishment
 `sshoq` parses your OpenSSH config. It handles the `Hostname`, `User`, `Port`, `IdentityFile`, `ForwardAgent`, `SetEnv` and `SendEnv` OpenSSH options.
-It also adds new option only used by SSHOQ, such as `URLPath` or `UDPProxyJump`. `URLPath` allows you to omit the secret URL path in your
+It also adds new option only used by SSHOQ, such as `URLPath`, `UDPProxyJump` or `HostHash`. `URLPath` allows you to omit the secret URL path in your
 SSHOQ command. `UDPProxyJump` allows you to perform SSHOQ (#proxy-jump)[Proxy Jump] and has the same meaning as the `-proxy-jump` command-line argument.
+`HostHash` pins the server certificate, and has the same meaning as the `-host-hash` command-line argument, see
+[pinning a server certificate](#pinning-a-server-certificate--host-hash).
 
 The `SetEnv` and `SendEnv` directives are supported as well:
 
@@ -250,15 +297,19 @@ Like OpenSSH, variables that are not set locally are silently ignored for `SendE
 
 Let's say you have the following lines in your OpenSSH config located in `~/.ssh/config` :
 ```
-IgnoreUnknown URLPath
+IgnoreUnknown URLPath,HostHash
 Host my-server
   HostName 192.0.2.0
   User username
   IdentityFile ~/.ssh/id_rsa
   URLPath /my-secret-path
+  HostHash SHA256 n4dQLnmp0xyyQ8DWnBXpB7yFjor7QNeX7b2b0nH+BJA=
   SetEnv EDITOR=vim
   SendEnv SSH_AUTH_SOCK
 ```
+
+The value of `HostHash` is the one the server prints when it starts. As with the other directives,
+the first matching value wins, so a `Host` block can pin one server differently from `Host *`.
 
 Similarly to what OpenSSH does, the following `sshoq` command will connect you to the SSHOQ server running on 192.0.2.0 on UDP port 443 using public key authentication with the private key located in `.ssh/id_rsa` :
 

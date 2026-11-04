@@ -343,8 +343,10 @@ func reverseTunnelOnce(ctx context.Context, cfg *reverseTunnelConfig, identityFi
 	}
 
 	// no tty here: an unknown self-signed server certificate is refused unless
-	// -R-insecure is set or the certificate is in the known hosts file
-	qconn, status := setupQUICConnection(ctx, insecure, nil, ssh3Dir, certPool, knownHostsPath, knownHosts, nil, clientConfig, nil, nil)
+	// -R-insecure is set or the certificate is in the known hosts file. Nothing is
+	// pinned: the tunnel reads no ssh config, and the relay it dials is a server
+	// administrator's setting rather than a host typed by a user.
+	qconn, status := setupQUICConnection(ctx, insecure, nil, ssh3Dir, certPool, knownHostsPath, knownHosts, nil, clientConfig, nil, nil, "")
 	if qconn == nil {
 		if status == 0 {
 			return fmt.Errorf("the connection to %s was refused and reconnection is required", cfg.url)

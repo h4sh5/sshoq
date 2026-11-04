@@ -249,8 +249,14 @@ func GetAuthorizedIdentities(user *unix_util.User) ([]IdentityVerifier, error) {
 		case os.IsNotExist(err):
 			// a user who has none of the two files is the normal case, not an error
 		default:
-			log.Error().Msgf("error while reading the identities of %s: %s", filename, err)
-			return nil, err
+			// A file which cannot be read authorizes nobody, but it must not forbid the
+			// identities which are known by other means: a server running unprivileged,
+			// asked for an account whose home it may not enter, used to give up here and
+			// refuse everybody, including the keys handed to it on its own command line
+			// (-pubkey, -rpub) and read further down. Reporting it and carrying on keeps
+			// the login closed - nothing from that file is trusted - while letting the
+			// identities the server does hold decide.
+			log.Warn().Msgf("could not read the identities of %s, continuing without them: %s", filename, err)
 		}
 	}
 	// keys authorized on the command line (-pubkey, -rpub), held in memory only

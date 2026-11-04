@@ -2,6 +2,8 @@ package server_auth
 
 import (
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -56,6 +58,38 @@ func TestStaticAuthorizedIdentities(t *testing.T) {
 	}
 	if len(after) != len(before)+1 {
 		t.Fatalf("the static key was not authorized: %d identities instead of %d", len(after), len(before)+1)
+	}
+}
+
+// An identities file the server cannot read authorizes nobody, but it must not
+// forbid the identities known by other means either. A server running
+// unprivileged, asked for an account whose home it may not enter, used to give up
+// on the unreadable file and refuse everybody - including the keys handed to it on
+// its own command line, which have nothing to do with that file and are the only
+// way such a server can be reached at all.
+func TestUnreadableIdentitiesFileDoesNotVetoTheStaticOnes(t *testing.T) {
+	// a regular file where a directory is expected: the open of the identities file
+	// below it fails with "not a directory", which is neither a success nor a
+	// "does not exist" - and it fails that way for root too, unlike a chmod
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, ".ssh3"), []byte("not a directory"), 0600); err != nil {
+		t.Fatalf("could not make the identities path unusable: %s", err)
+	}
+	user := &unix_util.User{Username: "carol", Dir: home}
+
+	AddStaticAuthorizedIdentities("stubkey carol")
+	t.Cleanup(func() {
+		staticIdentities.mu.Lock()
+		staticIdentities.lines = staticIdentities.lines[:len(staticIdentities.lines)-1]
+		staticIdentities.mu.Unlock()
+	})
+
+	identities, err := GetAuthorizedIdentities(user)
+	if err != nil {
+		t.Fatalf("an unreadable identities file must not fail the whole authentication: %s", err)
+	}
+	if len(identities) != 1 {
+		t.Fatalf("the static identity should have been authorized despite the unreadable file: %d identities", len(identities))
 	}
 }
 

@@ -3,8 +3,10 @@ package cmd
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -55,12 +57,21 @@ func resolveConfigDir(configDir string) string {
 	return path.Join(homedir(), ".ssh3")
 }
 
+// errHostHashMismatch refuses a TLS handshake where the certificate the peer
+// presented does not carry the host hash pinned with -host-hash or the HostHash
+// directive of ~/.ssh/config. The certificate is recorded apart from the error,
+// so that the message shown to the user can give the hash to update it to.
+var errHostHashMismatch = errors.New("server certificate does not match the pinned host hash")
+
 // Prepares the QUIC connection that will be used by SSH3
 // If non-nil, use udpConn as transport (can be used for proxy jump)
 // Otherwise, create a UDPConn from udp://host:port
+// hostHash, when not empty, is the host hash the server certificate must have
+// (-host-hash, HostHash in ~/.ssh/config): no question is asked about an unknown
+// certificate in that case, the hash alone decides whether to trust the peer.
 // returns nil, -1 on error, or nil, 0 if reconnection is required
 func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog io.Writer, ssh3Dir string, certPool *x509.CertPool, knownHostsPath string, knownHosts ssh3.KnownHosts,
-	oidcConfig []*oidc.OIDCConfig, options *client_config.Config, proxyRemoteAddr *net.UDPAddr, tty *os.File) (quic.EarlyConnection, int) {
+	oidcConfig []*oidc.OIDCConfig, options *client_config.Config, proxyRemoteAddr *net.UDPAddr, tty *os.File, hostHash string) (quic.EarlyConnection, int) {
 
 	var err error
 	remoteAddr := proxyRemoteAddr
@@ -131,6 +142,55 @@ func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog 
 		}
 	}
 
+	// peerCertificate is the certificate the server presented, whichever handshake
+	// presented it: the pinned host hash below and the prompt for an unknown
+	// certificate both need it, and getting hold of it must not cost more than the
+	// connection which is being set up anyway.
+	var peerCertificate *x509.Certificate
+	// pinnedHostHash tells whether the server certificate has a hash to match, in
+	// which case the question asked for an unknown certificate is asked by nobody:
+	// the hash decides, matching means trusting, not matching means refusing.
+	pinnedHostHash := hostHash != ""
+	if pinnedHostHash {
+		log.Debug().Msgf("pinning the server certificate of %s to host hash SHA256 %s", options.CanonicalHostFormat(), hostHash)
+	}
+	// VerifyConnection is called by crypto/tls after the normal verification of the
+	// certificate, on every connection. It records what the peer presented, and
+	// stops a handshake whose certificate is not the pinned one before a single
+	// byte of the session travels over a connection the user did not accept.
+	tlsConf.VerifyConnection = func(state tls.ConnectionState) error {
+		if len(state.PeerCertificates) > 0 {
+			peerCertificate = state.PeerCertificates[0]
+		}
+		if pinnedHostHash && peerCertificate != nil && ssh3.HostHash(peerCertificate) != hostHash {
+			return errHostHashMismatch
+		}
+		return nil
+	}
+
+	// fetchPeerCertificate dials the peer once without trusting it at all and comes
+	// back with the certificate it presents: it is how the client gets hold of a
+	// certificate it refused, to compare it with a pin or to show its hash to the
+	// user. The probe connection is dropped on purpose, the certificate being the
+	// only interesting part of it.
+	fetchPeerCertificate := func() *x509.Certificate {
+		probeConf := tlsConf.Clone()
+		probeConf.InsecureSkipVerify = true
+		var found *x509.Certificate
+		probeError := errors.New("we do not want to start a totally insecure connection")
+		probeConf.VerifyConnection = func(state tls.ConnectionState) error {
+			if len(state.PeerCertificates) > 0 {
+				found = state.PeerCertificates[0]
+			}
+			return probeError
+		}
+		if _, probeErr := quic.DialEarly(ctx, udpConn, remoteAddr, probeConf, &qconf); !errors.Is(probeErr, probeError) {
+			log.Debug().Msgf("could not retrieve the certificate of %s: %s", remoteAddr, probeErr)
+			return nil
+		}
+		return found
+	}
+
 	log.Debug().Msgf("dialing QUIC host at %s", remoteAddr)
 	qClient, err := quic.DialEarly(ctx,
 		udpConn,
@@ -138,6 +198,38 @@ func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog 
 		tlsConf,
 		&qconf)
 	if err != nil {
+		// A pinned host hash settles the matter here, before the behaviour which
+		// asks the user, since it asks nobody anything and works in a session with no
+		// terminal at all. It is settled here rather than in the crypto error branch
+		// below because the refusal of a handshake by the callback above comes back as
+		// that callback's own error, not necessarily as a transport error.
+		if pinnedHostHash {
+			if peerCertificate == nil {
+				// the certificate was refused before it could be looked at (unknown
+				// authority, self-signed, expired..): go and get it
+				peerCertificate = fetchPeerCertificate()
+			}
+			if peerCertificate != nil {
+				if got := ssh3.HostHash(peerCertificate); got != hostHash {
+					log.Error().Msgf("Host hash mismatch for %s: the server certificate is SHA256 %s, but the -host-hash argument or the HostHash directive in ~/.ssh/config requires SHA256 %s.",
+						options.CanonicalHostFormat(), got, hostHash)
+					log.Error().Msgf("This could be a machine-in-the-middle attack. If the server certificate really did change, update that argument to SHA256 %s.", got)
+					log.Error().Msgf("Aborting.")
+					return nil, -1
+				}
+				// the pinned certificate is the one the server uses: it goes in
+				// known_hosts when it is not there yet, so that the host keeps being
+				// trusted the same way, and the hash is on file to be copied elsewhere.
+				if !knownHosts.KnowsHash(options.CanonicalHostFormat(), hostHash) {
+					if err := ssh3.AppendKnownHost(knownHostsPath, options.CanonicalHostFormat(), peerCertificate); err != nil {
+						log.Error().Msgf("the host hash matches but the certificate could not be added to %s: %s", knownHostsPath, err)
+						return nil, -1
+					}
+					log.Info().Msgf("server certificate for %s has the pinned host hash SHA256 %s: added to %s", options.CanonicalHostFormat(), hostHash, knownHostsPath)
+					return nil, 0
+				}
+			}
+		}
 		if transportErr, ok := err.(*quic.TransportError); ok {
 			if transportErr.ErrorCode.IsCryptoError() {
 				log.Debug().Msgf("received QUIC crypto error on first connection attempt: %s", err)
@@ -152,21 +244,13 @@ func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog 
 					log.Error().Msgf("Aborting.")
 					return nil, -1
 				}
-				// bad certificates, let's mimic the OpenSSH's behaviour similar to host keys
-				tlsConf.InsecureSkipVerify = true
-				var peerCertificate *x509.Certificate
-				certError := fmt.Errorf("We don't want to start a totally insecure connection")
-				tlsConf.VerifyConnection = func(ctx tls.ConnectionState) error {
-					peerCertificate = ctx.PeerCertificates[0]
-					return certError
+				// bad certificates, let's mimic the OpenSSH's behaviour similar to host keys:
+				// get hold of the certificate the peer presents, without ever starting
+				// the totally insecure connection the probe above is only good for
+				if peerCertificate == nil {
+					peerCertificate = fetchPeerCertificate()
 				}
-
-				_, err := quic.DialEarly(ctx,
-					udpConn,
-					remoteAddr,
-					tlsConf,
-					&qconf)
-				if !errors.Is(err, certError) {
+				if peerCertificate == nil {
 					log.Error().Msgf("could not create client QUIC connection: %s", err)
 					return nil, -1
 				}
@@ -182,6 +266,7 @@ func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog 
 					"This session is vulnerable a machine-in-the-middle attack.\n\r" +
 					"Certificate fingerprint: " +
 					"SHA256 " + util.Sha256Fingerprint(peerCertificate.Raw) + "\n\r" +
+					"(that fingerprint is the host hash: give it to -host-hash, or to the HostHash directive of ~/.ssh/config, to connect without being asked)\n\r" +
 					"Do you want to add this certificate to ~/.ssh3/known_hosts (yes/no)? ")
 				if err != nil {
 					log.Error().Msgf("cound not write on /dev/tty: %s", err)
@@ -213,6 +298,17 @@ func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog 
 		}
 		log.Error().Msgf("could not establish client QUIC connection: %s", err)
 		return nil, -1
+	}
+
+	// the handshake went through, so a pinned hash matched it - record the pinned
+	// certificate when known_hosts does not hold it yet, which is what connecting
+	// to a server whose certificate its CAs signed looks like.
+	if pinnedHostHash && peerCertificate != nil && !knownHosts.KnowsHash(options.CanonicalHostFormat(), hostHash) {
+		if err := ssh3.AppendKnownHost(knownHostsPath, options.CanonicalHostFormat(), peerCertificate); err != nil {
+			log.Warn().Msgf("host hash matches but the certificate could not be added to %s: %s", knownHostsPath, err)
+		} else {
+			log.Info().Msgf("server certificate for %s has the pinned host hash SHA256 %s: added to %s", options.CanonicalHostFormat(), hostHash, knownHostsPath)
+		}
 	}
 
 	return qClient, 0
@@ -663,6 +759,13 @@ func (d *remoteDialer) dial(urlParam string) (*client.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("could not get connection material for %s: %s", parsedUrl, err)
 	}
+	// The -host-hash flag pins the host it was typed with, which is the one the
+	// caller already connected to; the host dialed here is pinned by its own
+	// HostHash directive in ~/.ssh/config.
+	hostHash, err := configHostHash(d.sshConfig, parsedUrl.Hostname())
+	if err != nil {
+		return nil, fmt.Errorf("could not get the pinned host hash for %s: %s", parsedUrl.Hostname(), err)
+	}
 	knownHosts, skippedLines, err := ssh3.ParseKnownHosts(d.knownHostsPath)
 	if len(skippedLines) != 0 {
 		skipped := make([]string, 0, len(skippedLines))
@@ -675,13 +778,13 @@ func (d *remoteDialer) dial(urlParam string) (*client.Client, error) {
 		log.Warn().Msgf("there was an error when parsing known hosts: %s", err)
 	}
 
-	qconn, status := setupQUICConnection(d.ctx, d.insecure, d.keyLog, d.ssh3Dir, d.certPool, d.knownHostsPath, knownHosts, d.oidcConfig, options, nil, d.tty)
+	qconn, status := setupQUICConnection(d.ctx, d.insecure, d.keyLog, d.ssh3Dir, d.certPool, d.knownHostsPath, knownHosts, d.oidcConfig, options, nil, d.tty, hostHash)
 	if qconn == nil && status == 0 {
 		// an unknown self-signed certificate was just added to known_hosts (or
 		// the user was asked about it): read the file again and retry
 		log.Info().Msgf("re-parsing known hosts and reconnecting to %s now..", options.CanonicalHostFormat())
 		knownHosts, _, _ = ssh3.ParseKnownHosts(d.knownHostsPath)
-		qconn, status = setupQUICConnection(d.ctx, d.insecure, d.keyLog, d.ssh3Dir, d.certPool, d.knownHostsPath, knownHosts, d.oidcConfig, options, nil, d.tty)
+		qconn, status = setupQUICConnection(d.ctx, d.insecure, d.keyLog, d.ssh3Dir, d.certPool, d.knownHostsPath, knownHosts, d.oidcConfig, options, nil, d.tty, hostHash)
 	}
 	if qconn == nil {
 		return nil, fmt.Errorf("could not set up the transport to %s (exit status %d)", options.CanonicalHostFormat(), status)
@@ -781,6 +884,63 @@ func configForwardAgent(sshConfig *ssh_config.Config, host string) (bool, error)
 		log.Warn().Msgf("ignoring invalid ForwardAgent value %q in ssh config for %s: expected yes or no", value, host)
 		return false, nil
 	}
+}
+
+// normalizeHostHash canonicalises a host hash the user typed, whether it came
+// from the -host-hash flag or from the HostHash directive of ~/.ssh/config, and
+// rejects the ones which cannot possibly match: a host hash is the base64
+// SHA-256 of the server certificate, so anything which does not decode to 32
+// bytes is a typo, and a typo noticed here saves a connection refused for a
+// machine-in-the-middle attack that is not one. The "SHA256 " prefix the server
+// and the client print in front of a hash is accepted and dropped, so that a
+// hash can be copied straight out of either, and so can one between quotes.
+func normalizeHostHash(hostHash string) (string, error) {
+	value := strings.Trim(strings.TrimSpace(hostHash), `"'`)
+	if value == "" {
+		return "", nil
+	}
+	if len(value) >= 6 && strings.EqualFold(value[:6], "SHA256") {
+		value = strings.TrimSpace(value[6:])
+	}
+	decoded, err := base64.StdEncoding.DecodeString(value)
+	if err != nil || len(decoded) != sha256.Size {
+		return "", fmt.Errorf("invalid host hash %q: expected the base64 SHA-256 host hash the server prints when it starts, or the fingerprint the client shows for an unknown certificate, e.g. \"SHA256 9lnKhxnzz/w9YTIIOupOfFhzYbTvIJfJ1RDFLzRm9Xc=\"", hostHash)
+	}
+	return base64.StdEncoding.EncodeToString(decoded), nil
+}
+
+// configHostHash returns the HostHash directive of the ssh config for a host, so
+// that a pinned server certificate needs no flag on the command line. As with
+// the other directives parsed here, the first matching value wins, so a Host
+// block can override "Host *".
+func configHostHash(sshConfig *ssh_config.Config, host string) (string, error) {
+	if sshConfig == nil {
+		return "", nil
+	}
+	value, err := sshConfig.Get(host, "HostHash")
+	if err != nil {
+		return "", fmt.Errorf("could not get HostHash config value: %s", err)
+	}
+	hash, err := normalizeHostHash(value)
+	if err != nil {
+		return "", fmt.Errorf("HostHash directive of %s in ssh config: %s", host, err)
+	}
+	return hash, nil
+}
+
+// resolveHostHash returns the host hash the server certificate of a host must
+// match, from the command line and the ssh config: the -host-hash flag wins over
+// the HostHash directive, since it is the more specific of the two - it is typed
+// for this very connection. An empty result means nothing is pinned, and the
+// certificate is trusted the way it always was: CAs, known_hosts, and the
+// question asked of the user when neither knows the peer.
+func resolveHostHash(sshConfig *ssh_config.Config, cliHostHash string, host string) (string, error) {
+	if hash, err := normalizeHostHash(cliHostHash); err != nil {
+		return "", fmt.Errorf("invalid -host-hash argument: %s", err)
+	} else if hash != "" {
+		return hash, nil
+	}
+	return configHostHash(sshConfig, host)
 }
 
 // scpEndpoint is one side of an -scp copy: either a path on the machine the
@@ -897,6 +1057,7 @@ func ClientMain() int {
 	keyLogFile := flag.String("keylog", "", "Write QUIC TLS keys and master secret in the specified keylog file: only for debugging purpose")
 	passwordAuthentication := flag.Bool("use-password", false, "if set, do classical password authentication")
 	insecure := flag.Bool("insecure", false, "if set, skip server certificate verification")
+	hostHash := flag.String("host-hash", "", "if set, only trust a server certificate with this host hash (the \"Server host hash: SHA256 ...\" line the server prints, or the fingerprint shown for an unknown certificate): a matching hash is trusted and recorded in known_hosts without any prompt, a different one is refused as a possible machine-in-the-middle attack. The HostHash directive of ~/.ssh/config does the same per host; this flag wins over it.")
 	issuerUrl := flag.String("use-oidc", "", "if set, force the use of OpenID Connect with the specified issuer url as parameter (it opens a browser window)")
 	oidcConfigFileName := flag.String("oidc-config", "", "OpenID Connect json config file containing the \"client_id\" and \"client_secret\" fields needed for most identity providers")
 	verbose := flag.Bool("v", false, "if set, enable verbose mode")
@@ -1170,6 +1331,16 @@ func ClientMain() int {
 		}
 	}
 
+	// The host hash pins the server certificate: the -host-hash flag for the host
+	// typed on the command line, the HostHash directive of ~/.ssh/config for any
+	// host, so that the hash printed when the server starts can be copied here and
+	// checked on every connection, prompt-free.
+	pinnedHostHash, err := resolveHostHash(sshConfig, *hostHash, parsedUrl.Hostname())
+	if err != nil {
+		log.Error().Msgf("%s", err)
+		return -1
+	}
+
 	ctx := context.Background()
 
 	pool, err := x509.SystemCertPool()
@@ -1206,12 +1377,19 @@ func ClientMain() int {
 			log.Error().Msgf("Could not parse proxy host URL %s: %s", *proxyJump, err)
 			return -1
 		}
+		// the proxy is another host than the one -host-hash pins: it is pinned by its
+		// own HostHash directive, the target host being checked on its own connection
+		proxyHostHash, err := configHostHash(sshConfig, proxyParsedUrl.Hostname())
+		if err != nil {
+			log.Error().Msgf("Could not get HostHash config value for proxy %s: %s", *proxyJump, err)
+			return -1
+		}
 		proxyAgentClient, proxyOptions, err := getConnectionMaterialFromURL(proxyParsedUrl, sshConfig, cliAuthMethods, cliOptions, optionsParsers)
 		if err != nil {
 			log.Error().Msgf("Could not get connection material for proxy %s: %s", proxyParsedUrl, err)
 			return -1
 		}
-		qconn, status := setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, proxyOptions, nil, tty)
+		qconn, status := setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, proxyOptions, nil, tty, proxyHostHash)
 
 		if qconn == nil && status != 0 {
 			log.Error().Msgf("could not setup transport for proxy client.")
@@ -1224,7 +1402,7 @@ func ClientMain() int {
 				log.Error().Msgf("Error parsing known hosts file (%s): %s", knownHostsPath, parsingErr)
 				return -1
 			}
-			qconn, status = setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, proxyOptions, nil, tty)
+			qconn, status = setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, proxyOptions, nil, tty, proxyHostHash)
 		}
 		// reconnect status
 		if qconn == nil {
@@ -1264,7 +1442,7 @@ func ClientMain() int {
 		log.Debug().Msgf("started proxy jump at %s", proxyAddress)
 	}
 
-	qconn, status := setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, options, proxyAddress, tty)
+	qconn, status := setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, options, proxyAddress, tty, pinnedHostHash)
 
 	if qconn == nil && status != 0 {
 		log.Error().Msgf("could not setup transport for client.")
@@ -1277,7 +1455,7 @@ func ClientMain() int {
 			log.Error().Msgf("Error parsing known hosts file (%s): %s", knownHostsPath, parsingErr)
 			return -1
 		}
-		qconn, status = setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, options, proxyAddress, tty)
+		qconn, status = setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, options, proxyAddress, tty, pinnedHostHash)
 	}
 	if qconn == nil {
 		if status != 0 {
