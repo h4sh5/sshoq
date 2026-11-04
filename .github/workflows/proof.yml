@@ -9,6 +9,9 @@ on:
       - 'scripts/setup-gobra.sh'
       - 'scripts/run-proofs.sh'
       - 'identity_options.go'
+      # the correspondence tests live with the code they check, so they are part of what
+      # can make this workflow meaningful
+      - 'identity_options_conformance_test.go'
       - 'known_hosts.go'
       - 'server_auth/**'
       - 'auth/oidc/**'

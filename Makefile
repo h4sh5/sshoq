@@ -79,10 +79,12 @@ proof-setup:
 proof:
 	./scripts/run-proofs.sh
 
-# Model/implementation conformance: the models in proof/ must agree with the
-# functions the server actually runs.
+# Model/implementation conformance: the models in proof/ must agree with the functions the
+# server actually runs. Those tests sit in the package of the code they check (the modelled
+# functions are unexported), and every one of them carries "Proved" in its name so that this
+# target can point at exactly the correspondence checks.
 proof-conformance:
-	$(TEST_OPTS) go test ./proof/...
+	$(TEST_OPTS) go test . ./server_auth/ -run 'Proved' -count=1 -v
 
 proof-all: proof-setup proof-conformance proof
 
