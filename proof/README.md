@@ -64,6 +64,13 @@ asserted about (**F9**). Both rows are now backed by proofs and by the first tes
 ever had; what is recorded in the catalogue is the method fix that comes with each, because a ledger
 with an unchecked entry in it is worse than an admitted gap.
 
+That last clause is mechanical now rather than aspirational: the five tests in
+`proof_ledger_conformance_test.go` re-derive the status column from the rows, resolve every file, test name
+and model unit cited in either document against the tree, and match every `F<digit>` reference to a
+section. The first thing it caught was **F10** -- named in three places, described in two commit messages,
+never written up -- and then two conformance files that no row cited, which is the same drift in the other
+direction.
+
 Three further findings are behaviour
 documented rather than changed, each needing a product decision: **F2** above, **F3**
 (`-force-command-mismatch-exit=0` makes a forced command advisory, which the documentation does not
@@ -76,6 +83,32 @@ load-bearing the catalogue row names it. Some of them are then checked by a name
 distinguishing conversation ids, what `net.ParseCIDR` decides, that a rejected spelling is refused —
 and the ones that are not (signature verification, the TLS exporter behind a conversation id) are the
 assumptions the argument rests on, listed as such rather than buried in a model header.
+
+Three things are worth saying plainly about where that leaves the programme, because each is the reason a
+row is not further along than it is.
+
+*The client's host-trust decision cannot be proved on the shipped code without changing the CLI.* The
+table itself -- pinned hash, known entry, matching hash, terminal available, user says yes -- is proved in
+`proof/knownhosts` and held to by `known_hosts_conformance_test.go`, so SR-TR-01 and SR-TR-02 are
+`proved:model`. Moving them to `proved:shipped` would mean lifting the verdict out of `cmd/sshoq.go`, where
+it is interleaved with logging, prompts and file writes, into a package the prover can read. That is a
+refactor of the one security decision with no unit-testable seam and no test of its own, done for the
+benefit of a status token; it is on the roadmap, it is not done, and the rows say which of the two they are
+today.
+
+*The remaining `proved:model` rows are blocked by the prover's stdlib, not by ingenuity.* `io` and `bufio`
+have no stubs, so a reader in `message/` cannot be verified in place; `append` is not in a pure function's
+repertoire, so a function that accumulates bytes cannot either (both measured, both recorded under Phase 4
+and in `util/varint.go`'s header, which is why that file verifies lengths and not reads). `crypto/x509`,
+`go-jose` and the JWKS fetch are premises by construction: the argument is that *given* a verified
+signature the rest follows, and each row says so.
+
+*End-to-end behaviour is outside this harness on purpose, and is not being run by accident in a plain
+container.* `go test ./integration_tests/` passes here in 0.7 s, which is not 46 specs of QUIC: one
+`BeforeEach` skips all of them unless the setup script's user, keys and `sshoq-tests` URL path exist. So
+`make proof` and `make proof-conformance` are what guard a refactor in this working tree, and a change to
+the wire or the login path wants the integration suite run where it is configured -- written down because a
+green `go test ./...` is easy to read as more than it is.
 
 ## Verification in place: the specs live in the shipped file
 
