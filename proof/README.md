@@ -248,13 +248,18 @@ specific version of a specific verifier. Things that cost time to learn:
   function that calls it and asserts the comparison.
 * **`before` is a reserved word** (it belongs to the permission-ordering logic): `before := f(x)` is
   "no viable alternative at input 'before :='", an error that points at the call and not the name.
-* **There is no `time` stub.** Importing `time` in a verified file is a visible "got unresolved
-  import: time", never a silent gap, and a duration is just an `int64` of nanoseconds: state the
-  rules in nanoseconds, convert with `Nanoseconds()` at the call sites, and name a test that says the
-  conversion is the identity (`TestConformanceThrottleConversionsAreLossless`).
+* **`time` *is* stubbed, with real specs** -- `Duration` arithmetic, and pure `Before`/`After` that
+  claims can be stated against -- so a verified file may import it and speak durations the way the
+  code around it does, which is what `server_auth/throttle_rules.go` does. The complete list of what
+  Gobra v26.09 ships is `bytes`, `encoding`, `errors`, `fmt` (signatures only, and its header says
+  the members are unsupported), `net`, `strconv`, `strings`, `sync`, `time`. Nothing for
+  `crypto/x509`, `crypto/ed25519`, `os`, `bufio` or `encoding/base64`, which is what stands between
+  this toolchain and a verified `known_hosts.go` or a verified reader in `message/`. An earlier note
+  here said the opposite about `time`, on the strength of one failed import whose cause was elsewhere.
 * **A verified file may live anywhere in the tree** -- Gobra is handed the directory as its package --
-  but it still sees neither its package-mates nor any unstubbed import, so `server_auth`'s verified
-  file is a leaf with no imports at all.
+  but it still sees neither its package-mates nor any unstubbed import. That is why the verified files
+  are leaves: `server_auth/throttle_rules.go` imports `time` and nothing else, and
+  `server_auth/truncate.go` imports nothing at all, because the files they came from pull in `fmt`.
 * **A recursive `pure func` is checked and then opaque.** Its `decreases` measure is verified, but
   no concrete call can be proved of it afterwards: recursion over `int` unfolds (`f(3)` verifies),
   recursion over `string` does not (`gm("a", "a", 0, 0)` stays unknown), recursion with several
