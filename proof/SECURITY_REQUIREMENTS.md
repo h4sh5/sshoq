@@ -286,11 +286,17 @@ requirement is on.
    hole in the authentication story and needs a model of the JWKS fetch, which is why it is not in
    this phase. The case-folding step the identity-options model is handed (SR-PERM-08) landed with
    the `from=` work.
-3. **Fix the two known deviations** before adding more proofs: SR-PERM-11 (two
-   `identity_option` values that disagree silently keep the last one — pick reject-or-merge,
-   and have the identityopts unit prove whichever contract is chosen) and SR-PERM-09
-   (`-force-command-mismatch-exit=0` turns the forced-command restriction into advice, with the
-   catalogue and `docs/` updated to say so).
+3. **Decide the two known deviations** — both are one-line-scale, and both are decisions rather than
+   work, which is why they are still open. SR-PERM-11 (two `identity_option` values that disagree
+   silently keep the last one): the recommendation is *accept an identical duplicate, refuse a
+   conflicting scalar*, because `ParseIdentityOptions` already refuses `duplicate command="..."` and
+   `from` accumulates, so the rule is the one the file already uses and it cannot break a
+   configuration where every copy says the same thing; then the identityopts unit proves whichever
+   contract is chosen. SR-PERM-09 (`-force-command-mismatch-exit=0` turns the forced-command
+   restriction into advice): no code change recommended — the flag is deliberate — but
+   `docs/server_config.md` and the requirement's own text should say that the restriction is
+   conditional on the flag keeping its default, since the proof models the refusing behaviour and the
+   deployed server may not.
 4. **Phase 3** — push specifications into the production files themselves where Gobra can
    read them (`identity_options.go` is the best candidate: no cgo, no reflection, and the
    decision logic is already separated from `net` by three small functions), so that the

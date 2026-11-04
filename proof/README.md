@@ -10,6 +10,38 @@ make proof                # Gobra checks every proof obligation in proof/*/model
 
 `make proof-all` runs all three. CI does the same in `.github/workflows/proof.yml`.
 
+## State of the programme
+
+Nine verified units plus a canary (`proof/*/model.gobra`, 10 files), 41 `TestConformance...` tests in
+the packages of the code they check, and a catalogue of 31 requirements
+([`SECURITY_REQUIREMENTS.md`](SECURITY_REQUIREMENTS.md)) whose status column is the only place a
+claim about coverage is written:
+
+| status | rows | what it means |
+|---|---|---|
+| proved (model) + conformant | 19 | a Gobra unit proves the decision over all modelled inputs, and a test says the modelled function still behaves that way |
+| conformant | 3 | checked in Go alone, because the prover cannot hold the shape (the recursive glob: finding **F5**) |
+| partially proved | 4 | the decision function is proved, the surrounding machinery is a premise named in the row |
+| out of scope for Gobra | 3 | QUIC conversation state and version parsing; integration and unit tests are the control |
+| open | 1 | SR-PERM-11 / finding **F2**: a decision the maintainer owes, not a proof that is missing |
+| phase 3 | 1 | SR-PARSE-01: the frame parser, where specs have to live in the production file |
+
+Two real bugs came out of writing this, both fixed and recorded with the requirement they violated:
+the login throttle could grow past the capacity it documents (**F1**, `server_auth/login_policy.go`),
+and a `from=` pattern with a handful of stars cost exponential time — fourteen stars, 2m56s of one
+core per authentication attempt (**F5**, `identity_options.go`). Three more findings are behaviour
+documented rather than changed, each needing a product decision: **F2** above, **F3**
+(`-force-command-mismatch-exit=0` makes a forced command advisory, which the documentation does not
+say), and **F4** (modelling drift, mitigated mechanically and the argument for Phase 3).
+
+The boundary of what this approach can prove is drawn by experiment and not asserted: recursion over
+strings is opaque in Gobra v26.09 (Gotchas below), crypto and `go-jose` discovery are premises, and
+nothing here says that a Go compiler, the OS, or `net` behave as assumed. Where a premise is
+load-bearing the catalogue row names it. Some of them are then checked by a named test — base64
+distinguishing conversation ids, what `net.ParseCIDR` decides, that a rejected spelling is refused —
+and the ones that are not (signature verification, the TLS exporter behind a conversation id) are the
+assumptions the argument rests on, listed as such rather than buried in a model header.
+
 ## How the argument is built
 
 Gobra cannot read the server: the production files reach into `quic-go`, `x509`,
