@@ -17,10 +17,26 @@ package ssh3
 // is the equivalence with the declarative `globMatch` below: the step that needs induction ("every
 // star earlier than the saved one has already been shown not to help at any longer stretch of the
 // text"), and induction over `string` is exactly what Silicon lacks -- it has one over inductive
-// datatypes, which is how proof/glob discharges the same claim over its own list model. The meaning
-// therefore reaches the shipped function through identity_options_source_conformance_test.go, which
-// compares this implementation against the recursion it replaced and against a second linear matcher
-// over every short pattern and text, stars included. proof/README.md says which line is which.
+// datatypes, which is how proof/sourcecheck discharges the same claim over its own list model. The
+// meaning therefore reaches the shipped function through identity_options_source_conformance_test.go,
+// which compares this implementation against the recursion it replaced and against a second linear
+// matcher over every short pattern and text, stars included. proof/README.md says which line is which.
+//
+// One further clause was tried, three ways, and did not land; the answer was the same each time,
+// which is the part worth keeping. The clause is exactness for a pattern with no wildcards in it --
+// the case a plain `from="10.0.5.7"` entry is in:
+//
+//	no wildcard character anywhere in pattern  ==>  (res == (pattern == text))
+//
+// Stated with string slicing (`pattern[0:p] == text[0:p]` as the loop invariant) it does not encode
+// at all: "type string is not supported by the current encoding". Stated as a quantifier over byte
+// positions it encodes, and every invariant holds, but the postcondition still reports "might not
+// hold" at the point where the matcher has just read `pattern[p]` and `text[t]` and has to conclude
+// they differ -- instantiation over `str.at` at an index the solver only ever sees through an
+// implication. Stated third as a helper recursive over the *index* rather than over the string,
+// which is the form that unfolds elsewhere in this programme, it fails the same way. So that clause
+// stays a test (`TestConformanceLiteralGlobIsEquality`, exhaustive over a small alphabet) and not
+// a proof. The boundary is the prover's, and it is the one F5 ran into from the other side.
 
 // globMatch is the meaning of a glob, stated without an algorithm: '*' stands for any sequence of
 // characters (including none), '?' for exactly one character, and anything else for itself. The two
