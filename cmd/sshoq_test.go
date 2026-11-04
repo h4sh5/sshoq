@@ -1,6 +1,10 @@
 package cmd
 
 import (
+	"crypto"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"flag"
 	"net"
 	"net/url"
@@ -12,6 +16,7 @@ import (
 	"github.com/h4sh5/sshoq"
 	client_pubkey_authentication "github.com/h4sh5/sshoq/auth/plugins/pubkey_authentication/client"
 	"github.com/h4sh5/sshoq/client/config"
+	"github.com/h4sh5/sshoq/util"
 	"github.com/kevinburke/ssh_config"
 )
 
@@ -1054,5 +1059,257 @@ func TestConfigForwardAgentInvalidValue(t *testing.T) {
 	}
 	if forward {
 		t.Fatal("an invalid ForwardAgent value must leave forwarding off")
+	}
+}
+
+// --- host hash pinning (-host-hash, HostHash in ~/.ssh/config) ---
+
+// A host hash is the base64 SHA-256 of the server certificate, which is exactly
+// what the server prints and what the client shows for an unknown certificate.
+const knownTestHostHash = "9lnKhxnzz/w9YTIIOupOfFhzYbTvIJfJ1RDFLzRm9Xc="
+
+func TestNormalizeHostHashCanonical(t *testing.T) {
+	got, err := normalizeHostHash(knownTestHostHash)
+	if err != nil {
+		t.Fatalf("a valid host hash was refused: %s", err)
+	}
+	if got != knownTestHostHash {
+		t.Fatalf("expected the hash unchanged, got %q", got)
+	}
+	// spaces around it, coming from a copy-paste, are harmless
+	if got, err := normalizeHostHash("  " + knownTestHostHash + " "); err != nil || got != knownTestHostHash {
+		t.Fatalf("surrounding spaces should be ignored (got %q, err %v)", got, err)
+	}
+}
+
+// The hashes are copied out of the server log or out of the client's prompt,
+// where they are written with a "SHA256 " in front of them: both spellings must
+// be accepted, and give the same pinned value.
+func TestNormalizeHostHashAcceptsSpelledPrints(t *testing.T) {
+	for _, spelling := range []string{
+		"SHA256 " + knownTestHostHash,
+		"sha256 " + knownTestHostHash,
+		"SHA256" + knownTestHostHash,
+		`"SHA256 ` + knownTestHostHash + `"`,
+	} {
+		got, err := normalizeHostHash(spelling)
+		if err != nil || got != knownTestHostHash {
+			t.Fatalf("spelling %q: expected %q, got %q (err %v)", spelling, knownTestHostHash, got, err)
+		}
+	}
+}
+
+// An empty host hash means nothing is pinned, and is not an error: it is the
+// value of an absent flag and of an ssh config without any HostHash directive.
+func TestNormalizeHostHashEmpty(t *testing.T) {
+	got, err := normalizeHostHash("   ")
+	if err != nil || got != "" {
+		t.Fatalf("expected no pin and no error (got %q, err %v)", got, err)
+	}
+}
+
+// A typo in a host hash must be caught when the argument is read rather than
+// showing up as a machine-in-the-middle attack on every connection.
+func TestNormalizeHostHashInvalid(t *testing.T) {
+	for _, invalid := range []string{
+		"not-a-hash",              // not base64
+		"SHA256 not-a-hash",       // same, with the prefix
+		"sha256 TRgCy5WaMRyKGTw2", // base64, but truncated
+		"SHA256",                  // the prefix alone, the hash forgotten
+	} {
+		if got, err := normalizeHostHash(invalid); err == nil {
+			t.Fatalf("%q should be refused, it gave %q", invalid, got)
+		}
+	}
+}
+
+// "HostHash <hash>" in a matching Host block must pin the certificate without
+// needing -host-hash on the command line.
+func TestConfigHostHashPinsCertificate(t *testing.T) {
+	cfg := decodeSSHConfigForTest(t, "Host example.org\n  HostHash "+knownTestHostHash+"\n")
+	pinned, err := configHostHash(cfg, "example.org")
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if pinned != knownTestHostHash {
+		t.Fatalf("expected the host to be pinned to %s, got %q", knownTestHostHash, pinned)
+	}
+}
+
+// The hash printed by the server is written "SHA256 <hash>", with a space in it:
+// the whole value of the directive must be read, not only its first word.
+func TestConfigHostHashWithPrefix(t *testing.T) {
+	cfg := decodeSSHConfigForTest(t, "Host example.org\n  HostHash SHA256 "+knownTestHostHash+"\n")
+	pinned, err := configHostHash(cfg, "example.org")
+	if err != nil || pinned != knownTestHostHash {
+		t.Fatalf("expected %q (got %q, err %v)", knownTestHostHash, pinned, err)
+	}
+}
+
+// Without any HostHash directive, and without any ~/.ssh/config, nothing is
+// pinned and the usual behaviour - CAs, known_hosts, then the question - stands.
+func TestConfigHostHashAbsent(t *testing.T) {
+	cfg := decodeSSHConfigForTest(t, "Host example.org\n  User someone\n")
+	pinned, err := configHostHash(cfg, "example.org")
+	if err != nil || pinned != "" {
+		t.Fatalf("expected nothing pinned (got %q, err %v)", pinned, err)
+	}
+	pinned, err = configHostHash(nil, "example.org")
+	if err != nil || pinned != "" {
+		t.Fatalf("expected nothing pinned with a nil config (got %q, err %v)", pinned, err)
+	}
+}
+
+// The directive must apply to the hosts it matches, and only to them.
+func TestConfigHostHashScopedToHost(t *testing.T) {
+	cfg := decodeSSHConfigForTest(t, "Host pinned.example.org\n  HostHash "+knownTestHostHash+"\nHost other.example.org\n  User someone\n")
+	if pinned, err := configHostHash(cfg, "pinned.example.org"); err != nil || pinned != knownTestHostHash {
+		t.Fatalf("expected pinning for pinned.example.org (got %q, err %v)", pinned, err)
+	}
+	if pinned, err := configHostHash(cfg, "other.example.org"); err != nil || pinned != "" {
+		t.Fatalf("expected no pinning for other.example.org (got %q, err %v)", pinned, err)
+	}
+	starCfg := decodeSSHConfigForTest(t, "Host *\n  HostHash "+knownTestHostHash+"\n")
+	if pinned, err := configHostHash(starCfg, "anywhere.example.org"); err != nil || pinned != knownTestHostHash {
+		t.Fatalf("expected Host * to pin every host (got %q, err %v)", pinned, err)
+	}
+}
+
+// -host-hash is written for this very connection, so it wins over the config;
+// without it, the directive of the config is what pins the server.
+func TestResolveHostHashFlagWinsOverConfig(t *testing.T) {
+	const otherHash = "mMNO1234567890abcdefABCDEFghijklmnopqrstuvw="
+	cfg := decodeSSHConfigForTest(t, "Host example.org\n  HostHash "+knownTestHostHash+"\n")
+
+	pinned, err := resolveHostHash(cfg, "SHA256 "+otherHash, "example.org")
+	if err != nil || pinned != otherHash {
+		t.Fatalf("expected the flag to win (got %q, err %v)", pinned, err)
+	}
+	pinned, err = resolveHostHash(cfg, "", "example.org")
+	if err != nil || pinned != knownTestHostHash {
+		t.Fatalf("expected the config directive to apply (got %q, err %v)", pinned, err)
+	}
+	pinned, err = resolveHostHash(nil, otherHash, "example.org")
+	if err != nil || pinned != otherHash {
+		t.Fatalf("expected the flag alone to pin (got %q, err %v)", pinned, err)
+	}
+	pinned, err = resolveHostHash(nil, "", "example.org")
+	if err != nil || pinned != "" {
+		t.Fatalf("expected nothing pinned (got %q, err %v)", pinned, err)
+	}
+}
+
+// A bad hash on the command line is refused as an argument error; a bad hash in
+// the config says which directive is wrong, so that the user can fix it.
+func TestResolveHostHashInvalid(t *testing.T) {
+	cfg := decodeSSHConfigForTest(t, "Host example.org\n  HostHash nonsense\n")
+	if _, err := resolveHostHash(cfg, "not base64!!", "example.org"); err == nil {
+		t.Fatal("an invalid -host-hash argument should be refused")
+	}
+	_, err := resolveHostHash(cfg, "", "example.org")
+	if err == nil {
+		t.Fatal("an invalid HostHash directive should be refused")
+	}
+	if !strings.Contains(err.Error(), "HostHash") {
+		t.Fatalf("the error should name the directive at fault, got %q", err)
+	}
+}
+
+// testServerCertificate makes a self-signed certificate the way the server does,
+// so that the host hashes computed from it are the ones a client would check.
+func testServerCertificate(t *testing.T) (*x509.Certificate, crypto.PrivateKey) {
+	t.Helper()
+	pub, priv, err := util.GenerateKey()
+	if err != nil {
+		t.Fatalf("could not generate a key: %s", err)
+	}
+	template, err := util.GenerateCert(priv)
+	if err != nil {
+		t.Fatalf("could not make a certificate: %s", err)
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, pub, priv)
+	if err != nil {
+		t.Fatalf("could not create the certificate: %s", err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("could not parse the certificate: %s", err)
+	}
+	return cert, priv
+}
+
+// The hash the server announces must be the one its clients compute: the two
+// sides of the copy-and-paste have to agree, or the pin never matches.
+func TestPresentedHostHashesMatchesCertificate(t *testing.T) {
+	cert, priv := testServerCertificate(t)
+	tlsConfig := &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{cert.Raw}, PrivateKey: priv}}}
+
+	hashes := presentedHostHashes(tlsConfig, nil)
+	if len(hashes) != 1 {
+		t.Fatalf("expected exactly one host hash, got %v", hashes)
+	}
+	if hashes[0] != ssh3.HostHash(cert) {
+		t.Fatalf("expected the hash of the certificate, got %q", hashes[0])
+	}
+	// and the hash the announcement shows is the one normalizeHostHash accepts back
+	pinned, err := normalizeHostHash(hostHashAnnouncements(hashes)[0])
+	if err == nil || pinned != "" {
+		t.Fatalf("a whole sentence is not a host hash (got %q, err %v)", pinned, err)
+	}
+	pinned, err = normalizeHostHash("SHA256 " + hashes[0])
+	if err != nil || pinned != hashes[0] {
+		t.Fatalf("the announced hash must be usable as -host-hash (got %q, err %v)", pinned, err)
+	}
+}
+
+// A server can hold several certificates: each one gets announced once, and the
+// certificates certmagic generates per domain name are announced too, since
+// those are the ones a client may well be handed.
+func TestPresentedHostHashesAnnouncesEveryCertificate(t *testing.T) {
+	cert, priv := testServerCertificate(t)
+	other, otherPriv := testServerCertificate(t)
+	announced := func(hello func(*tls.ClientHelloInfo) (*tls.Certificate, error)) []string {
+		tlsConfig := &tls.Config{
+			Certificates: []tls.Certificate{
+				{Certificate: [][]byte{cert.Raw}, PrivateKey: priv},
+				{Certificate: [][]byte{cert.Raw}, PrivateKey: priv}, // same cert twice
+				{Certificate: [][]byte{other.Raw}, PrivateKey: otherPriv},
+			},
+			GetCertificate: hello,
+		}
+		return presentedHostHashes(tlsConfig, []string{"public.example.org"})
+	}
+
+	hashes := announced(nil)
+	if len(hashes) != 2 {
+		t.Fatalf("expected the two different certificates, got %v", hashes)
+	}
+
+	generated := &tls.Certificate{Certificate: [][]byte{other.Raw}, PrivateKey: otherPriv}
+	hashes = announced(func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+		if hello.ServerName != "public.example.org" {
+			t.Errorf("asked for a certificate for %q", hello.ServerName)
+		}
+		return generated, nil
+	})
+	if len(hashes) != 2 {
+		t.Fatalf("the generated certificate is one of the two known ones, so still two hashes: %v", hashes)
+	}
+}
+
+// The announcement must say what the hash is and how to use it, since it is meant
+// to be copied to the machines which connect to this server.
+func TestHostHashAnnouncementIsCopyable(t *testing.T) {
+	cert, priv := testServerCertificate(t)
+	hashes := presentedHostHashes(&tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{cert.Raw}, PrivateKey: priv}}}, nil)
+	messages := hostHashAnnouncements(hashes)
+	if len(messages) != 1 {
+		t.Fatalf("expected one message, got %v", messages)
+	}
+	message := messages[0]
+	for _, expected := range []string{"Server host hash: SHA256 " + hashes[0], "-host-hash", "HostHash"} {
+		if !strings.Contains(message, expected) {
+			t.Fatalf("the announcement %q should mention %q", message, expected)
+		}
 	}
 }
