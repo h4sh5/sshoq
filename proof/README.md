@@ -18,7 +18,7 @@ their own specs, [`../glob.go`](../glob.go), [`../identity_checks.go`](../identi
 [`../server_auth/throttle_rules.go`](../server_auth/throttle_rules.go),
 [`../server_auth/truncate.go`](../server_auth/truncate.go),
 [`../util/varint.go`](../util/varint.go) and
-[`../version_rules.go`](../version_rules.go) — and 73
+[`../version_rules.go`](../version_rules.go) — and 76
 `TestConformance...` tests in
 the packages of the code they check, and a catalogue of 32 requirements
 ([`SECURITY_REQUIREMENTS.md`](SECURITY_REQUIREMENTS.md)) whose status column is the only place a
@@ -26,10 +26,10 @@ claim about coverage is written:
 
 | status | rows | what it means |
 |---|---|---|
-| proved (model) + conformant | 15 | a Gobra unit proves the decision over all modelled inputs, and a test says the modelled function still behaves that way |
+| proved (model) + conformant | 16 | a Gobra unit proves the decision over all modelled inputs, and a test says the modelled function still behaves that way |
 | proved (shipped) + conformant | 7 | the same, except the proof is of the function the server calls: SR-PERM-04 and SR-PERM-05 in `identity_checks.go`, SR-PERM-06 in `source_check.go`, SR-AUTH-08 in `server_auth/throttle_rules.go`, SR-TR-04 in `server_auth/truncate.go`, SR-PARSE-03 in `util/varint.go`, SR-TR-03 in `version_rules.go`. The model of each is a second opinion now, not the argument |
 | conformant | 3 | checked in Go alone, because the prover cannot hold the shape of the whole claim (the recursive glob: findings **F5**, **F6**) — `glob.go` does have a proved *part* of one of them, termination, in the shipped file |
-| partially proved | 3 | the decision function is proved, the surrounding machinery is a premise named in the row |
+| partially proved | 2 | the decision function is proved, the surrounding machinery is a premise named in the row |
 | out of scope for Gobra | 2 | QUIC conversation state; integration and unit tests are the control |
 | open | 1 | SR-PERM-11 / finding **F2**: a decision the maintainer owes, not a proof that is missing |
 | phase 4 | 1 | SR-PARSE-01: the frame parser, where the slicing and the `io` around it still have to be split out of a file the prover cannot read. Its arithmetic half is already proved, in shipped code, as SR-PARSE-03 |
