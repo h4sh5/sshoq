@@ -12,16 +12,17 @@ make proof                # Gobra checks every proof obligation in proof/*/model
 
 ## State of the programme
 
-Seventeen verified files — ten model units (`proof/*/model.gobra`) plus seven shipped ones carrying
+Nineteen verified files — ten model units (`proof/*/model.gobra`) plus nine shipped ones carrying
 their own specs, [`../glob.go`](../glob.go), [`../identity_checks.go`](../identity_checks.go),
 [`../source_check.go`](../source_check.go),
 [`../server_auth/throttle_rules.go`](../server_auth/throttle_rules.go),
 [`../server_auth/truncate.go`](../server_auth/truncate.go),
-[`../util/varint.go`](../util/varint.go),
-[`../util/equalfold.go`](../util/equalfold.go) and
-[`../version_rules.go`](../version_rules.go) — and 100
+[`../util/equalfold.go`](../util/equalfold.go),
+[`../util/unix_util/account_rules.go`](../util/unix_util/account_rules.go),
+[`../util/varint.go`](../util/varint.go) and
+[`../version_rules.go`](../version_rules.go) — and 117
 `TestConformance...` tests in
-the packages of the code they check, and a catalogue of 35 requirements
+the packages of the code they check, and a catalogue of 37 requirements
 ([`SECURITY_REQUIREMENTS.md`](SECURITY_REQUIREMENTS.md)) whose status column is the only place a
 claim about coverage is written:
 
@@ -30,7 +31,7 @@ claim about coverage is written:
 | `proved:model` + conformant | 16 | a Gobra unit proves the decision over all modelled inputs, and a test says the modelled function still behaves that way |
 | `proved:shipped` + conformant | 8 | the same, except the proof is of the function the server calls: SR-PERM-04 and SR-PERM-05 in `identity_checks.go`, SR-PERM-06 in `source_check.go`, SR-AUTH-08 in `server_auth/throttle_rules.go`, SR-TR-04 in `server_auth/truncate.go`, SR-PARSE-03 in `util/varint.go`, SR-PARSE-05 in `util/equalfold.go`, SR-TR-03 in `version_rules.go`. The model of each is a second opinion now, not the argument |
 | `conformant` | 6 | checked in Go alone, because the prover cannot hold the shape of the whole claim (the recursive glob: findings **F5**, **F6**) — `glob.go` does have a proved *part* of one of them, termination, in the shipped file — and one row where the claim is about strings rather than arithmetic, so enumeration is the honest control: SR-TR-05, the name a server is trusted under, with finding **F13** |
-| `partial` | 2 | the decision function is proved, the surrounding machinery is a premise named in the row |
+| `partial` | 3 | the decision function is proved, the surrounding machinery is a premise named in the row. The strongest of the three is SR-AUTH-11, the account policy gate, whose decisions are verified in the shipped `util/unix_util/account_rules.go`; what keeps it `partial` is that the fields come from `shadow(5)`, the day from a clock, and the two `nologin(8)` questions from the filesystem |
 | `out-of-scope` | 2 | QUIC conversation state; integration and unit tests are the control |
 | `open` | 1 | SR-PERM-11 / finding **F2**: a decision the maintainer owes, not a proof that is missing |
 | `phase-4` | 1 | SR-PARSE-01: the frame parser, where the slicing and the `io` around it still have to be split out of a file the prover cannot read. Its arithmetic half is already proved, in shipped code, as SR-PARSE-03 |
