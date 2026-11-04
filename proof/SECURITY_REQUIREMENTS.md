@@ -99,7 +99,10 @@ pre-authentication input.
 
 | ID | Requirement | Code | Status |
 |----|-------------|------|--------|
-| SR-PARSE-01 | Parsing a channel request never reads past the declared payload length and never panics on truncated input. | `message/channel_request.go` | phase 3 (see roadmap); the existing fuzz corpus is the interim control |
+| SR-PARSE-01 | Parsing a channel request never reads past the declared payload length and never panics on truncated input. | `message/channel_request.go` | phase 4 (see roadmap); the existing fuzz corpus is the interim control. The *arithmetic* it leans on — what a length means, how wide it is encoded, what ceiling it must clear — is proved in `util/varint.go` under **SR-PARSE-03**; what is left here is the slicing and the `io` around it |
+| SR-PARSE-03 | A length announced by a peer is bounded **before** it is used to allocate, and the length arithmetic on the wire is exact: `VarIntLen` promises the number of bytes `AppendVarInt` writes, a reader's ceiling is the tighter of `MaxFieldLength` and whatever bound it knows itself, a field above that ceiling is refused rather than allocated, and the two readers that take a length (`ParseSSHString`, `ParseSSHBytes`) apply exactly that decision. Without it, ten bytes on the wire announce 2^62−1 and the process either exhausts its address space or panics inside `make` ("makeslice: len out of range"), which takes down every connection on the server, not just the hostile one. | `util/varint.go` (verified where it ships), `util/wire.go` (the readers), `util/varint_conformance_test.go` (the seam) | `proved` on the shipped arithmetic: `announcementIsBounded` states and proves the composed claim — for every announcement and every reader bound, an accepted field is at most `MaxFieldLength` and a refused one is above the ceiling that reader applies — with `fieldCeiling`'s and `fieldLengthAcceptable`'s bidirectional clauses beneath it, plus `VarIntLen`'s four ranges boundary-inclusive and `SSHStringLen`/`SSHBytesLen`'s "prefix plus payload, strictly more than the payload". `conformant` for everything the prover cannot see: `TestConformanceVarIntLenIsWhatAppendVarIntWrites` (a disagreement is a framing desynchronisation on a *locally chosen* value, invisible on the wire), `TestConformanceFieldLengthIsCheckedBeforeAllocating` (the 2^62−1 bomb, refused through the real readers, and the accept/refuse boundary at ceiling−1, ceiling, ceiling+1 for three reader bounds), `TestConformanceSSHFieldLensAreTheBytesWritten` (exact fit accepted, one byte short refused), and the canonical-encoding and padded-width tests. The encoder's half of the promise -- `AppendVarInt` writes exactly `VarIntLen(i)` more bytes than it was given -- is `conformant`, not proved, for a reason worth knowing before the next file is moved: its out-of-range panic is `fmt.Sprintf`, and importing `fmt` is what makes `wire.go` unreadable to the prover. `VarIntLen`'s panic avoids `fmt` with a struct value instead, and its comment says the reason is the inlining budget; the same trick would let `AppendVarInt` join this file, so the framing claim becomes a theorem at the cost of changing the type of a panic value that no caller recovers. That is a product decision of a small kind, so it is left stated rather than done.
+
+**Premise, named rather than assumed:** that the length handed to the guard is the length that was parsed and that nothing allocates in between — that ordering is four lines inside `ParseSSHString`/`ParseSSHBytes`, in a file the prover cannot read (`io`, `fmt`), and the tests above are what pin it |
 | SR-PARSE-02 | `ParseBearerAuth` never panics for an `Authorization` value shorter than the prefix and only strips the prefix when it is really present (case-insensitive, ASCII). | `server_auth/handlers.go`, `util/util.go` (`EqualFold`) | `proved` (model: `proof/bearer/model.gobra`: memory safety for every header and every prefix length; the length guard is exactly the prefix length and is what refuses a short header; `ok` implies the prefix is really there and the token is byte-for-byte the remainder; a refused header yields the empty token; the fold is per-byte, reflexive, symmetric and ASCII-only, so the prefix cannot be smuggled in through Unicode case-variants) + `conformant` (`server_auth/bearer_conformance_test.go`). The one fact Gobra cannot check — that the prefix constant *is* the seven ASCII bytes — is pinned by that test, which also drives the real `ParseBearerAuth`, `HandleBearerAuth` and `util.EqualFold`. |
 
 ---
@@ -346,6 +349,40 @@ lock-out is untouched — so nothing was changed; `TestConformanceFailureDelayAt
 records that the shipped rule wraps exactly like the expression it replaced, which is all the
 assurance that region can get from a test.
 
+### F8: the ceiling that protects the process had no requirement, and no test (SR-PARSE-03)
+
+`util/wire.go` has carried, since before this catalogue existed, a guard whose own comment describes
+the failure it prevents:
+
+```go
+// MaxFieldLength is the absolute ceiling applied to any length-prefixed field ...
+// a 10-byte message announcing a 2^62-1 length makes the process allocate up to
+// 4 EiB of address space, and any length above Go's maxAlloc makes `make`
+// panic ("makeslice: len out of range"), which kills the whole process.
+```
+
+That is a remote, unauthenticated, one-packet denial of service, and the catalogue had no row for it.
+Nor did the code have a single direct test: `grep` for `VarIntLen`, `ParseSSHString` and
+`checkFieldLength` across `util/*_test.go` before this change found nothing, so the guard was
+protected by the fact that other tests happened to pass through it. The proofs and the eight tests
+now attached to it are the subject of **SR-PARSE-03**; what is recorded here is how the gap came
+about, because it is a different kind of gap from the rest of this document.
+
+Every earlier requirement in this catalogue was written by reading the code and asking what it
+promises. This one was missed because the promise lives in a *comment above a constant*, not in a
+function name or a returned error: the guard reads as configuration (`MaxFieldLength uint64 = 1 << 24`)
+rather than as a security property, and inventorying requirements by decision points walks straight
+past it. The corrective is procedural and is now part of phase 4's method: constants whose declared
+purpose is a bound, and any `make`/`append` whose size comes from the peer, are requirements whether
+or not a decision depends on them.
+
+One reassurance came out of the exercise, and it is the reason this is a catalogue finding rather than
+an incident: the guard itself was correct. `fieldCeiling` and `fieldLengthAcceptable` are the two
+halves of `checkFieldLength`, lifted unchanged, and they verify against a bidirectional spec — so the
+refusal is exact (`length > ceiling`) and the acceptance is exact too (`length <= ceiling`), which
+means the ceiling never silently refused fields it should have served. An off-by-one in either
+direction, introduced later, now fails both the prover and `TestConformanceCheckFieldLengthAgreesWithThePredicate`.
+
 ## Roadmap
 
 1. **Phase 1 (this work)** — toolchain (`scripts/setup-gobra.sh`, `make proof`,
@@ -359,9 +396,10 @@ assurance that region can get from a test.
    refusal count was off by one, fixed in the comment and now stated in a spec), and F2, F3, F4
    (behaviours the tests pinned rather than changed, each waiting on a product decision).
 
-   The list above is what Phase 1 delivered. `make proof` now runs fifteen units: the ten models
-   above plus five shipped files that carry their own specs — `glob.go`, `identity_checks.go`,
-   `source_check.go`, `server_auth/throttle_rules.go` and `server_auth/truncate.go`.
+   The list above is what Phase 1 delivered. `make proof` now runs sixteen units: the ten models
+   above plus six shipped files that carry their own specs — `glob.go`, `identity_checks.go`,
+   `source_check.go`, `server_auth/throttle_rules.go`, `server_auth/truncate.go` and
+   `util/varint.go`.
 2. **Phase 2** — what is left of the non-crypto surface, in the order that buys the most: the
    x509/base64 layer of `ParseKnownHosts` (SR-TR-02 is proved for the classifier; whether a line's
    data decodes to a certificate is a premise there and a test elsewhere). Persistence needs no
@@ -454,7 +492,7 @@ assurance that region can get from a test.
    means and how long it is — verify that, keep the I/O beside it unverified, and cover the seam with
    a conformance test. The bound that matters (`a length field may not make us read past the datagram,
    and may not be trusted to size an allocation before it is checked against what arrived`) is a
-   statement about `data`, so it survives the split intact.
+   statement about `data`, so it survives the split intact. The first slice of that plan is in: `util/varint.go` carries the length arithmetic -- the encoding width, the reader ceiling, the accept/refuse decision, the SSH field sizes -- proved as **SR-PARSE-03**, with the readers left where they are and held to it by eight tests. Doing it first also turned up **F8**: the ceiling itself, guarding against a one-packet 4 EiB allocation, had no row in this catalogue and no direct test anywhere, because a promise written as a constant with a comment does not read as a decision point.
 6. **Phase 5** — the conversation/channel state machine: transitions under concurrency
    (predicates, mutexes, goroutines — Gobra is good at this), which is where the remaining
    use-after-close and double-close class of bugs lives.
