@@ -10,3 +10,6 @@ sshoq-server
 .gomodcache/
 .gocache/
 .gopath/
+
+# Gobra verification toolchain installed by scripts/setup-gobra.sh
+.proof-tools/
