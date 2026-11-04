@@ -20,17 +20,17 @@ their own specs, [`../glob.go`](../glob.go), [`../identity_checks.go`](../identi
 [`../util/equalfold.go`](../util/equalfold.go),
 [`../util/unix_util/account_rules.go`](../util/unix_util/account_rules.go),
 [`../util/varint.go`](../util/varint.go) and
-[`../version_rules.go`](../version_rules.go) — and **158 runs** of
-`TestConformance...` tests: 145 in the default build plus a second run of `./util/unix_util/`
+[`../version_rules.go`](../version_rules.go) — and **169 runs** of
+`TestConformance...` tests: 156 in the default build plus a second run of `./util/unix_util/`
 (13 more) against the other password implementation, in the packages of the code they check, and a
-catalogue of 41 requirements
+catalogue of 42 requirements
 ([`SECURITY_REQUIREMENTS.md`](SECURITY_REQUIREMENTS.md)) whose status column is the only place a
 claim about coverage is written:
 
 | token in the row | rows | what it means |
 |---|---|---|
 | `proved:model` + conformant | 16 | a Gobra unit proves the decision over all modelled inputs, and a test says the modelled function still behaves that way |
-| `proved:shipped` + conformant | 8 | the same, except the proof is of the function the server calls: SR-PERM-04 and SR-PERM-05 in `identity_checks.go`, SR-PERM-06 in `source_check.go`, SR-AUTH-08 in `server_auth/throttle_rules.go`, SR-TR-04 in `server_auth/truncate.go`, SR-PARSE-03 in `util/varint.go`, SR-PARSE-05 in `util/equalfold.go`, SR-TR-03 in `version_rules.go`. The model of each is a second opinion now, not the argument |
+| `proved:shipped` + conformant | 9 | the same, except the proof is of the function the server calls: SR-PERM-04 and SR-PERM-05 in `identity_checks.go`, SR-PERM-06 in `source_check.go`, SR-AUTH-08 in `server_auth/throttle_rules.go`, SR-TR-04 in `server_auth/truncate.go`, SR-PARSE-03 in `util/varint.go`, SR-PARSE-05 in `util/equalfold.go`, SR-TR-03 in `version_rules.go`, and SR-TR-06 in `cmd/host_trust_rules.go` -- the client's trust verdict, which was prose inside `setupQUICConnection` until it was split out. The model of each is a second opinion now, not the argument |
 | `conformant` | 10 | checked in Go alone, because the prover cannot hold the shape of the whole claim (the recursive glob: findings **F5**, **F6**) — `glob.go` does have a proved *part* of one of them, termination, in the shipped file — and rows where the claim is about strings, tokens or the filesystem rather than arithmetic, so enumeration is the honest control: SR-TR-05, the name a server is trusted under (**F13**), and SR-AUTH-12, the public-key credential, whose verifier had no test at all before it (**F15**); and SR-AUTH-13, the password comparison, where what is pinned is a two-line guard whose deletion would let any password open a locked account (**F16**); and SR-AUTH-14, the identity files themselves, whose three unasked questions -- a 64 KiB line ceiling that deletes the rest of the file without an error, an account with no home reading keys out of the server's working directory, and nobody asking who may write the file -- are **F17**; SR-PARSE-06, the SFTP frames, where the decode side survived 100% of truncations and single-byte mutations and the encode side turns out to announce a string over 64 KiB with a wrapped length (**F18**) |
 | `partial` | 3 | the decision function is proved, the surrounding machinery is a premise named in the row. The strongest of the three is SR-AUTH-11, the account policy gate, whose decisions are verified in the shipped `util/unix_util/account_rules.go`; what keeps it `partial` is that the fields come from `shadow(5)`, the day from a clock, and the two `nologin(8)` questions from the filesystem |
 | `out-of-scope` | 2 | QUIC conversation state; integration and unit tests are the control |
@@ -90,14 +90,13 @@ assumptions the argument rests on, listed as such rather than buried in a model 
 Three things are worth saying plainly about where that leaves the programme, because each is the reason a
 row is not further along than it is.
 
-*The client's host-trust decision cannot be proved on the shipped code without changing the CLI.* The
-table itself -- pinned hash, known entry, matching hash, terminal available, user says yes -- is proved in
-`proof/knownhosts` and held to by `known_hosts_conformance_test.go`, so SR-TR-01 and SR-TR-02 are
-`proved:model`. Moving them to `proved:shipped` would mean lifting the verdict out of `cmd/sshoq.go`, where
-it is interleaved with logging, prompts and file writes, into a package the prover can read. That is a
-refactor of the one security decision with no unit-testable seam and no test of its own, done for the
-benefit of a status token; it is on the roadmap, it is not done, and the rows say which of the two they are
-today.
+*The client's host-trust decision has now been lifted, and one half of it still cannot.* What was prose
+interleaved with sockets, logging, prompts and file writes in `cmd/sshoq.go` is `cmd/host_trust_rules.go`,
+importing nothing, verified in place as SR-TR-06 -- so the branch that decides whether a session happens at
+all is no longer a model. What stays `proved:model` is SR-TR-01 and SR-TR-02: reading and writing
+`known_hosts` means `ssh3.KnownHostsEntry` and `*x509.Certificate` from quic-go and `crypto/x509`, which the
+parser in Gobra v26.09 cannot read, so those two rows keep a model plus a conformance suite against the real
+file and the real types. That is a difference the status tokens draw on purpose.
 
 *The remaining `proved:model` rows are blocked by the prover's stdlib, not by ingenuity.* `io` and `bufio`
 have no stubs, so a reader in `message/` cannot be verified in place; `append` is not in a pure function's
@@ -115,7 +114,7 @@ green `go test ./...` is easy to read as more than it is.
 
 ## Verification in place: the specs live in the shipped file
 
-Six files in the proof are not models. [`../glob.go`](../glob.go) is the `from=` matcher the server
+Ten files in the proof are not models. [`../glob.go`](../glob.go) is the `from=` matcher the server
 calls, moved out of `identity_options.go` and annotated where it ships.
 [`../identity_checks.go`](../identity_checks.go) is the channel-request and channel-open gate -- the
 code that enforces `no-pty`, `restrict`, `no-port-forwarding` and a forced command -- separated from
@@ -143,7 +142,14 @@ checked strictly and nothing later can override them, so the legacy allowance ca
 another protocol revision; a spec version that is neither `alpha-00` nor the empty legacy one is refused,
 with no prefix matching and no "newer is fine"; and inside the legacy family the answer is exactly "patch
 at least 3", with a literal pinning `0.1.2` refused as well, because that boundary is history and a
-reader cannot recover it from first principles (**F9**). `make proof` verifies all seven: the code that runs
+reader cannot recover it from first principles (**F9**).
+[`../cmd/host_trust_rules.go`](../cmd/host_trust_rules.go) is the client's side: the verdict on a server
+certificate, which was prose inside `setupQUICConnection` and is now the function that function calls, with
+reasons on its refusals so that the reporting cannot drift from the decision. It is the one place in the
+client where a wrong answer is a session with a stranger, and its ten inputs are enumerated rather than
+sampled -- which is how `asked` came to be tested before `userSaysYes`: the first draft of the extracted
+function trusted an answer nobody had asked for, and the table's formulas, written before the code was
+adjusted, said so. The prose it replaced could only have had that right by accident. `make proof` verifies all ten: the code that runs
 in production is the code the proof talks about, with no transcription step in between. That is
 roadmap Phase 3, and what decides whether a file can join it is **what the prover can read**, not
 difficulty:
@@ -197,6 +203,21 @@ how `proof/sourcecheck` discharges the same decision over its own model. The sou
 that every star earlier than the saved one has already failed at every longer stretch of the text,
 and stating *that* needs a predicate over a range of a string, which is the slicing the prover has no
 theory for.
+
+**The client's trust verdict is shipped code now** (SR-TR-06). It used to be prose inside
+`setupQUICConnection` -- a function that also does sockets, TLS configuration, prompts on `/dev/tty` and
+retries, and imports `crypto/tls`, `net` and quic-go, none of which Gobra v26.09 can read -- so the
+decision had a model (`accepts` in `proof/knownhosts/model.gobra`) and no proof. `cmd/host_trust_rules.go`
+is that decision extracted, importing nothing, verified in place; `setupQUICConnection` now gathers the ten
+facts, calls it, and switches on a verdict that carries its reason, because main has to *say* which refusal
+happened and a bare yes/no would send it back to re-deriving one. The extraction paid at once: with the two
+answer arguments tested in the other order -- `userSaysYes` before `asked` -- **an answer nobody asked for
+records a certificate**, so a caller arriving with a defaulted "yes" is trusted for it. The table's
+independent formulas require `asked && yes`, reported the disagreement, and the commit fixes it;
+`TestConformanceAnAnswerNobodyAskedForMeansNothing` is the property. What stays a premise is written in
+`cmd/sshoq_pinning_e2e_test.go`: a test run has no `/dev/tty` to answer with, so the end-to-end tests cover
+the pin, the file that gets written, and the refusal when nobody can be asked, while the table covers the
+prompting itself.
 
 ## How the argument is built
 
@@ -283,15 +304,16 @@ One Gobra package per unit, one unit per requirement cluster:
 | `throttle/` | SR-AUTH-08, SR-RES-04 | the delay and lock-out arithmetic of `loginThrottle` |
 | `replay/` | SR-AUTH-07, SR-RES-03 | `AcceptedTokenStore.Accept`, `evictExpired`, `NewAcceptedTokenStore` |
 | `bearer/` | SR-PARSE-02 | `ParseBearerAuth`, `util.EqualFold`, `util.lower` — pre-authentication header parsing |
-| `knownhosts/` | SR-TR-01, SR-TR-02 | `Knows`, `KnowsHash`, `ParseKnownHosts`, `AppendKnownHost`, and the client's trust decision in `cmd/sshoq.go` |
+| `knownhosts/` | SR-TR-01, SR-TR-02 | `Knows`, `KnowsHash`, `ParseKnownHosts`, `AppendKnownHost`; the client's trust decision itself is proved in `cmd/host_trust_rules.go` (SR-TR-06) |
 | `oidcbinding/` | SR-AUTH-06 | `OpenIDConnectIdentity.Verify`'s binding decision: the claim precedence, the comparison against the server's own conversation id, the replay key |
 | `sourcecheck/` | SR-PERM-06, SR-PERM-07 | `matchesSourcePattern` and `CheckSource` — the `from=` restriction's guards, three matching strategies and negated list |
 
 `scripts/run-proofs.sh` discovers `proof/*/model.gobra` and runs Gobra once per unit, so a
-timeout or a failure in one unit cannot hide the verdict of another. The eight shipped units
-(`glob.go`, `identity_checks.go`, `source_check.go`, `server_auth/throttle_rules.go`,
-`server_auth/truncate.go`, `util/varint.go`, `util/equalfold.go`, `version_rules.go`) are listed
-separately, in `INPLACE_UNITS`.
+timeout or a failure in one unit cannot hide the verdict of another. The ten shipped units
+(`cmd/host_trust_rules.go`, `glob.go`, `identity_checks.go`, `source_check.go`,
+`server_auth/throttle_rules.go`, `server_auth/truncate.go`, `util/equalfold.go`,
+`util/unix_util/account_rules.go`, `util/varint.go`, `version_rules.go`) are listed separately, in
+`INPLACE_UNITS`.
 
 ## Writing one, notes from the ones here
 

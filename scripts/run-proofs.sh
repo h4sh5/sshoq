@@ -51,6 +51,7 @@ source "$TOOLS_DIR/env.sh"
 # the fmt stub makes that the only way into this list for a file that refuses things -- and the same
 # move is what every remaining Phase 3 candidate needs.
 INPLACE_UNITS=(
+	"$REPO_ROOT/cmd/host_trust_rules.go"
 	"$REPO_ROOT/glob.go"
 	"$REPO_ROOT/identity_checks.go"
 	"$REPO_ROOT/source_check.go"

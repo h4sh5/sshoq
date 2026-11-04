@@ -198,103 +198,124 @@ func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog 
 		tlsConf,
 		&qconf)
 	if err != nil {
-		// A pinned host hash settles the matter here, before the behaviour which
-		// asks the user, since it asks nobody anything and works in a session with no
-		// terminal at all. It is settled here rather than in the crypto error branch
-		// below because the refusal of a handshake by the callback above comes back as
-		// that callback's own error, not necessarily as a transport error.
-		if pinnedHostHash {
+		// The connection failed, and the question is whether it failed because of the certificate. The
+		// facts below are gathered without asking anybody anything, and the decision itself -- all of it,
+		// including which refusal to report -- is `trustAfterFailedHandshake` in host_trust_rules.go, so
+		// that the client's machine-in-the-middle logic is code the proof and the table in that file are
+		// about rather than prose inside this function.
+		transportErr, isTransportError := err.(*quic.TransportError)
+		cryptoFailure := isTransportError && transportErr.ErrorCode.IsCryptoError()
+		_, knownEntry := knownHosts[options.CanonicalHostFormat()]
+		if cryptoFailure {
+			log.Debug().Msgf("received QUIC crypto error on first connection attempt: %s", err)
+		}
+		// A pinned host hash and an unknown certificate both need the certificate the peer presented, and
+		// getting hold of it must not cost more than the connection which is being set up anyway; the
+		// handshake above may already have recorded it.
+		if pinnedHostHash || cryptoFailure {
 			if peerCertificate == nil {
 				// the certificate was refused before it could be looked at (unknown
 				// authority, self-signed, expired..): go and get it
 				peerCertificate = fetchPeerCertificate()
 			}
-			if peerCertificate != nil {
-				if got := ssh3.HostHash(peerCertificate); got != hostHash {
-					log.Error().Msgf("Host hash mismatch for %s: the server certificate is SHA256 %s, but the -host-hash argument or the HostHash directive in ~/.ssh/config requires SHA256 %s.",
-						options.CanonicalHostFormat(), got, hostHash)
-					log.Error().Msgf("This could be a machine-in-the-middle attack. If the server certificate really did change, update that argument to SHA256 %s.", got)
-					log.Error().Msgf("Aborting.")
-					return nil, -1
-				}
-				// the pinned certificate is the one the server uses: it goes in
-				// known_hosts when it is not there yet, so that the host keeps being
-				// trusted the same way, and the hash is on file to be copied elsewhere.
-				if !knownHosts.KnowsHash(options.CanonicalHostFormat(), hostHash) {
-					if err := ssh3.AppendKnownHost(knownHostsPath, options.CanonicalHostFormat(), peerCertificate); err != nil {
-						log.Error().Msgf("the host hash matches but the certificate could not be added to %s: %s", knownHostsPath, err)
-						return nil, -1
-					}
-					log.Info().Msgf("server certificate for %s has the pinned host hash SHA256 %s: added to %s", options.CanonicalHostFormat(), hostHash, knownHostsPath)
-					return nil, 0
-				}
-			}
 		}
-		if transportErr, ok := err.(*quic.TransportError); ok {
-			if transportErr.ErrorCode.IsCryptoError() {
-				log.Debug().Msgf("received QUIC crypto error on first connection attempt: %s", err)
-				if tty == nil {
-					log.Error().Msgf("insecure server cert in non-terminal session, aborting")
-					return nil, -1
-				}
-				if _, ok := knownHosts[options.CanonicalHostFormat()]; ok {
-					log.Error().Msgf("The server certificate cannot be verified using the one installed in %s. "+
-						"If you did not change the server certificate, it could be a machine-in-the-middle attack. "+
-						"TLS error: %s", knownHostsPath, err)
-					log.Error().Msgf("Aborting.")
-					return nil, -1
-				}
-				// bad certificates, let's mimic the OpenSSH's behaviour similar to host keys:
-				// get hold of the certificate the peer presents, without ever starting
-				// the totally insecure connection the probe above is only good for
-				if peerCertificate == nil {
-					peerCertificate = fetchPeerCertificate()
-				}
-				if peerCertificate == nil {
-					log.Error().Msgf("could not create client QUIC connection: %s", err)
-					return nil, -1
-				}
-				// let's first check that the certificate is self-signed
-				if err := peerCertificate.CheckSignatureFrom(peerCertificate); err != nil {
-					log.Error().Msgf("the peer provided an unknown, insecure certificate, that is not self-signed: %s", err)
-					return nil, -1
-				}
-				// first, carriage return
-				_, _ = tty.WriteString("\r")
-				_, err = tty.WriteString("Received an unknown self-signed certificate from the server.\n\r" +
-					"We recommend not using self-signed certificates.\n\r" +
-					"This session is vulnerable a machine-in-the-middle attack.\n\r" +
-					"Certificate fingerprint: " +
-					"SHA256 " + util.Sha256Fingerprint(peerCertificate.Raw) + "\n\r" +
-					"(that fingerprint is the host hash: give it to -host-hash, or to the HostHash directive of ~/.ssh/config, to connect without being asked)\n\r" +
-					"Do you want to add this certificate to ~/.ssh3/known_hosts (yes/no)? ")
-				if err != nil {
-					log.Error().Msgf("cound not write on /dev/tty: %s", err)
-					return nil, -1
-				}
+		certSeen := peerCertificate != nil
+		var pinMatches, selfSigned bool
+		if certSeen {
+			pinMatches = ssh3.HostHash(peerCertificate) == hostHash
+			// an unknown certificate is only ever accepted on somebody's word if it signs itself
+			selfSigned = peerCertificate.CheckSignatureFrom(peerCertificate) == nil
+		}
+		recorded := knownHosts.KnowsHash(options.CanonicalHostFormat(), hostHash)
+		verdict := trustAfterFailedHandshake(hostHash, certSeen, pinMatches, recorded, cryptoFailure,
+			knownEntry, selfSigned, tty != nil, false, false)
 
-				answer := ""
-				reader := bufio.NewReader(tty)
-				for {
-					answer, _ = reader.ReadString('\n')
-					answer = strings.TrimSpace(answer)
-					_, _ = tty.WriteString("\r") // always ensure a carriage return
-					if answer == "yes" || answer == "no" {
-						break
-					}
-					tty.WriteString("Invalid answer, answer \"yes\" or \"no\" ")
-				}
-				if answer == "no" {
-					log.Info().Msg("Connection aborted")
-					return nil, 0
-				}
-				if err := ssh3.AppendKnownHost(knownHostsPath, options.CanonicalHostFormat(), peerCertificate); err != nil {
-					log.Error().Msgf("could not append known host to %s: %s", knownHostsPath, err)
-					return nil, -1
-				}
-				tty.WriteString(fmt.Sprintf("Successfully added the certificate to %s, reconnecting..\n\r", knownHostsPath))
-				return nil, 0
+		// The only question the client asks, asked here because it is the only thing in this decision a
+		// person can answer: an unknown self-signed certificate, for a host nobody has trusted yet, in
+		// front of a terminal. The answer goes back into the same decision, which is what keeps "no" from
+		// writing anything and "yes" from meaning anything else.
+		if verdict == hostTrustAsk {
+			// first, carriage return
+			_, _ = tty.WriteString("\r")
+			_, err = tty.WriteString("Received an unknown self-signed certificate from the server.\n\r" +
+				"We recommend not using self-signed certificates.\n\r" +
+				"This session is vulnerable a machine-in-the-middle attack.\n\r" +
+				"Certificate fingerprint: " +
+				"SHA256 " + util.Sha256Fingerprint(peerCertificate.Raw) + "\n\r" +
+				"(that fingerprint is the host hash: give it to -host-hash, or to the HostHash directive of ~/.ssh/config, to connect without being asked)\n\r" +
+				"Do you want to add this certificate to ~/.ssh3/known_hosts (yes/no)? ")
+			if err != nil {
+				log.Error().Msgf("cound not write on /dev/tty: %s", err)
+				return nil, -1
 			}
+
+			answer := ""
+			reader := bufio.NewReader(tty)
+			for {
+				answer, _ = reader.ReadString('\n')
+				answer = strings.TrimSpace(answer)
+				_, _ = tty.WriteString("\r") // always ensure a carriage return
+				if answer == "yes" || answer == "no" {
+					break
+				}
+				tty.WriteString("Invalid answer, answer \"yes\" or \"no\" ")
+			}
+			verdict = trustAfterFailedHandshake(hostHash, certSeen, pinMatches, recorded, cryptoFailure,
+				knownEntry, selfSigned, tty != nil, true, answer == "yes")
+		}
+
+		switch verdict {
+		case hostTrustRecord:
+			// the certificate is trusted: either the pinned hash matches it and asks nobody, or the
+			// person at the terminal said yes. Either way it goes in known_hosts, so the next
+			// connection is decided the same way without being asked again.
+			if err := ssh3.AppendKnownHost(knownHostsPath, options.CanonicalHostFormat(), peerCertificate); err != nil {
+				if pinnedHostHash {
+					log.Error().Msgf("the host hash matches but the certificate could not be added to %s: %s", knownHostsPath, err)
+				} else {
+					log.Error().Msgf("could not append known host to %s: %s", knownHostsPath, err)
+				}
+				return nil, -1
+			}
+			if pinnedHostHash {
+				log.Info().Msgf("server certificate for %s has the pinned host hash SHA256 %s: added to %s", options.CanonicalHostFormat(), hostHash, knownHostsPath)
+			} else {
+				tty.WriteString(fmt.Sprintf("Successfully added the certificate to %s, reconnecting..\n\r", knownHostsPath))
+			}
+			return nil, 0
+		case hostTrustDeclined:
+			log.Info().Msg("Connection aborted")
+			return nil, 0
+		case hostTrustRefusePinMismatch:
+			log.Error().Msgf("Host hash mismatch for %s: the server certificate is SHA256 %s, but the -host-hash argument or the HostHash directive in ~/.ssh/config requires SHA256 %s.",
+				options.CanonicalHostFormat(), ssh3.HostHash(peerCertificate), hostHash)
+			log.Error().Msgf("This could be a machine-in-the-middle attack. If the server certificate really did change, update that argument to SHA256 %s.", ssh3.HostHash(peerCertificate))
+			log.Error().Msgf("Aborting.")
+			return nil, -1
+		case hostTrustRefuseAlreadyRecorded:
+			// A pinned hash that matches a certificate known_hosts already holds cannot explain a failure:
+			// the file and the pin agree, so something else refused the handshake -- an expired
+			// certificate, say. The old code reported this as a machine-in-the-middle, which it is not: the
+			// pin matched.
+			log.Error().Msgf("The server certificate for %s has the pinned host hash SHA256 %s and %s already holds it, but the connection was still refused. TLS error: %s",
+				options.CanonicalHostFormat(), hostHash, knownHostsPath, err)
+			log.Error().Msgf("Aborting.")
+			return nil, -1
+		case hostTrustRefuseKnownHost:
+			log.Error().Msgf("The server certificate cannot be verified using the one installed in %s. "+
+				"If you did not change the server certificate, it could be a machine-in-the-middle attack. "+
+				"TLS error: %s", knownHostsPath, err)
+			log.Error().Msgf("Aborting.")
+			return nil, -1
+		case hostTrustRefuseNoTerminal:
+			log.Error().Msgf("insecure server cert in non-terminal session, aborting")
+			return nil, -1
+		case hostTrustRefuseNotSelfSigned:
+			log.Error().Msgf("the peer provided an unknown, insecure certificate, that is not self-signed: %s", err)
+			return nil, -1
+		case hostTrustRefuseNoCertificate:
+			log.Error().Msgf("could not create client QUIC connection: %s", err)
+			return nil, -1
 		}
 		log.Error().Msgf("could not establish client QUIC connection: %s", err)
 		return nil, -1
