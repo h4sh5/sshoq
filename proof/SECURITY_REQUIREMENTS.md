@@ -277,9 +277,11 @@ requirement is on.
    (behaviours the tests pinned rather than changed, each waiting on a product decision).
 2. **Phase 2** — what is left of the non-crypto surface, in the order that buys the most: the
    x509/base64 layer of `ParseKnownHosts` (SR-TR-02 is proved for the classifier; whether a line's
-   data decodes to a certificate is a premise there and a test elsewhere), and a unit for
-   `SerializeKnownHosts`/`Save` (SR-PERM-04, where today's guarantee is that no existing line is
-   rewritten and an unknown marker line therefore outlives a save). The token *validation* path
+   data decodes to a certificate is a premise there and a test elsewhere). Persistence needs no
+   unit: the store has no serialiser, only `AppendKnownHost`, and
+   `TestConformanceAppendLeavesTheFileItFoundAlone` holds it to that at the byte level — every line
+   it found, including comments, `@cert-authority` markers and lines the parser refuses, survives an
+   append unchanged, and the file gains exactly one line. The token *validation* path
    around the replay store (SR-AUTH-01..04: signature, `iss`, `aud`, `exp`) is the largest remaining
    hole in the authentication story and needs a model of the JWKS fetch, which is why it is not in
    this phase. The case-folding step the identity-options model is handed (SR-PERM-08) landed with

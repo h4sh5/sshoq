@@ -17,6 +17,7 @@ package ssh3
 // `go test . -run TestConformance`.
 
 import (
+	"crypto/x509"
 	"encoding/base64"
 	"os"
 	"path/filepath"
@@ -208,5 +209,95 @@ func TestConformanceAppendKeepsWhatWasKnown(t *testing.T) {
 	}
 	if got := len(strings.Split(strings.TrimRight(string(data), "\n"), "\n")); got != 2 {
 		t.Errorf("known_hosts has %d lines, want 2", got)
+	}
+}
+
+// Conforms to nothing in the model and to one promise in the code: AppendKnownHost appends. The
+// store is the file, an administrator edits it by hand, and the client is allowed to add to it and
+// nothing else -- so a save must leave every line it found exactly as it found it, including the
+// comments, the marker lines it does not implement and the lines it cannot parse. This checks that
+// at the byte level rather than by re-reading the file, because "the store still trusts the same
+// things" would also be true of a rewrite that quietly dropped a "@cert-authority" line the user
+// meant to keep.
+func TestConformanceAppendLeavesTheFileItFoundAlone(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "known_hosts")
+	first, second, newcomer := makeTestCertificate(t), makeTestCertificate(t), makeTestCertificate(t)
+
+	if err := AppendKnownHost(path, "a.example", first); err != nil {
+		t.Fatal(err)
+	}
+	if err := AppendKnownHost(path, "b.example", second); err != nil {
+		t.Fatal(err)
+	}
+	// what the client wrote, wrapped in what a person keeps in the same file
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(written), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("the client wrote %d lines, want 2", len(lines))
+	}
+	fields := strings.Fields(lines[0])
+	if len(fields) != 3 || fields[1] != "x509-certificate" {
+		t.Fatalf("an appended line is %q, want \"host x509-certificate base64\"", lines[0])
+	}
+	seed := "# pinned by hand\n\n" + lines[0] + "\n" +
+		"@cert-authority *.example " + fields[2] + "\n" +
+		lines[1] + "\n" +
+		"this line is not a host key at all\n"
+	if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	before, invalidBefore, err := ParseKnownHosts(path)
+	if err != nil {
+		t.Fatalf("a file an administrator keeps must parse: %s", err)
+	}
+	if !before.KnowsHash("a.example", HostHash(first)) || !before.KnowsHash("b.example", HostHash(second)) {
+		t.Fatal("the seed file does not hold what was put in it")
+	}
+
+	if err := AppendKnownHost(path, "c.example", newcomer); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(after), seed) {
+		t.Errorf("AppendKnownHost rewrote the file instead of appending to it:\n found %q\n want prefix %q",
+			string(after), seed)
+	}
+	if strings.Count(string(after), "\n") != strings.Count(seed, "\n")+1 {
+		t.Errorf("the file gained %d lines, want exactly 1",
+			strings.Count(string(after), "\n")-strings.Count(seed, "\n"))
+	}
+
+	reparsed, invalidAfter, err := ParseKnownHosts(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// the same complaints as before, in the same order: nothing the parser disliked was
+	// repaired, moved or removed on the client's behalf
+	if len(invalidAfter) != len(invalidBefore) {
+		t.Errorf("the invalid lines changed from %v to %v across an append", invalidBefore, invalidAfter)
+	}
+	for host, cert := range map[string]*x509.Certificate{
+		"a.example": first, "b.example": second, "c.example": newcomer,
+	} {
+		if !reparsed.KnowsHash(host, HostHash(cert)) {
+			t.Errorf("%s is not known after appending c.example: an append must not lose a host", host)
+		}
+	}
+	// and the file's own words about the marker line are untouched, since a rewrite that
+	// understood it differently would change what a future version trusts
+	if !strings.Contains(string(after), "@cert-authority *.example "+fields[2]) {
+		t.Error("the @cert-authority line did not survive the append verbatim")
+	}
+	if !strings.Contains(string(after), "this line is not a host key at all") {
+		t.Error("an unparseable line did not survive the append verbatim")
 	}
 }
