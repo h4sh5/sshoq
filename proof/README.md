@@ -253,6 +253,12 @@ specific version of a specific verifier. Things that cost time to learn:
   function that calls it and asserts the comparison.
 * **`before` is a reserved word** (it belongs to the permission-ordering logic): `before := f(x)` is
   "no viable alternative at input 'before :='", an error that points at the call and not the name.
+* **`append` cannot be written in a verified function at all.** Gobra models it as taking an explicit
+  permission argument and says so against ordinary Go: "append expects first argument of type perm
+  followed by a slice of type []Type and a variadic type Type... but got []byte, uint8". Neither `acc(b)`
+  nor `acc(b, 1/2)` on the parameter changes the diagnosis. A verified function may read, slice and
+  compare bytes but may not grow one, which puts encoders -- and any parser that accumulates into a
+  buffer -- outside the verified set whatever else they import.
 * **`time` *is* stubbed, with real specs** -- `Duration` arithmetic, and pure `Before`/`After` that
   claims can be stated against -- so a verified file may import it and speak durations the way the
   code around it does, which is what `server_auth/throttle_rules.go` does. The complete list of what
