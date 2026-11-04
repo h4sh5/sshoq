@@ -55,6 +55,7 @@ session (shell, SFTP, forwarding) without having proved who they are.
 | SR-AUTH-11 | A login is refused for an account the system considers closed, *before* the password is compared, so knowing the password buys nothing: a password field that is empty or begins with `!` or `*`; `sp_flag` carrying a lock bit, but only when that field is actually set (glibc reports all bits set for an empty one, so taken at face value it would lock out every account on the system); an account past `sp_expire`; a password past `sp_lstchg`+`sp_max`, which this server cannot ask the user to change; a login shell that is missing, relative, or one of the programs that opens no session; or any non-root account while a `nologin(5)` file exists. `-1` means there is no rule; `0` is a date. | `util/unix_util/account_rules.go` (`passwordFieldIsLocked`, `accountIsExpired`, `accountExpiryIsMonotone`, `passwordIsExpired`, `loginShellNeedsRefusing`, `pathBaseName`, `pathIsAbsolute`, `shellsLineCarriesNoPath`, `firstSpaceSeparatedField`), `util/unix_util/account_policy.go` (`CheckAccountUsable`, `lockedPasswordReason`, `checkLoginShell`, `shellIsListedIn`), `util/unix_util/account_rules_conformance_test.go` | **[partial]** The decisions are verified in the file the server calls, which is listed with the other in-place units in `scripts/run-proofs.sh`: each is bidirectional, the unset-`sp_flag` rule and the `-1`-means-never rules are explicit, and expiry is `>=` on the day itself. Three mutants die twice over -- the expiry boundary (1 prover error, 6 test failures), the unset-flag guard (1, 13), the relative-shell clause (1, 4). What keeps the row `partial` is named: the fields are what `shadow(5)` and `Getspnam` say they are, `today` is `time.Now()`, and the two filesystem questions -- the contents of `/etc/shells` and the presence of the nologin file -- are asked of the machine. `pathBaseName` is proved only to its length clauses: the prover will not carry "no slash at these positions" across the point where the return value becomes a suffix, because `name[i]` and `trimmed[i0+1+i]` are the same byte and different terms, so the no-separator clause is stated in `TestConformancePathBaseNameIsFilepathBase` instead, over 26 paths and against `filepath.Base` itself (likewise `pathIsAbsolute` against `filepath.IsAbs`); `loginShellNeedsRefusing` is therefore proved *given* the program name and the test supplies it. Also tested, because they are where a shells file is misread rather than mis-decided: the line grammar of `shells(5)` (`TestConformanceShellsFileParsing` -- a commented-out entry admits nothing, an entry with an argument admits its path), the ten closed-account shapes through the gate itself (`TestConformanceGateStillRefusesEndToEnd`), and the one edge the prover cannot see at all -- `sp_lstchg + sp_max` overflows in Go and is unbounded in Gobra, and the wrapped answer refuses rather than admits (`TestConformancePasswordExpiryOverflowRefuses`). **Not covered: the gate is on the password path only -- finding F14.** |
 | SR-AUTH-12 | The public-key credential is checked by the key, not by the claim: a Bearer JWT authenticates a user **only** if the key named in that user's `authorized_identity` line verifies its signature with an algorithm that key type allows (`RS256`, `EdDSA`, `ES256`), `iss` is the user, `sub` is `ssh3`, `aud` is `unused`, `client_id` is `ssh3-<user>`, `jti` is **this** conversation's base64 id, `exp` is present and not past (plus a 60 s leeway), and -- after all of that -- the connection comes from an address the identity line permits (`from=`). **No bypass**: each clause refuses on its own, the checks are made on the parsed-and-verified token rather than on a decoded one, and the signature is verified before any claim is read. | `auth/plugins/pubkey_authentication/server/server_plugin_conformance_test.go` — seven units over real tokens: the client's own `BuildJWTBearerToken` verified through `PubkeyAuthPlugin` (the seam, so a claim renamed on one side fails rather than drifts), then one arm per claim in both directions with an accepted control inside the refusal table; a token signed by another key, a MAC token "signed" with the public key (algorithm confusion), an unsigned `alg: none` token, and a well-formed token with its signature stripped, all refused; `from=` enforced on the connection rather than on the token, with the same key unrestricted when the line says nothing; the identity-line shapes that must yield *no identity and no error* so a different plugin may answer (SR-AUTH-10, F12); and the malformed `Authorization` forms. | **[conformant]** the decision table over claims and connection is exercised exhaustively in both directions, the signature itself is a premise (crypto has no specs). `TestConformanceMissingExpiryIsRefusedByHand` measures the one line that is not the library's work: it refuses a token with no `exp` **and** shows `jwt.Parse` with the same options accepts that same token, so the hand-written presence check is pinned as load-bearing rather than left to be deleted as redundant (F15). |
 | SR-AUTH-13 | A password authenticates **only** when `crypt(candidate, stored)` reproduces the stored string byte for byte, in a comparison that does not stop at the first difference; a stored value libc cannot use is a **hard refusal**, never a mismatch to ignore -- which matters because `crypt(3)` answers an unusable setting (`*`, `*LK$`, `!!`, `$99$x`, bcrypt's `$2b$`) with a string of its own rather than with an error, so a bare `==` against a locked account would compare equal for *every* guess; and the `C.CString` truncation at a NUL byte, on either side of the call, must never widen what is accepted. The salt is read out of the stored string: nothing about the candidate chooses it. | `util/unix_util/password_compare_conformance_test.go` — three hash families (md5-, sha256-, sha512-crypt) taken verbatim from `openssl passwd`, each accepting its password and refusing the near-miss at the end, at the start, empty, a prefix, an extension, a leading and a trailing space, and the hash of a *different* password presented as the candidate; the same password under a second salt, so the salt is seen to come from the stored string; the unusable spellings refused for four candidates each, with the error text asserted so the test says *which* guard fired; `$6$` -- an algorithm marker with an empty salt -- measured as usable and refused by the comparison instead, so the two refusal routes are distinguished rather than conflated; NUL bytes in candidate and in stored hash; and a run-time three-way agreement (OpenSSL makes a hash for a fresh random password, libc through this package decides, the stored hash itself does not authenticate as a password). `util/unix_util/password_auth_fallback_conformance_test.go` is the other half of the build-tag pair: on a build with no way to read a hash -- any Unix that is not Linux, or `-tags disable_password_auth` -- a password attempt refuses *with an error*, the scheme reports itself unavailable (the flag `cmd/sshoq-server.go` consults before registering the handler at all), and the uid/gid/home lookup key logins depend on still works. | **[conformant]** the comparison is exercised over real hashes and real `crypt(3)`; constant time is a premise (`subtle.ConstantTimeCompare`, one call, no early exit) and the arithmetic of `crypt` belongs to libc. What the tests establish is the guard, the truncation, and the two refusal routes -- see **F16** for the shape of the hole the guard closes, measured. The fallback build now runs in `make proof-conformance` on its own command line, which is the first time that file has been compiled and asserted by anything. |
+| SR-AUTH-14 | The credentials a user may present come from two files under that user's home (`.ssh3/authorized_identities`, then `~/.ssh/authorized_keys`), and reading them must neither invent a credential nor destroy one: a missing file is the normal case; a file that cannot be read contributes nothing **and does not take away the identities the server holds in memory** (`-pubkey`, `-rpub`); one unparseable line does not spoil the lines around it; the comment and blank-line grammar is what the code documents; and both files are read, so a key kept for `sshd` also logs in over ssh3. | `server_auth/authorized_identities_conformance_test.go` — the two names, in order, under the home the account names; no files at all → no error and exactly the server-held identity; the identities file replaced by a *directory* (root ignores permission bits, so this is how a read error is produced faithfully) → nothing from it, and the server-held identity still there; a twelve-arm grammar table over blank, whitespace-only, column-zero comments, mid-file comments, an indented comment, garbage among keys, an empty file, comments only, no trailing newline, and CRLF; both files present → both sets of credentials; and two absences pinned as behaviour rather than as luck -- the reader's line ceiling (below) and the fact that nothing asks who may write the file. | **[conformant]** the decisions are over file shapes rather than arithmetic, and the plugin that turns a line into a credential is a stub here on purpose (importing the real one from this package is a cycle): what a key credential must satisfy is SR-AUTH-12. Two absences found while writing it are findings, not gaps in this row -- **F17**. |
 
 ## 2. Session permissions — `PERM`
 
@@ -750,6 +751,75 @@ while the file is open: pass the stored hash to `crypt_r` through `crypt_gensalt
 and add the two cross-builds to CI (`GOOS=darwin go build ./...`,
 `go build -tags disable_password_auth ./...`) -- both compile today, which is exactly the kind of
 fact that stops being true silently.
+
+### F17: three things the identity files are trusted for that nothing asked
+
+`GetAuthorizedIdentities` opens `~/.ssh3/authorized_identities` and `~/.ssh/authorized_keys` for the
+account being authenticated. The lines inside them are the user's say-so about who may log in, and
+the reading of them is short, quiet code. Writing the row above turned up three properties that were
+never asked about, all three measured in `authorized_identities_conformance_test.go` (`SR-AUTH-14`).
+
+**1. A line longer than 64 KiB silently deletes the rest of the file.**
+
+`ParseAuthorizedIdentitiesFile` reads with a `bufio.Scanner` and never looks at `scanner.Err()`:
+
+```go
+for scanner.Scan() {
+    ...
+}
+return identities, nil
+```
+
+A `Scanner` stops at its maximum token size, 64 KiB by default, and reports the reason through that
+unchecked `Err()`. So a line longer than that -- a key with a long comment field, a file something
+large was appended to, one long line of paste from a mail client -- ends the read, and every identity
+after it is gone. Measured: with a 70 KiB line between two valid keys, the server finds exactly one
+credential and reports **no error at all**. The failure is fail-closed for the logins it removes, so
+this is not a hole in authentication; it is a hole in diagnosis, which is worse in the long run,
+because the user whose key was skipped is told "invalid credentials" while the file plainly contains
+it. It is also unbounded in the other direction: a user can grow the amount the server reads per
+attempt.
+
+*Fix direction:* read with `bufio.Reader.ReadString('\n')` (or raise the buffer and *check*
+`scanner.Err()`), and log the file, the line number and the length when a line is refused for length.
+One function, and the error path stops being silent.
+
+**2. An account with no home directory gets identity files relative to the server's working
+directory.**
+
+`DefaultIdentitiesFileNames` is `path.Join(user.Dir, ".ssh3", "authorized_identities")` and
+`path.Join(user.Dir, ".ssh", "authorized_keys")`. For `Dir == ""` -- the normal state of a service
+account, and what an LDAP or NSS backend can hand back -- those are `.ssh3/authorized_identities` and
+`.ssh/authorized_keys`: relative paths, resolved by `os.Open` against the process working directory.
+So for such an account the question "whose key is this?" is answered by whoever can write
+`$PWD/.ssh/authorized_keys` in the directory the server happened to be started from, which is a
+property of the launch script and not of the account. Nothing tested this before, because nothing
+asks.
+
+*Fix direction:* treat an empty `user.Dir` as "no identity files" (and say so in the log), rather than
+as "the current directory"; if a relative home is ever legitimate, resolve it against a configured
+root. Worth deciding together with **F2**, which is the same class of question -- what the server
+assumes about the accounts it is handed.
+
+**3. Nothing checks who may write the file.**
+
+OpenSSH has `StrictModes` for this, and it is on by default: an `authorized_keys` that is group- or
+world-writable, or not owned by the account, is refused, because the key in the file is only as
+trustworthy as the write permission on the file. sshoq opens the file and parses it, and asks nothing
+about it: `0666`, a directory writable by the group, a file owned by another account -- all read as
+identity files like any other. The test asserts today's behaviour as behaviour, so that the day a
+check appears, the test fails and points at the decision instead of the check going in unnoticed.
+
+This is a policy call and not a bug to patch, which is why it is a finding rather than a change: a
+server whose user homes are managed by a configuration tool that leaves them group-writable will stop
+authenticating anyone if the check is turned on silently. What is missing is the *switch* and the
+*log*, not the check; and the premise that makes it matter -- that the server runs as root and reads
+other users' files -- is exactly the deployment the documentation recommends.
+
+**Relations:** F12 decides what happens when a *plugin* cannot make sense of a line; F17 decides what
+happens when the *file* cannot. Both are currently silent, in opposite directions: F12 is loud where
+it should be quiet (a plugin error kills the conversation), F17 is quiet where it should be loud (a
+read error kills the identities).
 
 ## Roadmap
 
