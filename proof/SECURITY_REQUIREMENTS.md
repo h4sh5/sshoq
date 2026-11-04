@@ -82,6 +82,7 @@ the classic way a restriction fails open.
 | SR-TR-02 | `ParseKnownHosts` classifies malformed lines as invalid instead of trusting them, and a line whose base64 or certificate does not parse never enters the map. | `known_hosts.go` | **[proved:model]** `proved` (model: `proof/knownhosts/model.gobra`, classifier: three fields, the `x509-certificate` tag, and decodable data; the third field is only named when the count is three, so a truncated line is reported rather than read out of bounds) + `conformant` (`known_hosts_conformance_test.go`, which parses a real file with good lines interleaved with two-field, four-field, wrong-tag, non-base64 and non-certificate lines and asserts the invalid line numbers exactly). The `x509`/base64 layer itself stays outside Gobra, so `decodes` is a premise in the model: every claim holds whatever that layer decides, and the test says what it decides. |
 | SR-TR-03 | A peer whose protocol version is not supported is refused before authentication. | `server_auth/auth.go` | **[proved:shipped]** **proved on the shipped code** + `conformant` — `versionSupported` in `version_rules.go` is `IsVersionSupported`'s decision, moved unchanged; `IsVersionSupported` is now the field handoff, because `version.go` imports `fmt` and a logger. The clauses: a protocol major/minor other than this server's is never accepted whatever else the announcement claims, so no software version or legacy allowance can smuggle a peer onto another protocol revision; a spec version other than `alpha-00` or the empty legacy one is never accepted, with no prefix matching and no "newer is fine"; inside the legacy family the answer is exactly "patch at least 3". `version_rules_conformance_test.go` holds the handoff against a copy of the pre-split gate over 108 000 announcements, the verdict table, the window's four boundaries, the claim that the software version is irrelevant away from the family, and 5 000 random announcements. It is the first test this gate ever had (**F9**); the *parsing* of the announcement stays outside the verified set — the `strconv` and `strings` stubs say nothing about what `Atoi` and `Split` return, so the numbers a parse produced are not facts a proof can use, and `TestConformanceVersionStringsRoundTripIntoTheGate` is the floor instead |
 | SR-TR-04 | The untrusted `User-Agent` is never reflected in a response body and is logged truncated, so a pre-authentication reject cannot panic the server. | `server_auth/truncate.go` (`truncate`, verified where it ships), `server_auth/auth.go` | **[proved:shipped]** `proved` on the shipped function, in two ways at once. The checker's own obligations are the F10 panic class: the scan that backs off a multi-byte character may index `s[cut]` only because the loop invariant puts `cut` inside the string, so a bounds failure is a proof failure now. Three clauses state what an attacker-chosen header obeys — a non-positive bound gives the empty string, a header that fits comes back **identically** (the sentence the old `s[:100]` could not make), and a truncated line is between 3 and `max+3` bytes, which is the bound on how long one header can make a log line. What is not provable here is *which* prefix survives: Gobra knows the length of a string concatenation but has no rule for its characters — `(a + b)[i] == a[i]` for `i < len(a)` is not in its theory, so `prefixEq(res, s, len(res)-3)` is refused — and that half is `conformant`: `TestConformanceTruncateMatchesTheModel` pins it against `proof/truncation` over inputs whose boundary falls inside two- and three-byte characters, `TestTruncateUserAgent` keeps the UTF-8 claim, and the model remains the argument for the character-boundary property. |
+| SR-TR-05 | The name a server is trusted under is one string, computed the same way when it is written and when it is consulted: `hostname + ":" + port + path`, the hostname verbatim, the port in decimal, the path with the leading `/` `NewConfig` insists on. It is written to the store as a single whitespace-separated field and read back as one, and a name with whitespace in it is dropped as an invalid line rather than trusted under half of it; and no two meanings share a name, because the slash that separates the port from the path is guaranteed rather than hoped for (**F13** reports what the verbatim hostname costs). | `client/config/config.go` (`NewConfig`, `CanonicalHostFormat`, `URLHostnamePort`), `known_hosts.go` (`AppendKnownHost`, `ParseKnownHosts`, `Knows`, `KnowsHash`), `cmd/sshoq.go` (every lookup and every pin), `host_identity_conformance_test.go` | **[conformant]** Six tests, none of which existed: `TestConformanceCanonicalHostFormatIsExactlyTheNameSplitsIntoThePartsThatBuiltIt` pins the shape at the port boundaries a human mistypes (0, 1, 22, 80, 443, 65535) and shows that an omitted path and `/` are one identity while a different port or path is another; `TestConformanceKeyWrittenIsKeyLookedUp` appends through the real `AppendKnownHost` and finds every one under both answers with the string the config recomputes, so a pin cannot be recorded under one name and consulted under another -- the way host-key checking classically fails open, since an unknown name is what first-contact trust answers; `TestConformanceKeySurvivesTheFileOrIsDropped` writes names with spaces and tabs and requires each to be reported invalid and known under no prefix of itself (a lost pin, not a wrong pin); `TestConformanceHostAndPortCannotRunIntoThePath` crosses six host spellings with six ports and six paths and requires as many names as distinct meanings -- 216 of each, the 36 apparent duplicates being `""` and `"/"` after normalisation -- which is the boundary claim, since `"h", 44, "30/"` and `"h", 443, "0/"` would be the same name without the slash; `TestConformanceSpellingChangesThePin` measures **F13**; and `TestConformanceCanonicalHostFormatDoesNotDependOnUnusedConfigFields` says the identity is not a function of the username, options or `SetEnv` values, so one user cannot inherit another's pin. Not proved: `CanonicalHostFormat` is `fmt.Sprintf`, and the `%d` of a port is a stub with no postcondition in this Gobra, so even the concatenation facts a reader wants ("ends with the path") are string-equality claims of the kind `server_auth/truncate.go` records as out of reach -- hence enumeration over a mixed alphabet of spellings rather than a proof |
 
 ## 4. Resource exhaustion — `RES`
 
@@ -534,6 +535,50 @@ order is random and the answer must not be. The row is `conformant` and not more
 behind `auth.RequestIdentityVerifier`, so any claim about a plugin's own verdict is a premise about code this
 repository does not contain, and the mutex-guarded map is a premise about the runtime. The panic policy is
 recorded as behaviour, not proved correct; the property tested is which plugin survives a collision.
+
+### F13: the pinned name is the typed name (SR-TR-05)
+
+`CanonicalHostFormat` is the identity a server is trusted under, and it is built from the hostname exactly
+as the user typed it. Nothing normalises it, and three consequences follow, none of them written down
+anywhere in this repository before `host_identity_conformance_test.go` measured them:
+
+  * **case is part of the pin.** DNS names are case-insensitive (RFC 4343), so `https://Example.org/` and
+    `https://example.org/` are the same server and different known_hosts entries. The first is pinned; the
+    second is a first contact, which the client answers by trusting and recording. Whoever can hand a user
+    a differently-cased link therefore gets a second, independent trust-on-first-use on the same host — and
+    a certificate pinned under one spelling says nothing about the other. `TestConformanceSpellingChangesThePin`
+    asserts this rather than complaining about it, so that the day the key is normalised, that test is where
+    the change has to be written;
+  * **an IPv6 server is stored under a name that is not the name in the URL.** `URLHostnamePort` brackets
+    `::1` as `[::1]:443` because a URL demands it; the identity is `::1:443/`. A person who reads the URL
+    and writes the file by hand in the bracketed form has written a name the client will never ask about,
+    and the entry is silently inert;
+  * **a trailing dot is a different host.** `example.org.` — the fully-qualified spelling that appears in
+    zone files and in other tools' output — pins separately.
+
+None of these is a hole in the *check*: when a name is in the store, the certificate is verified against
+what is stored, and the same string is used for the write and the read (`TestConformanceKeyWrittenIsKeyLookedUp`),
+so the failure is a pin that does not apply, never a pin that points at the wrong server. And every failure
+mode here is the loss of a *protection*, not the introduction of a bypass: a name nobody pinned is treated
+as unknown, which is what first-contact trust is for.
+
+What the finding asks for is a decision, not a proof, and it is the same shape as **F2** and **F3**:
+
+  1. **Leave it**, and let these tests be the documentation — cheap, and defensible while the known_hosts
+     format has no other implementation to interoperate with;
+  2. **Lowercase the hostname** (IDNA aside) when building the identity — kills the case variant, which is
+     the realistic one, at the cost of invalidating every existing entry whose hostname had capitals in it,
+     which is most likely a handful of hand-written lines;
+  3. **Normalise the host fully** — lowercase, brackets for IPv6 in the identity too, no trailing dot —
+     which makes the file match what a person reads off the URL, and needs a migration or a
+     "check-both-old-and-new-key" transition in `cmd/sshoq.go`, because a client that normalises without
+     reading the old names reports every pinned host as new and trusts the next certificate it sees.
+
+Recommendation: 3 with a transition that consults both spellings, because option 2 leaves the bracket
+asymmetry — the one that makes a hand-written entry inert rather than merely separate — and inert entries
+are how a pin stops protecting without anybody noticing. What is not acceptable is option 1 plus the
+assumption that pinning is spelling-insensitive, which is what nearly everybody, including the comment
+above `CanonicalHostFormat`, has been assuming.
 
 ## Roadmap
 
