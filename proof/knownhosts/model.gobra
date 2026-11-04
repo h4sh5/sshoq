@@ -263,3 +263,123 @@ ensures accepts(pinned, hashMatches, knownEntry, hasTerminal, userSaysYes) ==
 func pinIsSetness(pin string, hashMatches bool, knownEntry bool, hasTerminal bool, userSaysYes bool) (pinned bool) {
 	pinned = pin != ""
 }
+
+// ---------------------------------------------------------------------------
+// The three facts the shipped decision gained when it was extracted
+// ---------------------------------------------------------------------------
+
+// The rows above model the decision as it was written inside `setupQUICConnection`: five facts, one
+// boolean. `cmd/host_trust_rules.go` -- the same decision, verified in place as SR-TR-06 -- has ten,
+// because lifting it out of the function that also does sockets and prompts made three things explicit
+// that the prose form only assumed. They are modelled here so that this file stays the second opinion
+// rather than becoming the older of the two documents.
+//
+//   * `certSeen`. The model judged every handshake as if it had a certificate in hand. A *resumed* TLS
+//     session presents none, and the client accepts that (see `handshakePinAccepts` for the reason).
+//   * `alreadyRecorded`. The model decided trust; the shipped code also decides whether there is
+//     anything left to write, because appending a pin that is already on file would grow the file for no
+//     change in trust.
+//   * `asked`. The model's `userSaysYes` silently meant "a person was asked and said yes". Split into
+//     two facts, because the interesting property is the conjunction: an answer that nobody asked for is
+//     not an approval (see `answerCountsOnlyIfAsked`, which is the property the extracted function got
+//     wrong on its first draft).
+
+// handshakeAccepts is the check crypto/tls performs on every handshake before a byte of the session
+// travels: a pinned hash and a certificate to compare, and they disagree -- then the handshake does not
+// happen. `certSeen` says whether there was a certificate to compare.
+decreases 0
+pure func handshakeAccepts(pinned bool, certSeen bool, pinMatches bool) bool {
+	return !pinned || !certSeen || pinMatches
+}
+
+// recordedTrust is the case that writes to known_hosts: the pin matched a certificate the file does not
+// hold yet, or a person was asked about an unknown self-signed certificate for a host with no entry and
+// said yes. `refusedByCrypto` is the guard that keeps a connection which failed for an unrelated reason
+// from becoming a trust decision at all.
+decreases 0
+pure func recordedTrust(pinned bool, certSeen bool, pinMatches bool, alreadyRecorded bool,
+	refusedByCrypto bool, knownEntry bool, hasTerminal bool, selfSigned bool,
+	asked bool, userSaysYes bool) bool {
+	return pinned && certSeen && pinMatches && !alreadyRecorded ||
+		!pinned && refusedByCrypto && hasTerminal && !knownEntry && certSeen && selfSigned &&
+			asked && userSaysYes
+}
+
+// askedPerson is the only case in which the client puts a question to a human: everything upstream of it
+// has refused or decided, and everything downstream is the answer.
+decreases 0
+pure func askedPerson(pinned bool, certSeen bool, refusedByCrypto bool, knownEntry bool,
+	hasTerminal bool, selfSigned bool, asked bool) bool {
+	return !pinned && refusedByCrypto && hasTerminal && !knownEntry && certSeen && selfSigned && !asked
+}
+
+// resumedHandshakePresentsNothingToJudge: a handshake with no certificate is accepted, and that is the
+// resumption case. Stated as a lemma because it is the one acceptance in this file that is not a match:
+// the keys of a resumed session were established by a full handshake that *was* judged, so there is
+// nothing here to compare.
+ensures !certSeen ==> handshakeAccepts(pinned, certSeen, pinMatches)
+func resumedHandshakePresentsNothingToJudge(pinned bool, certSeen bool, pinMatches bool) {
+	assert !certSeen ==> handshakeAccepts(pinned, certSeen, pinMatches)
+}
+
+// presentedCertificateIsJudgedOnThePinAlone: with a certificate in hand, acceptance is "no pin, or a
+// match". Written down so that tightening the resumption case -- the edit this comment argues against --
+// shows up here as a failing lemma rather than as a client that refuses its own reconnect.
+ensures certSeen ==> (handshakeAccepts(pinned, certSeen, pinMatches) == (!pinned || pinMatches))
+func presentedCertificateIsJudgedOnThePinAlone(pinned bool, certSeen bool, pinMatches bool) {
+	assert certSeen ==> (handshakeAccepts(pinned, certSeen, pinMatches) == (!pinned || pinMatches))
+}
+
+// answerCountsOnlyIfAsked: where the answer is the only authority -- no pin, so nothing upstream has
+// decided -- an unasked "yes" records nothing. The `!pinned` is not decoration: a matching pin records a
+// certificate without asking anybody, and that trust comes from the pin rather than from an answer, which
+// is why `aPinIsNeverOverruledByTheUser` above holds in both directions. Stating the lemma without the
+// exception is the mistake worth writing down, because it is the same confusion in the other direction.
+ensures !pinned && !asked ==> !recordedTrust(pinned, certSeen, pinMatches, alreadyRecorded, refusedByCrypto,
+	knownEntry, hasTerminal, selfSigned, asked, true)
+func answerCountsOnlyIfAsked(pinned bool, certSeen bool, pinMatches bool, alreadyRecorded bool,
+	refusedByCrypto bool, knownEntry bool, hasTerminal bool, selfSigned bool, asked bool) {
+	assert !pinned && !asked ==> !recordedTrust(pinned, certSeen, pinMatches, alreadyRecorded, refusedByCrypto,
+		knownEntry, hasTerminal, selfSigned, asked, true)
+}
+
+// matchedPinOnFileRecordsNothing: a pin that matches a certificate the file already holds changes no
+// trust and appends no line. The pre-extraction code reported this situation as a
+// machine-in-the-middle, although the pin had matched; the lemma is the reason the new verdict has its
+// own name instead.
+ensures pinned && certSeen && pinMatches && alreadyRecorded ==>
+	!recordedTrust(pinned, certSeen, pinMatches, alreadyRecorded, refusedByCrypto, knownEntry,
+		hasTerminal, selfSigned, asked, userSaysYes)
+func matchedPinOnFileRecordsNothing(pinned bool, certSeen bool, pinMatches bool, alreadyRecorded bool,
+	refusedByCrypto bool, knownEntry bool, hasTerminal bool, selfSigned bool, asked bool, userSaysYes bool) {
+	assert pinned && certSeen && pinMatches && alreadyRecorded ==>
+		!recordedTrust(pinned, certSeen, pinMatches, alreadyRecorded, refusedByCrypto, knownEntry,
+			hasTerminal, selfSigned, asked, userSaysYes)
+}
+
+// questionAndAnswerDoNotOverlap: a certificate is not both the one a person is asked about and the one
+// already recorded on their answer. With `asked` folded into `userSaysYes`, as the old model did, this is
+// the pair of cases the model could not tell apart.
+ensures !(recordedTrust(pinned, certSeen, pinMatches, alreadyRecorded, refusedByCrypto, knownEntry,
+	hasTerminal, selfSigned, asked, userSaysYes) &&
+	askedPerson(pinned, certSeen, refusedByCrypto, knownEntry, hasTerminal, selfSigned, asked))
+func questionAndAnswerDoNotOverlap(pinned bool, certSeen bool, pinMatches bool, alreadyRecorded bool,
+	refusedByCrypto bool, knownEntry bool, hasTerminal bool, selfSigned bool, asked bool, userSaysYes bool) {
+	assert !(recordedTrust(pinned, certSeen, pinMatches, alreadyRecorded, refusedByCrypto, knownEntry,
+		hasTerminal, selfSigned, asked, userSaysYes) &&
+		askedPerson(pinned, certSeen, refusedByCrypto, knownEntry, hasTerminal, selfSigned, asked))
+}
+
+// agreesWithTheOldModelOnTheFactsTheOldModelHad: with the three new facts fixed at what the five-fact
+// model implicitly assumed -- a certificate was presented, the TLS layer is what refused, the certificate
+// signs itself, the question has been put, and the file does not hold the pinned hash -- the ten-fact
+// decision records a certificate on exactly the rows the five-fact `accepts` calls acceptable. This is the
+// equivalence `cmd/host_trust_conformance_test.go` checks from the Go side over all 32 combinations; here
+// it is proved rather than enumerated, which is the point of keeping the two.
+ensures recordedTrust(pinned, true, hashMatches, false, true, knownEntry, hasTerminal, true, true,
+	userSaysYes) == accepts(pinned, hashMatches, knownEntry, hasTerminal, userSaysYes)
+func agreesWithTheOldModelOnTheFactsTheOldModelHad(pinned bool, hashMatches bool, knownEntry bool,
+	hasTerminal bool, userSaysYes bool) {
+	assert recordedTrust(pinned, true, hashMatches, false, true, knownEntry, hasTerminal, true, true,
+		userSaysYes) == accepts(pinned, hashMatches, knownEntry, hasTerminal, userSaysYes)
+}
