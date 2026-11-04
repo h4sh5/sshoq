@@ -43,6 +43,13 @@ keeps the rest honest:
   star-heavy patterns are held to a time bound; and `matchesSourcePattern`, `parsePeerIP` and
   `CheckSource` are run over real addresses, real CIDRs, the two textual forms of one IPv6 address,
   host names, negations, and every permutation of every pattern list.
+* `server_auth/oidc_binding_source_conformance_test.go` is the step between `proof/oidcbinding` and
+  `Verify`, which cannot be called without a live issuer: it locates that one method by AST and holds
+  it to the claim order and compared values the proof assumes (refusing to be satisfied with a marker
+  comment, and failing with "change the model with it"), and it executes the one function between a
+  conversation id and the string the binding compares — `base64` of the 32 id bytes, i.e.
+  `ConversationID.String()` — showing it distinguishes ids, so that "a token is accepted for at most
+  one conversation" is a statement about conversations (SR-AUTH-06).
 * `known_hosts_conformance_test.go` parses real files with real self-signed certificates through
   the real `ParseKnownHosts`, `Knows`, `KnowsHash` and `AppendKnownHost`: the grammar with good
   lines interleaved with two-field, four-field, wrong-tag, non-base64 and non-certificate lines
@@ -82,6 +89,7 @@ One Gobra package per unit, one unit per requirement cluster:
 | `replay/` | SR-AUTH-07, SR-RES-03 | `AcceptedTokenStore.Accept`, `evictExpired`, `NewAcceptedTokenStore` |
 | `bearer/` | SR-PARSE-02 | `ParseBearerAuth`, `util.EqualFold`, `util.lower` — pre-authentication header parsing |
 | `knownhosts/` | SR-TR-01, SR-TR-02 | `Knows`, `KnowsHash`, `ParseKnownHosts`, `AppendKnownHost`, and the client's trust decision in `cmd/sshoq.go` |
+| `oidcbinding/` | SR-AUTH-06 | `OpenIDConnectIdentity.Verify`'s binding decision: the claim precedence, the comparison against the server's own conversation id, the replay key |
 | `sourcecheck/` | SR-PERM-06, SR-PERM-07 | `matchesSourcePattern` and `CheckSource` — the `from=` restriction's guards, three matching strategies and negated list |
 
 `scripts/run-proofs.sh` discovers `proof/*/model.gobra` and runs Gobra once per unit, so a
