@@ -68,7 +68,7 @@ the classic way a restriction fails open.
 | SR-PERM-05 | `CheckChannelOpen` denies port/UDP/reverse-tcp channel opens and `sftp` when a forced command is set, and denies forwarding when `NoPortForwarding`; the check keys on the channel family, not on the parameter tail after `,`. | `identity_options.go` (`CheckChannelOpen`) | `proved` (`checkChannelOpen`) + `conformant` (64 field combinations x 13 channel types, including the `family,parameter` form). Note what the proof makes visible: `restrict` does **not** close `sftp`, only `command=` does — as in OpenSSH, and asserted as such so that a change of policy fails the proof. |
 | SR-PERM-06 | `from=` **fails closed**: a missing or unparsable peer address is refused when a `from=` restriction exists; a negated pattern that matches is refused; nothing matching is refused. | `identity_options.go` (`CheckSource`) | `proved` (model: `proof/sourcecheck/model.gobra`, `fromListDecides` — no restriction restricts nothing, a restriction with an undeterminable address refuses, an exclusion refuses whatever else the list says, and an accepted peer is one some pattern described and no negation excluded; plus `patternMatches` for the two guards and the choice between the three matching strategies) + `conformant` (`identity_options_source_conformance_test.go`: the table of real `from=` lists and real addresses, both orders of every list, and a check that the shipped verdict really is the function of the two disjunctions the model decides on). The `net.IP` and CIDR layer stays a premise in the model, as it must be; what that layer returns is asserted row by row there. |
 | SR-PERM-07 | `matchGlob` terminates, and a pattern containing no wildcard matches **exactly one** text (equality). `?` consumes exactly one character. | `identity_options.go` (`matchGlob`) | `conformant`, not `proved` — and the reason is a property of the prover, recorded as F5 alongside SR-RES-05: a recursive *pure* function in Gobra v26.09 has its measure checked but is then opaque, so `gm("a", "a", 0, 0)` cannot be derived from the definition. What pins the meaning instead is `identity_options_source_conformance_test.go`: agreement between the shipped matcher, the recursion it replaced, and an independently written linear matcher over 188 155 pattern/text triples, plus an exhaustive check that a wildcard-free pattern matches exactly the text equal to it, and `?` exactly one character. Termination is now structural — two pointers that only move forward — rather than a measure to be checked. |
-| SR-PERM-08 | Option names are matched case-insensitively in a way that can only *add* restrictions: the case-folded name space contains only restricting names. | `identity_options.go` | **open** — the model is handed the already case-folded name, so `strings.ToLower` sits outside it. Checkable in Go (fold every name of the supported space, assert the verdict equals the lower-case one); the next conformance test to write. |
+| SR-PERM-08 | Option names are matched case-insensitively in a way that can only *add* restrictions: the case-folded name space contains only restricting names. | `identity_options.go` | `conformant` — `identity_options_fold_conformance_test.go` closes the step the model is handed (`strings.ToLower(name)`) over the spellings that can arrive. Every ASCII case variant of every enforced name is accepted with exactly the lower-case name's restriction state — 205 232 variants, `NO-X11-FORWARDING` included, since OpenSSH itself spells that one with a capital. Nothing else folds in: the Kelvin sign, long s, dotted and dotless I, Angstrom sign, full-width and mathematical forms — 22 spellings — are all *refused*, so a restriction written in a spelling the server does not know loses the login loudly instead of quietly doing nothing (`strings.ToLower` is a Unicode function: it maps U+212A to 'k', and this refusal is what stands behind that). Accepted options always restrict, enforced names never fold together, and on ASCII input `strings.ToLower` is exactly ASCII folding, which is the definition the model's name space needs. |
 | SR-PERM-09 | A forced command actually replaces the executed command, and the identity options attached to a conversation are the ones of the identity that authenticated it (set once, before any channel is handled). | `channel.go`, `conversation.go` | **out of scope for Gobra** (conversation state is entangled with QUIC streams); covered by integration tests + `cmd` tests |
 | SR-PERM-11 | Repeating a scalar option (`identity_type`, `client_id`, `command`) with different values is either merged or refused, and never silently half-applied. | `identity_options.go` (`ParseIdentityOptions`) | **open** — modelled and documented as-is by the identityopts unit (`parseIsFailClosed`: every listed option is processed, scalars by last assignment), so today the contract is "last wins"; see finding **F2** for why that is a deviation from the documentation rather than a memory-safety bug. |
 | SR-PERM-10 | SFTP and tunneling are only offered on a session whose identity options allow them (subsystem/forwarding requests funnel through `CheckChannelOpen`/`CheckRequest`). | `channel.go`, `sftp/server.go` | partially proved: the decision function is `SR-PERM-04/05`; the dispatch path is out of scope |
@@ -269,17 +269,21 @@ requirement is on.
 ## Roadmap
 
 1. **Phase 1 (this work)** — toolchain (`scripts/setup-gobra.sh`, `make proof`,
-   `make proof-conformance`, the `proof.yml` workflow), this catalogue, and the six
+   `make proof-conformance`, the `proof.yml` workflow), this catalogue, and nine proof files:
    eight verification units (`authflow`, `truncation`, `throttle`, `identityopts`, `replay`,
-   `bearer`, `knownhosts`, `sourcecheck`) plus the canary. Any bug a proof or a conformance test surfaces gets
-   fixed and recorded here with the requirement ID it violates (F1, and F2/F3 for the
-   two decisions the tests pinned rather than changed).
-2. **Phase 2** — the units still marked **open**, in the order that buys the most: the
-   case-folding conformance check (SR-PERM-08, which can only *add* restrictions), then the
+   `bearer`, `knownhosts`, `sourcecheck`) plus the canary. Any bug a proof or a conformance test
+   surfaces gets fixed and recorded here with the requirement ID it violates: F1 (the throttle's
+   memory bound, fixed), F5 (a `from=` pattern could cost exponential time, fixed), and F2, F3, F4
+   (behaviours the tests pinned rather than changed, each waiting on a product decision).
+2. **Phase 2** — what is left of the non-crypto surface, in the order that buys the most: the
    x509/base64 layer of `ParseKnownHosts` (SR-TR-02 is proved for the classifier; whether a line's
-   data decodes to a certificate is a premise there and a test elsewhere). The token *validation* path around the replay store (SR-AUTH-01..04:
-   signature, `iss`, `aud`, `exp`) is the largest remaining hole in the authentication story and
-   needs a model of the JWKS fetch, which is why it is not in this phase.
+   data decodes to a certificate is a premise there and a test elsewhere), and a unit for
+   `SerializeKnownHosts`/`Save` (SR-PERM-04, where today's guarantee is that no existing line is
+   rewritten and an unknown marker line therefore outlives a save). The token *validation* path
+   around the replay store (SR-AUTH-01..04: signature, `iss`, `aud`, `exp`) is the largest remaining
+   hole in the authentication story and needs a model of the JWKS fetch, which is why it is not in
+   this phase. The case-folding step the identity-options model is handed (SR-PERM-08) landed with
+   the `from=` work.
 3. **Fix the two known deviations** before adding more proofs: SR-PERM-11 (two
    `identity_option` values that disagree silently keep the last one — pick reject-or-merge,
    and have the identityopts unit prove whichever contract is chosen) and SR-PERM-09
