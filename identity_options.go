@@ -190,40 +190,51 @@ func matchesSourcePattern(pattern string, ip net.IP) bool {
 	return false
 }
 
-// matchGlob is OpenSSH's match_pattern(): "*" stands for any sequence, "?" for a single
-// character. It is applied to the textual address only (never to the port and never to a
-// hostname), which is what "from=" globs mean here.
+// matchGlob is OpenSSH's match_pattern(): "*" stands for any sequence, "?" for a single character.
+// Every other character -- including "[" and "]", which OpenSSH would read as a character class --
+// is itself. It is applied to the textual address only (never to the port and never to a hostname),
+// which is what "from=" globs mean here.
+//
+// It runs in time linear in len(pattern)+len(text) and needs no stack beyond its own frame: both
+// pointers only move forward, and the position of the most recent star is remembered so that the
+// one place a match can fail is retried by letting that star swallow exactly one more character.
+// That is the whole trick, and it is why this is not the recursive matcher it used to be: trying
+// every split of the text among the stars costs time exponential in the number of stars, and the
+// pattern here is `from=`, an option that arrives with the identity while the text is the peer
+// address. Measured on the old recursion, ten stars against an eighty character text took 4.9s and
+// fourteen took 2m56s (finding F5 in proof/SECURITY_REQUIREMENTS.md).
+//
+// identity_options_source_conformance_test.go is what makes the change of algorithm not a change of
+// meaning: it keeps the old recursion next to this one and compares all three implementations -- the
+// old recursion, a second linear matcher written differently, and this -- over every pattern of up
+// to four characters from {a, b, *, ?, [, .} and every text of up to four from {a, b, .}.
 func matchGlob(pattern, text string) bool {
-	var rec func(p, t string) bool
-	rec = func(p, t string) bool {
-		for len(p) > 0 {
-			switch p[0] {
-			case '*':
-				// a star stands for anything: try the rest of the pattern after every
-				// possible prefix of t, as OpenSSH does
-				for i := 0; ; i++ {
-					if rec(p[1:], t[i:]) {
-						return true
-					}
-					if i >= len(t) {
-						return false
-					}
-				}
-			case '?':
-				if len(t) == 0 {
-					return false
-				}
-				p, t = p[1:], t[1:]
-			default:
-				if len(t) == 0 || t[0] != p[0] {
-					return false
-				}
-				p, t = p[1:], t[1:]
-			}
+	p, t := 0, 0
+	star, retryFrom := -1, 0
+	for t < len(text) {
+		switch {
+		case p < len(pattern) && (pattern[p] == '?' || pattern[p] == text[t]):
+			p++
+			t++
+		case p < len(pattern) && pattern[p] == '*':
+			// a star stands for anything: remember where it is, and if the rest of the pattern
+			// fails, let this star swallow one more character and try the tail again
+			star = p
+			retryFrom = t
+			p++
+		case star >= 0:
+			p = star + 1
+			retryFrom++
+			t = retryFrom
+		default:
+			return false
 		}
-		return len(t) == 0
 	}
-	return rec(pattern, text)
+	// only stars may be left over, since each of them can stand for nothing
+	for p < len(pattern) && pattern[p] == '*' {
+		p++
+	}
+	return p == len(pattern)
 }
 
 // CheckSource enforces the "from=" option: it returns an error when the peer
