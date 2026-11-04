@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -134,7 +135,7 @@ func startPinningServer(t *testing.T, serverBinary string, home string, authoriz
 		}
 		seen := output.String()
 		if match, port := announced.FindStringSubmatch(seen), listening.FindStringSubmatch(seen); match != nil && port != nil {
-			return match[1], fmt.Sprintf("root@127.0.0.1:%s/test", port[1])
+			return match[1], fmt.Sprintf("%s@127.0.0.1:%s/test", testUsername(t), port[1])
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -222,6 +223,20 @@ func writeTestIdentity(t *testing.T, path string) string {
 		t.Fatalf("could not get the public key: %s", err)
 	}
 	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(public)))
+}
+
+// testUsername is the account the client of a test asks the server for: the one
+// running the test, which is the only account a server may be expected to serve
+// whatever it runs as. Asking for root - as the pinning test used to - works in a
+// container where the tests happen to run as root and nowhere else: a CI job runs
+// unprivileged, and the home of root is not somewhere its server may even look.
+func testUsername(t *testing.T) string {
+	t.Helper()
+	current, err := user.Current()
+	if err != nil || current.Username == "" {
+		t.Skipf("could not get the user running the test: %v", err)
+	}
+	return current.Username
 }
 
 // serverTestHome creates the home a test server runs with, so that the files it
