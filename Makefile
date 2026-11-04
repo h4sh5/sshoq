@@ -92,6 +92,7 @@ proof:
 # function it models.
 proof-conformance:
 	$(TEST_OPTS) go test . ./server_auth/ ./auth/oidc/ ./util/ ./util/unix_util/ ./sftp/ ./internal/ ./auth/plugins/pubkey_authentication/server/ -run 'TestConformance' -count=1 -v
+	$(TEST_OPTS) go test -tags disable_password_auth ./util/unix_util/ -run 'TestConformance' -count=1 -v
 
 proof-all: proof-setup proof-conformance proof
 

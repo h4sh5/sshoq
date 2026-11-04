@@ -20,9 +20,10 @@ their own specs, [`../glob.go`](../glob.go), [`../identity_checks.go`](../identi
 [`../util/equalfold.go`](../util/equalfold.go),
 [`../util/unix_util/account_rules.go`](../util/unix_util/account_rules.go),
 [`../util/varint.go`](../util/varint.go) and
-[`../version_rules.go`](../version_rules.go) — and 124
-`TestConformance...` tests in
-the packages of the code they check, and a catalogue of 38 requirements
+[`../version_rules.go`](../version_rules.go) — and 134
+`TestConformance...` tests (128 in the default build and 14 more where the password
+implementation is picked by build tag, so 142 runs of the target) in
+the packages of the code they check, and a catalogue of 39 requirements
 ([`SECURITY_REQUIREMENTS.md`](SECURITY_REQUIREMENTS.md)) whose status column is the only place a
 claim about coverage is written:
 
@@ -30,7 +31,7 @@ claim about coverage is written:
 |---|---|---|
 | `proved:model` + conformant | 16 | a Gobra unit proves the decision over all modelled inputs, and a test says the modelled function still behaves that way |
 | `proved:shipped` + conformant | 8 | the same, except the proof is of the function the server calls: SR-PERM-04 and SR-PERM-05 in `identity_checks.go`, SR-PERM-06 in `source_check.go`, SR-AUTH-08 in `server_auth/throttle_rules.go`, SR-TR-04 in `server_auth/truncate.go`, SR-PARSE-03 in `util/varint.go`, SR-PARSE-05 in `util/equalfold.go`, SR-TR-03 in `version_rules.go`. The model of each is a second opinion now, not the argument |
-| `conformant` | 7 | checked in Go alone, because the prover cannot hold the shape of the whole claim (the recursive glob: findings **F5**, **F6**) — `glob.go` does have a proved *part* of one of them, termination, in the shipped file — and rows where the claim is about strings, tokens or the filesystem rather than arithmetic, so enumeration is the honest control: SR-TR-05, the name a server is trusted under (**F13**), and SR-AUTH-12, the public-key credential, whose verifier had no test at all before it (**F15**) |
+| `conformant` | 8 | checked in Go alone, because the prover cannot hold the shape of the whole claim (the recursive glob: findings **F5**, **F6**) — `glob.go` does have a proved *part* of one of them, termination, in the shipped file — and rows where the claim is about strings, tokens or the filesystem rather than arithmetic, so enumeration is the honest control: SR-TR-05, the name a server is trusted under (**F13**), and SR-AUTH-12, the public-key credential, whose verifier had no test at all before it (**F15**); and SR-AUTH-13, the password comparison, where what is pinned is a two-line guard whose deletion would let any password open a locked account (**F16**) |
 | `partial` | 3 | the decision function is proved, the surrounding machinery is a premise named in the row. The strongest of the three is SR-AUTH-11, the account policy gate, whose decisions are verified in the shipped `util/unix_util/account_rules.go`; what keeps it `partial` is that the fields come from `shadow(5)`, the day from a clock, and the two `nologin(8)` questions from the filesystem |
 | `out-of-scope` | 2 | QUIC conversation state; integration and unit tests are the control |
 | `open` | 1 | SR-PERM-11 / finding **F2**: a decision the maintainer owes, not a proof that is missing |
@@ -253,6 +254,12 @@ Every one of them is named `TestConformance...`, which is how `make proof-confor
 exactly the correspondence checks and nothing else. The two tests that bound the throttle's
 memory and its lock-out live in `server_auth/login_policy_test.go` without that prefix, since
 they check no model output; Gobra cannot express them because it has no `delete`.
+
+The target runs two command lines, because `util/unix_util` chooses its password implementation by
+build tag: the default build exercises `linux_user.go` (real `crypt(3)`, real shadow fields), and
+`-tags disable_password_auth` exercises the fallback that any non-Linux Unix gets. The second line
+is recent -- before it, the fallback file had never been compiled or asserted by anything in this
+repository, which is what a build tag does to a test file that does not carry the matching one.
 
 Change the code without changing the table and `make proof-conformance` fails; change the
 model without changing the code and the same test fails from the other side. What remains
