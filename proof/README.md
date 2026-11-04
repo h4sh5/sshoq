@@ -12,9 +12,10 @@ make proof                # Gobra checks every proof obligation in proof/*/model
 
 ## State of the programme
 
-Thirteen verified files — ten model units (`proof/*/model.gobra`) plus three shipped ones carrying
-their own specs, [`../glob.go`](../glob.go), [`../identity_checks.go`](../identity_checks.go) and
-[`../source_check.go`](../source_check.go) — and 51
+Fourteen verified files — ten model units (`proof/*/model.gobra`) plus four shipped ones carrying
+their own specs, [`../glob.go`](../glob.go), [`../identity_checks.go`](../identity_checks.go),
+[`../source_check.go`](../source_check.go) and
+[`../server_auth/throttle_rules.go`](../server_auth/throttle_rules.go) — and 58
 `TestConformance...` tests in
 the packages of the code they check, and a catalogue of 31 requirements
 ([`SECURITY_REQUIREMENTS.md`](SECURITY_REQUIREMENTS.md)) whose status column is the only place a
@@ -23,9 +24,9 @@ claim about coverage is written:
 | status | rows | what it means |
 |---|---|---|
 | proved (model) + conformant | 16 | a Gobra unit proves the decision over all modelled inputs, and a test says the modelled function still behaves that way |
-| proved (shipped) + conformant | 3 | the same, except the proof is of the function the server calls: SR-PERM-04 and SR-PERM-05 in `identity_checks.go`, SR-PERM-06 in `source_check.go`. The model of each is a second opinion now, not the argument |
+| proved (shipped) + conformant | 4 | the same, except the proof is of the function the server calls: SR-PERM-04 and SR-PERM-05 in `identity_checks.go`, SR-PERM-06 in `source_check.go`, SR-AUTH-08 in `server_auth/throttle_rules.go`. The model of each is a second opinion now, not the argument |
 | conformant | 3 | checked in Go alone, because the prover cannot hold the shape of the whole claim (the recursive glob: findings **F5**, **F6**) — `glob.go` does have a proved *part* of one of them, termination, in the shipped file |
-| partially proved | 4 | the decision function is proved, the surrounding machinery is a premise named in the row |
+| partially proved | 3 | the decision function is proved, the surrounding machinery is a premise named in the row |
 | out of scope for Gobra | 3 | QUIC conversation state and version parsing; integration and unit tests are the control |
 | open | 1 | SR-PERM-11 / finding **F2**: a decision the maintainer owes, not a proof that is missing |
 | phase 3 | 1 | SR-PARSE-01: the frame parser, where specs have to live in the production file. Phase 3 itself has started on easier ground: `glob.go` is shipped code with its specs in it, verified by `make proof` |
@@ -37,7 +38,12 @@ core per authentication attempt (**F5**, `identity_options.go`), and the rewritt
 arriving in the *text* as a wildcard, so `matchGlob("a*", "a*b")` was false where OpenSSH says true
 (**F6**, `glob.go`) — the first bug the prover itself found rather than a test, and the reason
 "three implementations agree over half a million triples" is stated with its corpus next to it.
-Three more findings are behaviour
+A fourth came out of writing a sentence down: the comment above the login throttle said a key is
+refused after *more than* `maxFailures` failures while the code, and the model, have always said
+`>=` — one guessing attempt per window in the wrong direction, in a comment nobody tested (**F7**,
+`server_auth/login_policy.go`). The boundary is three spec lines and a test now.
+
+Three further findings are behaviour
 documented rather than changed, each needing a product decision: **F2** above, **F3**
 (`-force-command-mismatch-exit=0` makes a forced command advisory, which the documentation does not
 say), and **F4** (modelling drift, mitigated mechanically and the argument for Phase 3).
@@ -52,16 +58,21 @@ assumptions the argument rests on, listed as such rather than buried in a model 
 
 ## Verification in place: the specs live in the shipped file
 
-Three files in the proof are not models. [`../glob.go`](../glob.go) is the `from=` matcher the server
+Four files in the proof are not models. [`../glob.go`](../glob.go) is the `from=` matcher the server
 calls, moved out of `identity_options.go` and annotated where it ships.
 [`../identity_checks.go`](../identity_checks.go) is the channel-request and channel-open gate -- the
 code that enforces `no-pty`, `restrict`, `no-port-forwarding` and a forced command -- separated from
 the messages it produces and annotated there.
 [`../source_check.go`](../source_check.go) is the decision underneath `from=`: the rule that turns
 "which patterns are exclusions, which matched, is the address known" into a verdict, plus the pure
-predicates that read the flag arrays. `make proof` verifies all three: the code that runs in
-production is the code the proof talks about, with no transcription step in between. That is roadmap
-Phase 3, and what decides whether a file can join it is **what the prover can read**, not difficulty:
+predicates that read the flag arrays.
+[`../server_auth/throttle_rules.go`](../server_auth/throttle_rules.go) is the arithmetic of the login
+throttle -- when a window closes, when a count refuses, how long an attempt waits, how much of the
+window a refusal reports -- lifted out of `loginThrottle.check` and written in integer nanoseconds,
+because there is no `time` stub for Gobra to read. `make proof` verifies all four: the code that runs
+in production is the code the proof talks about, with no transcription step in between. That is
+roadmap Phase 3, and what decides whether a file can join it is **what the prover can read**, not
+difficulty:
 
 * Gobra v26.09 ships stubs with real specs for `strings`, `net`, `strconv`, `errors`, `time`, `sync`,
   `bytes` and `encoding` (`.proof-tools/src/gobra/src/main/resources/stubs/`), so a file that uses
@@ -225,6 +236,19 @@ specific version of a specific verifier. Things that cost time to learn:
 * **Quantified variables need types in the Go frontend**: `forall k int ::`, `exists k int ::`. Bare
   `forall k ::` is a parse error ("no viable alternative at input ':'"), which is easy to misread as a
   problem with the clause rather than with the binder.
+* **`min` and `max` are unknown identifiers in a `.go` file**, though the model files use them; a cap
+  has to be an `if`, which makes the function impure, which means a spec cannot name it -- so a claim
+  quantified over a function's own inputs ("the delay never shrinks") goes in a separate lemma
+  function that calls it and asserts the comparison.
+* **`before` is a reserved word** (it belongs to the permission-ordering logic): `before := f(x)` is
+  "no viable alternative at input 'before :='", an error that points at the call and not the name.
+* **There is no `time` stub.** Importing `time` in a verified file is a visible "got unresolved
+  import: time", never a silent gap, and a duration is just an `int64` of nanoseconds: state the
+  rules in nanoseconds, convert with `Nanoseconds()` at the call sites, and name a test that says the
+  conversion is the identity (`TestConformanceThrottleConversionsAreLossless`).
+* **A verified file may live anywhere in the tree** -- Gobra is handed the directory as its package --
+  but it still sees neither its package-mates nor any unstubbed import, so `server_auth`'s verified
+  file is a leaf with no imports at all.
 * **A recursive `pure func` is checked and then opaque.** Its `decreases` measure is verified, but
   no concrete call can be proved of it afterwards: recursion over `int` unfolds (`f(3)` verifies),
   recursion over `string` does not (`gm("a", "a", 0, 0)` stays unknown), recursion with several

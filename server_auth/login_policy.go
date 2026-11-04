@@ -89,8 +89,9 @@ func (e loginLocked) Error() string {
 }
 
 // beforeAttempt waits for a delay growing with the number of failures already recorded
-// for key, and returns an error when that key has failed more than maxFailures times
-// since the beginning of the current window.
+// for key, and returns an error once that key has failed maxFailures times since the
+// beginning of the current window -- the count that refuses is the limit itself, not one
+// past it, which is what attemptIsRefused states and its test pins.
 func (t *loginThrottle) beforeAttempt(key string, maxFailures int) error {
 	delay, err := t.check(key, maxFailures)
 	if err != nil {
@@ -109,22 +110,18 @@ func (t *loginThrottle) check(key string, maxFailures int) (time.Duration, error
 
 	now := t.now()
 	entry, ok := t.entries[key]
-	if !ok || now.Sub(entry.windowStart) > t.window {
+	if !ok || windowElapsed(int(now.Sub(entry.windowStart).Nanoseconds()), int(t.window.Nanoseconds())) {
 		// a new window starts: what happened before does not count anymore
 		entry = t.startWindowLocked(key, now)
 	}
-	if entry.failures >= maxFailures {
-		retryAfter := entry.windowStart.Add(t.window).Sub(now)
-		if retryAfter < 0 {
-			retryAfter = 0
-		}
-		return 0, loginLocked{RetryAfter: retryAfter}
+	if attemptIsRefused(entry.failures, maxFailures) {
+		// both instants come from the same clock reading, so the difference is a plain
+		// nanosecond count and the only judgement left is the floor at zero
+		left := int(entry.windowStart.Add(t.window).Sub(now).Nanoseconds())
+		return 0, loginLocked{RetryAfter: time.Duration(retryAfter(left))}
 	}
-	delay := time.Duration(entry.failures) * t.delayStep
-	if delay > t.maxDelay {
-		delay = t.maxDelay
-	}
-	return delay, nil
+	delayNs := failureDelay(entry.failures, int(t.delayStep.Nanoseconds()), int(t.maxDelay.Nanoseconds()))
+	return time.Duration(delayNs), nil
 }
 
 // failure records a failed login attempt for key.
@@ -133,7 +130,7 @@ func (t *loginThrottle) failure(key string) {
 	defer t.mutex.Unlock()
 	now := t.now()
 	entry, ok := t.entries[key]
-	if !ok || now.Sub(entry.windowStart) > t.window {
+	if !ok || windowElapsed(int(now.Sub(entry.windowStart).Nanoseconds()), int(t.window.Nanoseconds())) {
 		entry = t.startWindowLocked(key, now)
 	}
 	entry.failures++
@@ -161,7 +158,7 @@ func (t *loginThrottle) startWindowLocked(key string, now time.Time) *throttleEn
 	}
 	if len(t.entries) >= t.capacity {
 		for staleKey, entry := range t.entries {
-			if now.Sub(entry.windowStart) > t.window {
+			if windowElapsed(int(now.Sub(entry.windowStart).Nanoseconds()), int(t.window.Nanoseconds())) {
 				delete(t.entries, staleKey)
 			}
 		}

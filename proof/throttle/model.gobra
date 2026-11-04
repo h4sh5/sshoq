@@ -6,8 +6,15 @@
 // failure() is called for every rejected attempt. Keys are modelled as one source's
 // failure counter, because that is the quantity the decision depends on.
 //
+// Tracked files: server_auth/login_policy.go (loginThrottle.check, failure, success,
+// startWindowLocked) and server_auth/throttle_rules.go (windowElapsed, attemptIsRefused,
+// failureDelay, retryAfter), whose own proof covers the same delay and refusal arithmetic on the
+// code that runs -- which makes this unit a second opinion on it, plus the part this unit can say
+// and that one cannot: what a whole sequence of guesses adds up to.
+//
 // Gobra v26.09 has no delete builtin for maps (only make, len, append, copy, min and
-// max), so the table itself cannot be shrunk inside a proof. The bound on how many
+// max -- the last two of which the Go frontend of a verified `.go` file does not accept), so the
+// table itself cannot be shrunk inside a proof. The bound on how many
 // sources the table remembers - SR-RES-01, which is about the map and its eviction ring
 // - is therefore proved as an executable property test in
 // server_auth/login_policy_capacity_test.go, next to the code it constrains.

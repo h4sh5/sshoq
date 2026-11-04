@@ -49,7 +49,7 @@ session (shell, SFTP, forwarding) without having proved who they are.
 | SR-AUTH-05 | A Bearer/JWT credential is only accepted against one of the identities authorized for the asserted user; an empty authorized-identity set never authenticates. | `server_auth/handlers.go` (`HandleJWTAuth`) | `proved` (model: `proof/authflow/model.gobra`) |
 | SR-AUTH-06 | An OIDC token that carries no conversation-binding claim (`ssh3_conv_id`, `jti`) is **rejected**; a token bound to another conversation is rejected. A captured ID token is therefore not replayable on an arbitrary conversation. | `server_auth/authorized_identities.go` (`OpenIDConnectIdentity.Verify`) | `proved` (`proof/oidcbinding`) + `conformant` — the unit models the binding decision and proves: a token carrying neither `ssh3_conv_id` nor `jti` is refused whatever else is true of it; a token is accepted for **at most one** conversation, because the value compared is the server's own id and not one the token names (so a captured token cannot be re-bound by whoever holds it); a `jti` naming this conversation does not rescue a token whose `ssh3_conv_id` names another; the replay key is `jti`, else the binding value, and is never empty at a point where the token is accepted; a refusal from the replay store is not advisory; and the identity check comes first, so a binding claim cannot buy a conversation on somebody else's identity. Signatures, `iss`, `aud` and `exp` stay premises (SR-AUTH-01..04) — they go through `go-jose` discovery, out of Gobra's reach either way. The two steps the model cannot see are checked in Go: `TestConformanceOIDCBindingBlockIsTheModelledDecision` holds `Verify` to the claim order and the compared values the proof assumes (a structured read of that one method, which fails with the message "change the model with it"), and `TestConformanceConversationIDEncodingIsInjective` shows the base64 form of a conversation id distinguishes ids — exhaustively on short inputs at every offset, bit by bit over all 256 bits of a real id, and 20 000 random pairs — because otherwise two conversations would share one binding value and the "at most one conversation" theorem would be about encodings, not connections. |
 | SR-AUTH-07 | **Replay**: for a token identified by `(issuer, id)`, `Accept` returns true at most once while the remembered entry has not expired; an empty `id` is always refused. | `auth/oidc/replay.go` (`AcceptedTokenStore.Accept`) | partially `proved` — `proof/replay/model.gobra` proves, for every store state and every token: an empty `id` is never accepted; a token is refused exactly when it is remembered and still live; a refusal leaves the store exactly as it was (so replay traffic can neither evict nor grow it); and the store stays inside its capacity for *every* trace of tokens. Not modelled: the signature/`iss`/`aud`/`exp` validation which happens before the store is consulted (SR-AUTH-01..04, still open) and the clock itself, which enters the model only as the two booleans the code actually asks it. + `conformant` (`auth/oidc/replay_conformance_test.go`) |
-| SR-AUTH-08 | **Password guessing is bounded**: within one failure window, a key that already failed `maxFailures` times is refused (`429`) *before* the password is checked, so further guessing costs no hashing. A successful login clears the counter for that key. | `server_auth/login_policy.go` (`loginThrottle.check/failure/success`) | partially `proved` — `proof/throttle/model.gobra` proves the delay and lock-out arithmetic over every failure count, window length and capacity. The window *reset* keeps the table, so it is not modelled there; `server_auth/login_policy_test.go` covers it. |
+| SR-AUTH-08 | **Password guessing is bounded**: within one failure window, a key that already failed `maxFailures` times is refused (`429`) *before* the password is checked, so further guessing costs no hashing. A successful login clears the counter for that key. | `server_auth/throttle_rules.go` (`windowElapsed`, `attemptIsRefused`, `failureDelay`, `retryAfter`, `failureDelayGrowsWithFailures`), `server_auth/login_policy.go` (`loginThrottle.check/failure/success/startWindowLocked`) | `proved` on the shipped arithmetic: the four questions `check` asks of its state are functions with contracts in `throttle_rules.go` — a window closes *strictly* after its length (so an exactly-as-old window still counts, and a clock that steps backwards hands nobody a fresh window); `attemptIsRefused` is `failures >= maxFailures` with the boundary stated on both sides, which is what finding **F7** is about; the delay is `failures x step` capped at `max`, never negative, zero exactly when there were no failures; and `RetryAfter` is floored at zero, because a refusal that reports a negative wait tells the client to come back before now. `failureDelayGrowsWithFailures` is the monotonicity lemma, kept next to the rule it quantifies over. `conformant` around them: `TestConformanceCheckAppliesTheRules` drives the real `check()` — table, window reset, refusal and delay — over four windows x four steps x four caps x eight clock positions x six failure counts, comparing with the pre-split expressions as finding **F6** requires; `TestConformanceThrottleRulesAreTheExpressions` checks each rule against the lines it replaced *through the nanosecond conversions the call sites perform*, which is where a seconds/nanoseconds mistake would show; `TestConformanceRefusalBoundaryIsTheLimit`, `TestConformanceThrottleDelayProperties`, `TestConformanceWindowExpiryIsTheComparison` and `TestConformanceFailureDelayAtTheOverflowBoundary` cover the boundary, the shape, the two consequences of strictness and the one place the cap is a premise. Outside the proof: the table, the mutex and `time` itself — Gobra v26.09 has **no `time` stub at all**, which is why the rules are in integer nanoseconds and why `TestConformanceThrottleConversionsAreLossless` states the conversion premise rather than assuming it. The window *reset* keeping the table bounded is SR-RES-01 (**F1**) and `login_policy_test.go` covers it; `proof/throttle/model.gobra` remains as a second opinion. |
 | SR-AUTH-09 | Early data (0-RTT) is never authenticated: requests arriving before the TLS handshake completed are refused (`425 Too Early`), which is what makes the replay-resistance claims above meaningful. | `server_auth/auth.go` | **out of scope for Gobra** (quic-go `ConnectionState()`); covered by integration tests |
 
 ## 2. Session permissions — `PERM`
@@ -305,6 +305,47 @@ The proof of the ordering itself is not in Gobra — the prover cannot say "this
 about a `switch`; what it can say, and now does, is what the function returns for the patterns whose
 behaviour the two orders disagree on.
 
+### F7: the sentence above the throttle's refusal counted one attempt too many (SR-AUTH-08)
+
+`beforeAttempt` — the function that delays and refuses repeated password failures — carried this
+sentence for as long as it existed:
+
+```go
+// ... returns an error when that key has failed more than maxFailures times since the
+// beginning of the current window.
+```
+
+The code says `entry.failures >= maxFailures`, and the model in `proof/throttle/model.gobra` says the
+same. So with a limit of N, the attempt made after the Nth failure is already refused: prose and code
+differ by one guessing attempt. The code and the model were right and the sentence was wrong —
+`docs/server_config.md` describes the option as the number of failures after which a source is
+refused — so the fix was the comment, and the boundary is now an artifact instead of a sentence:
+
+```go
+// @ ensures refused == (failures >= maxFailures)
+// @ ensures failures == maxFailures ==> refused
+// @ ensures failures < maxFailures ==> !refused
+```
+
+and `TestConformanceRefusalBoundaryIsTheLimit` checks it for limits 0..6 at `limit-1`, `limit` and
+`limit+1`, both on the rule and through `loginThrottle.check`.
+
+No consequence at the configured limit — one password hash per window per key, in the direction that
+refuses more, not fewer. The reason it is recorded is the class: the same off-by-one in the other
+direction would have doubled the free guesses available to an attacker, and neither the prose nor the
+bare `>=` in the code distinguishes the two readings. A property nobody wrote down cannot be reviewed,
+and a comment is not a property — this one was wrong while the function it sat above was being read
+in code review for years. Writing the spec costs three lines and forces the question the comment
+skipped.
+
+The same exercise turned up one place where the delay cap is a premise rather than a theorem: Go's
+`int` is 64 bits, so `failures * step` overflows instead of saturating past about 9.2 billion failures
+in one window. It is unreachable in a five-minute window, and the consequence is benign — a wrapped
+delay is small or negative, `beforeAttempt` only sleeps on a positive one, and the count towards the
+lock-out is untouched — so nothing was changed; `TestConformanceFailureDelayAtTheOverflowBoundary`
+records that the shipped rule wraps exactly like the expression it replaced, which is all the
+assurance that region can get from a test.
+
 ## Roadmap
 
 1. **Phase 1 (this work)** — toolchain (`scripts/setup-gobra.sh`, `make proof`,
@@ -314,8 +355,13 @@ behaviour the two orders disagree on.
    specs. Any bug a proof or a conformance test
    surfaces gets fixed and recorded here with the requirement ID it violates: F1 (the throttle's
    memory bound, fixed), F5 (a `from=` pattern could cost exponential time, fixed), F6 (the linear
-   matcher mis-read a star arriving in the text, fixed), and F2, F3, F4
+   matcher mis-read a star arriving in the text, fixed), F7 (the sentence describing the throttle's
+   refusal count was off by one, fixed in the comment and now stated in a spec), and F2, F3, F4
    (behaviours the tests pinned rather than changed, each waiting on a product decision).
+
+   The list above is what Phase 1 delivered. `make proof` now runs fourteen units: the ten models
+   above plus four shipped files that carry their own specs — `glob.go`, `identity_checks.go`,
+   `source_check.go` and `server_auth/throttle_rules.go`.
 2. **Phase 2** — what is left of the non-crypto surface, in the order that buys the most: the
    x509/base64 layer of `ParseKnownHosts` (SR-TR-02 is proved for the classifier; whether a line's
    data decodes to a certificate is a premise there and a test elsewhere). Persistence needs no
@@ -373,7 +419,22 @@ behaviour the two orders disagree on.
    to be a single `return` of a pure expression, which is why there is no proved helper for stripping
    a leading `!` — "trim it if it is there" needs a branch.
 
-   Next in this category: `known_hosts.go`, which needs the same treatment for its parser errors.
+   `server_auth/throttle_rules.go` is the fourth unit and it moved two more things about the
+   method. A verified file need not live at the repository root: Gobra is handed a *directory* as a
+   package, so a file in `server_auth/` verifies on its own as long as it stays free of what the
+   prover cannot read — and it must stay free of its own package-mates too, since those are not
+   handed in with it. And Gobra v26.09 has **no stub for `time`**: importing it is a visible failure
+   ("got unresolved import: time"), not a silent gap, but it does mean the throttle's rules — which
+   are entirely about durations — had to be written in integer nanoseconds, with the
+   `Nanoseconds()`/`time.Duration(...)` conversions done at the call sites and stated as a premise
+   that a named test checks. Two frontend details came with it: `min` and `max` are unknown
+   identifiers in a `.go` file (so a cap is an `if`, and a function that a spec must call has to be
+   rewritten or the claim moved into a lemma function), and `before` is a reserved word — using it as
+   a variable name is a parse error.
+
+   Next in this category: `known_hosts.go`, which needs the same treatment for its parser errors;
+   `server_auth/login_policy.go`'s `truncate`, which is pure and stdlib-free but whose claims are all
+   about string slicing and concatenation, where the prover has no theory (see F5's notes).
 5. **Phase 4** — `message/` wire parsing (bounded slicing for every message type) and the
    SFTP path handling in `sftp/server.go`, where directory traversal and permissions are the
    interesting properties.
