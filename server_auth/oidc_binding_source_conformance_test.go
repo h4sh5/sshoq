@@ -184,12 +184,12 @@ func TestConformanceOIDCBindingBlockIsTheModelledDecision(t *testing.T) {
 	// carried: a token which could name the value it is compared against could bind itself to any
 	// conversation, which is exactly the hole SR-AUTH-06 closes
 	if strings.Contains(body, "bound != claims.") || strings.Contains(body, "bound == claims.") {
-		t.Error("the binding is compared against a claim of the token rather than the server's "+
+		t.Error("the binding is compared against a claim of the token rather than the server's " +
 			"conversation id: a captured token can then be re-bound by whoever holds it")
 	}
 	// and the parameter it is compared against is the one the caller computes from the conversation
 	if !strings.Contains(body, "base64ConversationID string") {
-		t.Error("Verify no longer takes the conversation id as a parameter, so the proof's "+
+		t.Error("Verify no longer takes the conversation id as a parameter, so the proof's " +
 			"`conversation` value has no counterpart in the code")
 	}
 }

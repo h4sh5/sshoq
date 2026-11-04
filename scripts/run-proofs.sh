@@ -43,11 +43,19 @@ fi
 # shellcheck disable=SC1091
 source "$TOOLS_DIR/env.sh"
 
+# Shipped files with their own annotations. Listed, not discovered: a file belongs to the proof when
+# its specs do, and a file that stops compiling because someone added an import is a proof that
+# silently stopped covering anything.
+INPLACE_UNITS=(
+	"$REPO_ROOT/glob.go"
+)
+
 mapfile -t UNITS < <(
 	if [[ $# -gt 0 ]]; then
 		printf '%s\n' "$@"
 	else
 		find "$REPO_ROOT/proof" -name '*.gobra' | sort
+		printf '%s\n' "${INPLACE_UNITS[@]}"
 	fi
 )
 

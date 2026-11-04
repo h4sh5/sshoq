@@ -675,30 +675,26 @@ func (r *ForwardingRequest) Write(buf []byte) (consumed int, err error) {
 
 // XXX: MASQUE could (should?) be used instead of this handwritten implementation
 
-
 // -- SFTP (not currently conforming to any RFCs) --
 
-
 const (
-	SftpRead = 0
-	SftpWrite = 1
-	SftpUnlink = 2 // delete
+	SftpRead            = 0
+	SftpWrite           = 1
+	SftpUnlink          = 2 // delete
 	SftpRecursiveUnlink = 3 // for "rm -rf" of directory
-	SftpStat = 4
-	SftpMkdir = 5
-	SftpListdir = 6
+	SftpStat            = 4
+	SftpMkdir           = 5
+	SftpListdir         = 6
 	// TODO: chmod, chown, etc..?
 )
 
 type SftpRequest struct {
-	Operation            uint64     
-	Path                 string // path to operate on
-	Payload				 []byte
+	Operation uint64
+	Path      string // path to operate on
+	Payload   []byte
 }
 
 var _ ChannelRequest = &SftpRequest{}
-
-
 
 func ParseSftpRequest(buf util.Reader) (ChannelRequest, error) {
 	operation, err := util.ReadVarInt(buf)
@@ -714,11 +710,10 @@ func ParseSftpRequest(buf util.Reader) (ChannelRequest, error) {
 		return nil, err
 	}
 	return &SftpRequest{
-		Operation:  operation,
-		Path:  path,
-		Payload:  payload,
+		Operation: operation,
+		Path:      path,
+		Payload:   payload,
 	}, err
-
 
 }
 
@@ -751,7 +746,6 @@ func (r *SftpRequest) Write(buf []byte) (consumed int, err error) {
 	return consumed, nil
 
 }
-
 
 func (r *SftpRequest) RequestTypeStr() string {
 	return "sftp"

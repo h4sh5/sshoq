@@ -29,13 +29,13 @@ func conformanceGlob(pattern, text string) bool {
 	star, mark := -1, 0
 	for t < len(text) {
 		switch {
-		case p < len(pattern) && (pattern[p] == '?' || pattern[p] == text[t]):
-			p++
-			t++
-		case p < len(pattern) && pattern[p] == '*':
+		case p < len(pattern) && pattern[p] == '*': // before the literal case: finding F6
 			star = p
 			mark = t
 			p++
+		case p < len(pattern) && (pattern[p] == '?' || pattern[p] == text[t]):
+			p++
+			t++
 		case star >= 0:
 			p = star + 1
 			mark++
@@ -104,13 +104,15 @@ func legacyMatchGlob(pattern, text string) bool {
 
 // TestConformanceMatchGlobIsTheGlob says which function matchGlob is. Over every pattern of at most
 // four characters from {a, b, *, ?, [, .} (1555 of them) and every text of at most four characters
-// from {a, b, .} (121 of them), the shipped matcher, the recursion it replaced, and a second linear
-// matcher written a different way all agree -- 188 155 triples. Brackets and the dot are in the alphabet
-// because "[" makes matchesSourcePattern treat a pattern as a glob while the glob itself reads it as
-// a literal, and because a textual address is always dotted.
+// from {a, b, ., *} (341 of them), the shipped matcher, the recursion it replaced, and a second linear
+// matcher written a different way all agree. Brackets and the dot are in the pattern alphabet because
+// "[" makes matchesSourcePattern treat a pattern as a glob while the glob itself reads it as a
+// literal, and because a textual address is always dotted. The star is in the *text* alphabet because
+// of finding F6: without a star in the text, the corpus could not tell the two orders of the two
+// cases apart, and both linear implementations were wrong in the same way.
 func TestConformanceMatchGlobIsTheGlob(t *testing.T) {
 	patterns := conformanceWords([]byte{'a', 'b', '*', '?', '[', '.'}, 4)
-	texts := conformanceWords([]byte{'a', 'b', '.'}, 4)
+	texts := conformanceWords([]byte{'a', 'b', '.', '*'}, 4)
 	triples := 0
 	for _, p := range patterns {
 		for _, text := range texts {
@@ -125,10 +127,53 @@ func TestConformanceMatchGlobIsTheGlob(t *testing.T) {
 			triples++
 		}
 	}
-	if triples < 40000 {
+	if triples < 500000 {
 		t.Fatalf("corpus is smaller than this test's claim: %d triples", triples)
 	}
 	t.Logf("%d pattern/text triples agree across three implementations", triples)
+}
+
+// TestConformanceMatchGlobStarInText is finding F6, and the reason the corpus above has stars in its
+// texts: a "*" in the text is an ordinary character, but it is equal to a "*" in the pattern, so a
+// matcher that tests literal equality before it tests for a star consumes the star as a literal,
+// saves nothing, and has nothing to retry when the rest fails. matchGlob("a*", "a*b") returned false
+// while OpenSSH's match_pattern() -- and the recursion this function replaced -- return true. Both
+// linear implementations had the two cases in the same wrong order, which is why "three independent
+// implementations" did not catch it and the Gobra annotations on glob.go did: the prover was asked
+// what "*" means and got an answer.
+func TestConformanceMatchGlobStarInText(t *testing.T) {
+	cases := []struct {
+		pattern, text string
+		want          bool
+	}{
+		{"a*", "a*b", true},
+		{"a*", "ab*", true},
+		{"*", "**", true},
+		{"*b", "*b", true},
+		{"a*b", "a*b", true},
+		{"a?c", "a?c", true},
+		{"?", "*", true},
+		{"?", "**", false},
+		{"a*", "a", true},
+		{"*a", "*a", true},
+		{"ab*", "*ab", false}, // the first character of the pattern still has to match
+		{"*ab", "*ab", true},
+		{"a*a", "aa*", false},
+	}
+	for _, c := range cases {
+		if got := matchGlob(c.pattern, c.text); got != c.want {
+			t.Fatalf("matchGlob(%q, %q) = %v, want %v (finding F6)", c.pattern, c.text, got, c.want)
+		}
+		// the recursion this function replaced is the one that encodes OpenSSH's order, so it is the
+		// reference for what the answer has to be
+		if got := legacyMatchGlob(c.pattern, c.text); got != c.want {
+			t.Fatalf("legacyMatchGlob(%q, %q) = %v, want %v: the reference implementation disagrees"+
+				" with the table, so the table is what changed", c.pattern, c.text, got, c.want)
+		}
+		if got := conformanceGlob(c.pattern, c.text); got != c.want {
+			t.Fatalf("the second linear matcher says %v for (%q, %q), want %v", got, c.pattern, c.text, c.want)
+		}
+	}
 }
 
 // TestConformanceLiteralGlobIsEquality is SR-PERM-07 -- "a pattern containing no wildcard matches
