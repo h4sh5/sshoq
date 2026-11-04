@@ -17,17 +17,18 @@ their own specs, [`../glob.go`](../glob.go), [`../identity_checks.go`](../identi
 [`../source_check.go`](../source_check.go),
 [`../server_auth/throttle_rules.go`](../server_auth/throttle_rules.go),
 [`../server_auth/truncate.go`](../server_auth/truncate.go),
-[`../util/varint.go`](../util/varint.go) and
-[`../version_rules.go`](../version_rules.go) — and 76
+[`../util/varint.go`](../util/varint.go),
+[`../util/equalfold.go`](../util/equalfold.go) and
+[`../version_rules.go`](../version_rules.go) — and 100
 `TestConformance...` tests in
-the packages of the code they check, and a catalogue of 32 requirements
+the packages of the code they check, and a catalogue of 35 requirements
 ([`SECURITY_REQUIREMENTS.md`](SECURITY_REQUIREMENTS.md)) whose status column is the only place a
 claim about coverage is written:
 
 | token in the row | rows | what it means |
 |---|---|---|
 | `proved:model` + conformant | 16 | a Gobra unit proves the decision over all modelled inputs, and a test says the modelled function still behaves that way |
-| `proved:shipped` + conformant | 7 | the same, except the proof is of the function the server calls: SR-PERM-04 and SR-PERM-05 in `identity_checks.go`, SR-PERM-06 in `source_check.go`, SR-AUTH-08 in `server_auth/throttle_rules.go`, SR-TR-04 in `server_auth/truncate.go`, SR-PARSE-03 in `util/varint.go`, SR-TR-03 in `version_rules.go`. The model of each is a second opinion now, not the argument |
+| `proved:shipped` + conformant | 8 | the same, except the proof is of the function the server calls: SR-PERM-04 and SR-PERM-05 in `identity_checks.go`, SR-PERM-06 in `source_check.go`, SR-AUTH-08 in `server_auth/throttle_rules.go`, SR-TR-04 in `server_auth/truncate.go`, SR-PARSE-03 in `util/varint.go`, SR-PARSE-05 in `util/equalfold.go`, SR-TR-03 in `version_rules.go`. The model of each is a second opinion now, not the argument |
 | `conformant` | 5 | checked in Go alone, because the prover cannot hold the shape of the whole claim (the recursive glob: findings **F5**, **F6**) — `glob.go` does have a proved *part* of one of them, termination, in the shipped file |
 | `partial` | 2 | the decision function is proved, the surrounding machinery is a premise named in the row |
 | `out-of-scope` | 2 | QUIC conversation state; integration and unit tests are the control |
@@ -279,8 +280,10 @@ One Gobra package per unit, one unit per requirement cluster:
 | `sourcecheck/` | SR-PERM-06, SR-PERM-07 | `matchesSourcePattern` and `CheckSource` — the `from=` restriction's guards, three matching strategies and negated list |
 
 `scripts/run-proofs.sh` discovers `proof/*/model.gobra` and runs Gobra once per unit, so a
-timeout or a failure in one unit cannot hide the verdict of another. The three shipped units
-(`glob.go`, `identity_checks.go`, `source_check.go`) are listed separately, in `INPLACE_UNITS`.
+timeout or a failure in one unit cannot hide the verdict of another. The eight shipped units
+(`glob.go`, `identity_checks.go`, `source_check.go`, `server_auth/throttle_rules.go`,
+`server_auth/truncate.go`, `util/varint.go`, `util/equalfold.go`, `version_rules.go`) are listed
+separately, in `INPLACE_UNITS`.
 
 ## Writing one, notes from the ones here
 
@@ -307,6 +310,27 @@ specific version of a specific verifier. Things that cost time to learn:
 * **Quantified variables need types in the Go frontend**: `forall k int ::`, `exists k int ::`. Bare
   `forall k ::` is a parse error ("no viable alternative at input ':'"), which is easy to misread as a
   problem with the clause rather than with the binder.
+* **A spec that names the result needs a named return.** `func lower(b byte) byte` with
+  `ensures res == b + foldGap` dies with "got unknown identifier res" pointing at the spec, not at the
+  signature; `(res byte)` is the fix. Cheap to state, and the error reads as if `res` were a missing
+  import.
+* **Loop annotations go above the `for`, never as its first statement.** With the `invariant` comments
+  inside the body, the frontend reports "unexpected if, expecting forStmt" at whatever the first real
+  statement is -- it has finished with the loop and is still being handed annotations.
+* **A loop needs its own `decreases`** (`decreases len(s) - i`); the function's measure is not visible to
+  it, and the complaint is "Function might not terminate. Required termination condition might not
+  hold." -- which also says why the *function* must be known to terminate before its postconditions are
+  believed.
+* **An empty `@ decreases` on a non-recursive function is a demand, not a no-op.** Written on `EqualFold`
+  it produced exactly that non-termination error; deleting the clause and letting the frontend infer is
+  what verified. The `decreases 0` rule above is about `pure func`s in model files, where an explicit
+  measure is required and `0` is a legal one.
+* **Give a helper a complete case definition instead of making it pure.** `lower` cannot be `pure` (two
+  returns), so no spec can call it -- but its contract states both branches, "inside the capitals it adds
+  the gap, outside them it changes nothing", and that is enough for the prover to reason about a *call* to
+  `lower` inside another function's postcondition and loop invariant. `util/equalfold.go` is the worked
+  example: the decision is quantified over bytes with the folding written out, and the helper stays
+  ordinary Go.
 * **`min` and `max` are unknown identifiers in a `.go` file**, though the model files use them; a cap
   has to be an `if`, which makes the function impure, which means a spec cannot name it -- so a claim
   quantified over a function's own inputs ("the delay never shrinks") goes in a separate lemma
