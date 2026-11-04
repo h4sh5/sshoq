@@ -36,6 +36,13 @@ keeps the rest honest:
   unparseable header produces 401 without the verifier ever being called. It also pins the
   seven ASCII bytes of the prefix, the one fact Gobra cannot check because it does not
   evaluate string literals.
+* `identity_options_source_conformance_test.go` is where the `from=` glob lives, since Gobra cannot
+  hold a recursive string function (see Gotchas): the shipped `matchGlob`, the recursion it replaced
+  — kept verbatim as `legacyMatchGlob` — and an independently written linear matcher agree on 188 155
+  pattern/text triples; a wildcard-free pattern is shown to match exactly the text equal to it;
+  star-heavy patterns are held to a time bound; and `matchesSourcePattern`, `parsePeerIP` and
+  `CheckSource` are run over real addresses, real CIDRs, the two textual forms of one IPv6 address,
+  host names, negations, and every permutation of every pattern list.
 * `known_hosts_conformance_test.go` parses real files with real self-signed certificates through
   the real `ParseKnownHosts`, `Knows`, `KnowsHash` and `AppendKnownHost`: the grammar with good
   lines interleaved with two-field, four-field, wrong-tag, non-base64 and non-certificate lines
@@ -75,6 +82,7 @@ One Gobra package per unit, one unit per requirement cluster:
 | `replay/` | SR-AUTH-07, SR-RES-03 | `AcceptedTokenStore.Accept`, `evictExpired`, `NewAcceptedTokenStore` |
 | `bearer/` | SR-PARSE-02 | `ParseBearerAuth`, `util.EqualFold`, `util.lower` — pre-authentication header parsing |
 | `knownhosts/` | SR-TR-01, SR-TR-02 | `Knows`, `KnowsHash`, `ParseKnownHosts`, `AppendKnownHost`, and the client's trust decision in `cmd/sshoq.go` |
+| `sourcecheck/` | SR-PERM-06, SR-PERM-07 | `matchesSourcePattern` and `CheckSource` — the `from=` restriction's guards, three matching strategies and negated list |
 
 `scripts/run-proofs.sh` discovers `proof/*/model.gobra` and runs Gobra once per unit, so a
 timeout or a failure in one unit cannot hide the verdict of another.
@@ -97,6 +105,18 @@ specific version of a specific verifier. Things that cost time to learn:
   boolean arithmetic (`pinned && match || !pinned && !known && terminal && yes`) with the shape of
   the Go code kept in the comment above it. Anything that cannot be written that way becomes a
   lemma `func` that calls the pure part and `assert`s the case.
+* **Go's newline rules apply to specs.** A `return` (or `ensures`) expression that continues onto
+  the next line must break *after* an operator: `a &&` newline `b` parses, `a` newline `|| b` is
+  read as two statements and dies with "unexpected || in block, expecting '}'."
+* **Every `pure func` needs a `decreases` clause, even a non-recursive one** (`decreases 0`).
+* **A recursive `pure func` is checked and then opaque.** Its `decreases` measure is verified, but
+  no concrete call can be proved of it afterwards: recursion over `int` unfolds (`f(3)` verifies),
+  recursion over `string` does not (`gm("a", "a", 0, 0)` stays unknown), recursion with several
+  call sites does not, and indexing a slice inside a pure function additionally demands `perm` for
+  the elements. So arithmetic models — the throttle's delay, a truncation length — belong in the
+  prover, and string-shaped recursion does not: `matchGlob`'s meaning is pinned by three
+  implementations agreeing instead, which is written up as the boundary of the programme in
+  `SECURITY_REQUIREMENTS.md` (finding F5) rather than quietly worked around.
 * **There is no `delete`.** The builtins are `make`, `len`, `append`, `copy`, `min`, `max`.
   A map that forgets keys has to be rebuilt in a loop under a ghost "visited" set, which is
   why the throttle's *memory* bound is a Go test rather than a lemma.

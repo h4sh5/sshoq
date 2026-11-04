@@ -66,8 +66,8 @@ the classic way a restriction fails open.
 | SR-PERM-03 | Parsing is **monotone**: processing an additional recognised option never clears a restriction flag; the resulting flags depend only on the set of option names present, not their order. | `identity_options.go` | partially `proved` — the per-option effect is proved for every restriction set (`applyOption`: each flag ends set exactly when its own name or `restrict` set it, and no option clears a flag), which is the monotone part; order-independence follows from those clauses and is checked in both orders for every pair of enforced names by the conformance test instead of as a separate lemma. |
 | SR-PERM-04 | `CheckRequest` denies exactly the requests the flags forbid: `pty-req` when `NoPty`, `env` when `NoEnv`, `x11-req` when `NoX11Forwarding`, `agent-forwarding` when `NoAgentForwarding`; it allows every other request type, and a `nil` option set allows everything. | `identity_options.go` (`CheckRequest`) | `proved` (`checkRequest`: refuses exactly the four forbidden request/flag pairs and allows everything else, unknown request types included) + `conformant` (64 field combinations x 9 request types, `nil` options included) |
 | SR-PERM-05 | `CheckChannelOpen` denies port/UDP/reverse-tcp channel opens and `sftp` when a forced command is set, and denies forwarding when `NoPortForwarding`; the check keys on the channel family, not on the parameter tail after `,`. | `identity_options.go` (`CheckChannelOpen`) | `proved` (`checkChannelOpen`) + `conformant` (64 field combinations x 13 channel types, including the `family,parameter` form). Note what the proof makes visible: `restrict` does **not** close `sftp`, only `command=` does — as in OpenSSH, and asserted as such so that a change of policy fails the proof. |
-| SR-PERM-06 | `from=` **fails closed**: a missing or unparsable peer address is refused when a `from=` restriction exists; a negated pattern that matches is refused; nothing matching is refused. | `identity_options.go` (`CheckSource`) | **open** — no unit yet (`proof/source_check` planned: the negation/first-match decision fits on one page). The address matching itself works on `net.IP` and `net` CIDRs, which Gobra cannot ingest; `identity_options_test.go` covers CIDR, glob, negation, unparsable source and hostname patterns. |
-| SR-PERM-07 | `matchGlob` terminates, and a pattern containing no wildcard matches **exactly one** text (equality). `?` consumes exactly one character. | `identity_options.go` (`matchGlob`) | **open** — recursive over two strings and a good Gobra target (`decreases` on the remaining lengths gives total correctness); enumerated in `identity_options_test.go` meanwhile. |
+| SR-PERM-06 | `from=` **fails closed**: a missing or unparsable peer address is refused when a `from=` restriction exists; a negated pattern that matches is refused; nothing matching is refused. | `identity_options.go` (`CheckSource`) | `proved` (model: `proof/sourcecheck/model.gobra`, `fromListDecides` — no restriction restricts nothing, a restriction with an undeterminable address refuses, an exclusion refuses whatever else the list says, and an accepted peer is one some pattern described and no negation excluded; plus `patternMatches` for the two guards and the choice between the three matching strategies) + `conformant` (`identity_options_source_conformance_test.go`: the table of real `from=` lists and real addresses, both orders of every list, and a check that the shipped verdict really is the function of the two disjunctions the model decides on). The `net.IP` and CIDR layer stays a premise in the model, as it must be; what that layer returns is asserted row by row there. |
+| SR-PERM-07 | `matchGlob` terminates, and a pattern containing no wildcard matches **exactly one** text (equality). `?` consumes exactly one character. | `identity_options.go` (`matchGlob`) | `conformant`, not `proved` — and the reason is a property of the prover, recorded as F5 alongside SR-RES-05: a recursive *pure* function in Gobra v26.09 has its measure checked but is then opaque, so `gm("a", "a", 0, 0)` cannot be derived from the definition. What pins the meaning instead is `identity_options_source_conformance_test.go`: agreement between the shipped matcher, the recursion it replaced, and an independently written linear matcher over 188 155 pattern/text triples, plus an exhaustive check that a wildcard-free pattern matches exactly the text equal to it, and `?` exactly one character. Termination is now structural — two pointers that only move forward — rather than a measure to be checked. |
 | SR-PERM-08 | Option names are matched case-insensitively in a way that can only *add* restrictions: the case-folded name space contains only restricting names. | `identity_options.go` | **open** — the model is handed the already case-folded name, so `strings.ToLower` sits outside it. Checkable in Go (fold every name of the supported space, assert the verdict equals the lower-case one); the next conformance test to write. |
 | SR-PERM-09 | A forced command actually replaces the executed command, and the identity options attached to a conversation are the ones of the identity that authenticated it (set once, before any channel is handled). | `channel.go`, `conversation.go` | **out of scope for Gobra** (conversation state is entangled with QUIC streams); covered by integration tests + `cmd` tests |
 | SR-PERM-11 | Repeating a scalar option (`identity_type`, `client_id`, `command`) with different values is either merged or refused, and never silently half-applied. | `identity_options.go` (`ParseIdentityOptions`) | **open** — modelled and documented as-is by the identityopts unit (`parseIsFailClosed`: every listed option is processed, scalars by last assignment), so today the contract is "last wins"; see finding **F2** for why that is a deviation from the documentation rather than a memory-safety bug. |
@@ -92,6 +92,7 @@ pre-authentication input.
 | SR-RES-01 | The login throttle remembers at most `capacity` keys; `startWindowLocked` evicts before inserting, so the memory an attacker can force is independent of the number of source addresses they spoof. | `server_auth/login_policy.go` | `proved` (`proof/throttle/model.gobra`: the delay handed to an attacker never exceeds `maxDelay`, for every failure count, step and cap) |
 | SR-RES-02 | `truncate(s, max)` returns a string of length at most `max + 3`, equal to `s` when `len(s) <= max`, empty when `max <= 0`, and never indexes out of bounds. | `server_auth/login_policy.go` | `proved` (`proof/truncation/model.gobra`: the cut lands on a character boundary, `len(res) <= max+3`, and memory safety for every `s` and `max`) + `conformant` (`server_auth/truncate_conformance_test.go`) |
 | SR-RES-03 | The OIDC replay store holds at most `maxEntries` tokens, and `maxEntries < 1` is normalised to 1 at construction, so it cannot grow with network input nor degenerate into an accept-everything store. | `auth/oidc/replay.go` | `proved` (`proof/replay/model.gobra`: `run` proves `len <= capacity` for every trace, and `len <= len(trace)`; the normalisation is proved to leave a store that still catches the replay of the token just accepted) + `conformant` (`auth/oidc/replay_conformance_test.go`). Unlike the login throttle (SR-RES-01), this store's stale-order rebuild keeps its bound — checked, not assumed. |
+| SR-RES-05 | Matching a `from=` pattern takes time linear in `len(pattern) + len(text)`: the number of wildcard characters in a pattern cannot be used to make the server work, because `from=` arrives with the identity and is matched on every login attempt that carries one. | `identity_options.go` (`matchGlob`) | `conformant` (bound: eight star-heavy patterns, the worst 60 stars against an 80-character text, in 1.9µs, guarded by `TestConformanceMatchGlobIsBounded`; meaning: three-implementation agreement over 188 155 triples) — the recursion this replaced was exponential, 2m56s for fourteen stars on that text; see finding **F5** |
 | SR-RES-04 | Delay granted to an attacker per failed attempt is capped by `maxDelay` (so throttling cannot be turned into an amplification/lock-up of server workers). | `server_auth/login_policy.go` | `proved` (`proof/throttle/model.gobra`: the delay never exceeds `maxDelay`, for every failure count, step and cap) |
 
 ## 5. Untrusted wire data — `PARSE`
@@ -227,19 +228,56 @@ rows name the same files. Deleting the JCS unit was then a removal in three plac
 slow rot. It was still three places, which is the argument for Phase 3: specs written into the
 production files, where moving a function moves its proof or fails to compile.
 
+### F5: a `from=` pattern could make the server work for three minutes (SR-RES-05)
+
+`matchGlob` used to be the natural recursive matcher: for a star, try the rest of the pattern after
+every possible prefix of the text. That is correct, terminates for every input, and is exponential in
+the number of stars whenever the match fails late. Measured on the code as it was, against an
+eighty-character text:
+
+| stars in the pattern | time |
+| --- | --- |
+| 6 | 18 ms |
+| 8 | 398 ms |
+| 10 | 4.9 s |
+| 12 | 36 s |
+| 14 | 2 m 56 s |
+
+Nothing bounds that. The pattern is not the peer's bytes, but it is not the administrator's either:
+`from=` is an identity option, and identity options reach the server through the identity's own
+option string, so a configuration — or a token claim, where the listener's attestation is what
+stands between the two — with a handful of extra stars turns each authentication attempt that
+carries it into a CPU burn, before the peer has been told anything. The throttle limits how often a
+source address may try; it does not limit how long one check takes.
+
+Fixed by replacing the recursion with the two-pointer matcher (`matchGlob` now), which needs no stack
+beyond its own frame and runs in `len(pattern)+len(text)`: the same eight worst-case patterns, 60
+stars included, now take 1.9µs in total. The rewrite is pinned by agreement rather than by argument —
+the old recursion is kept verbatim in `identity_options_source_conformance_test.go` and compared with
+the shipped matcher and a third, differently-written linear matcher over 188 155 triples, and the
+time bound is a test so that a future "simpler" recursion fails CI.
+
+This is also the finding that says where the boundary of the proof programme is. SR-PERM-07 asks for
+termination of a recursive string function, which is exactly the shape Gobra v26.09 will not take: a
+recursive pure function's `decreases` measure is checked, and the function is then opaque, so no
+concrete call can be proved of it (`f(3)` over ints unfolds; `gm("a","a",0,0)` over strings does not,
+and slicing inside a pure function additionally needs element permissions). Recursion over integers
+belongs in the prover; recursion over strings is settled by reference implementation and exhaustive
+agreement. That is a line, drawn by experiment, and the catalogue now says which side of it each
+requirement is on.
+
 ## Roadmap
 
 1. **Phase 1 (this work)** — toolchain (`scripts/setup-gobra.sh`, `make proof`,
    `make proof-conformance`, the `proof.yml` workflow), this catalogue, and the six
-   seven verification units (`authflow`, `truncation`, `throttle`, `identityopts`, `replay`,
-   `bearer`, `knownhosts`) plus the canary. Any bug a proof or a conformance test surfaces gets
+   eight verification units (`authflow`, `truncation`, `throttle`, `identityopts`, `replay`,
+   `bearer`, `knownhosts`, `sourcecheck`) plus the canary. Any bug a proof or a conformance test surfaces gets
    fixed and recorded here with the requirement ID it violates (F1, and F2/F3 for the
    two decisions the tests pinned rather than changed).
-2. **Phase 2** — the units still marked **open**, in the order that buys the most:
-   `source_check` (SR-PERM-06/07, the negation/first-match decision), the case-folding
-   conformance check (SR-PERM-08), then the x509/base64 layer of `ParseKnownHosts` (SR-TR-02 is
-   proved for the classifier; whether a line's data decodes to a certificate is a premise there
-   and a test elsewhere). The token *validation* path around the replay store (SR-AUTH-01..04:
+2. **Phase 2** — the units still marked **open**, in the order that buys the most: the
+   case-folding conformance check (SR-PERM-08, which can only *add* restrictions), then the
+   x509/base64 layer of `ParseKnownHosts` (SR-TR-02 is proved for the classifier; whether a line's
+   data decodes to a certificate is a premise there and a test elsewhere). The token *validation* path around the replay store (SR-AUTH-01..04:
    signature, `iss`, `aud`, `exp`) is the largest remaining hole in the authentication story and
    needs a model of the JWKS fetch, which is why it is not in this phase.
 3. **Fix the two known deviations** before adding more proofs: SR-PERM-11 (two
