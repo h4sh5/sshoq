@@ -12,7 +12,8 @@ make proof                # Gobra checks every proof obligation in proof/*/model
 
 ## State of the programme
 
-Nine verified units plus a canary (`proof/*/model.gobra`, 10 files), 41 `TestConformance...` tests in
+Eleven verified files — ten model units (`proof/*/model.gobra`) plus [`../glob.go`](../glob.go), a
+shipped function carrying its own specs — and 42 `TestConformance...` tests in
 the packages of the code they check, and a catalogue of 31 requirements
 ([`SECURITY_REQUIREMENTS.md`](SECURITY_REQUIREMENTS.md)) whose status column is the only place a
 claim about coverage is written:
@@ -20,16 +21,20 @@ claim about coverage is written:
 | status | rows | what it means |
 |---|---|---|
 | proved (model) + conformant | 19 | a Gobra unit proves the decision over all modelled inputs, and a test says the modelled function still behaves that way |
-| conformant | 3 | checked in Go alone, because the prover cannot hold the shape (the recursive glob: finding **F5**) |
+| conformant | 3 | checked in Go alone, because the prover cannot hold the shape of the whole claim (the recursive glob: findings **F5**, **F6**) — `glob.go` does have a proved *part* of one of them, termination, in the shipped file |
 | partially proved | 4 | the decision function is proved, the surrounding machinery is a premise named in the row |
 | out of scope for Gobra | 3 | QUIC conversation state and version parsing; integration and unit tests are the control |
 | open | 1 | SR-PERM-11 / finding **F2**: a decision the maintainer owes, not a proof that is missing |
-| phase 3 | 1 | SR-PARSE-01: the frame parser, where specs have to live in the production file |
+| phase 3 | 1 | SR-PARSE-01: the frame parser, where specs have to live in the production file. Phase 3 itself has started on easier ground: `glob.go` is shipped code with its specs in it, verified by `make proof` |
 
-Two real bugs came out of writing this, both fixed and recorded with the requirement they violated:
+Three real bugs came out of writing this, all fixed and recorded with the requirement they violated:
 the login throttle could grow past the capacity it documents (**F1**, `server_auth/login_policy.go`),
-and a `from=` pattern with a handful of stars cost exponential time — fourteen stars, 2m56s of one
-core per authentication attempt (**F5**, `identity_options.go`). Three more findings are behaviour
+a `from=` pattern with a handful of stars cost exponential time — fourteen stars, 2m56s of one
+core per authentication attempt (**F5**, `identity_options.go`), and the rewritten matcher read a `*`
+arriving in the *text* as a wildcard, so `matchGlob("a*", "a*b")` was false where OpenSSH says true
+(**F6**, `glob.go`) — the first bug the prover itself found rather than a test, and the reason
+"three implementations agree over half a million triples" is stated with its corpus next to it.
+Three more findings are behaviour
 documented rather than changed, each needing a product decision: **F2** above, **F3**
 (`-force-command-mismatch-exit=0` makes a forced command advisory, which the documentation does not
 say), and **F4** (modelling drift, mitigated mechanically and the argument for Phase 3).
@@ -41,6 +46,39 @@ load-bearing the catalogue row names it. Some of them are then checked by a name
 distinguishing conversation ids, what `net.ParseCIDR` decides, that a rejected spelling is refused —
 and the ones that are not (signature verification, the TLS exporter behind a conversation id) are the
 assumptions the argument rests on, listed as such rather than buried in a model header.
+
+## Verification in place: the specs live in the shipped file
+
+[`../glob.go`](../glob.go) is not a model. It is the `from=` matcher the server calls, moved out of
+`identity_options.go` verbatim and annotated there, and `make proof` verifies it: the code that runs
+in production is the code the proof talks about, with no transcription step in between. That is
+roadmap Phase 3, and the reason the matcher is the file that got there first is its **imports**, not
+its difficulty:
+
+* Gobra v26.09 ships stubs with real specs for `strings`, `net`, `strconv`, `errors`, `time`, `sync`,
+  `bytes` and `encoding` (`.proof-tools/src/gobra/src/main/resources/stubs/`), so a file that uses
+  only those is readable — which is why `net.ParseCIDR` and the `strings` helpers in this server are
+  not obstacles.
+* For `fmt` the stub says "We do not support members defined in this package", so any file that
+  formats an error with `fmt.Errorf` — which is every decision file in this server that refuses
+  something — cannot be verified where it lives until the formatting is separated from the decision.
+  The next step is therefore not "annotate `identity_options.go`" but "split the decision from the
+  message, then annotate the decision".
+* A verified file is handed to Gobra alone (`gobra -i glob.go`), so its package-mates are not its
+  problem. `scripts/run-proofs.sh` lists such files in `INPLACE_UNITS` rather than discovering them,
+  so that someone adding an import to a verified file sees the proof fail rather than watching it
+  quietly shrink.
+
+What the annotations on `matchGlob` prove, and what they do not, is written in the file. In short:
+termination on a two-component measure (so the linear-time claim of **F5** is a theorem and not a
+reading of the code), an empty pattern matching exactly the empty text, and `"*"` matching
+everything. The equivalence with the declarative `globMatch` in the same file needs induction over
+`string`, which Silicon does not have — it has induction over inductive datatypes, which is exactly
+how `proof/sourcecheck` discharges the same decision over its own model. The soundness half
+(`res ==> globMatch(pattern, text, 0, 0)`) was written down and did not verify: it needs the invariant
+that every star earlier than the saved one has already failed at every longer stretch of the text,
+and stating *that* needs a predicate over a range of a string, which is the slicing the prover has no
+theory for.
 
 ## How the argument is built
 
@@ -70,8 +108,9 @@ keeps the rest honest:
   evaluate string literals.
 * `identity_options_source_conformance_test.go` is where the `from=` glob lives, since Gobra cannot
   hold a recursive string function (see Gotchas): the shipped `matchGlob`, the recursion it replaced
-  — kept verbatim as `legacyMatchGlob` — and an independently written linear matcher agree on 188 155
-  pattern/text triples; a wildcard-free pattern is shown to match exactly the text equal to it;
+  — kept verbatim as `legacyMatchGlob` — and an independently written linear matcher agree on 530 255
+  pattern/text triples, **stars in the texts included** (they were not, and that blind spot is
+  **F6**); a wildcard-free pattern is shown to match exactly the text equal to it;
   star-heavy patterns are held to a time bound; and `matchesSourcePattern`, `parsePeerIP` and
   `CheckSource` are run over real addresses, real CIDRs, the two textual forms of one IPv6 address,
   host names, negations, and every permutation of every pattern list.
@@ -156,7 +195,17 @@ specific version of a specific verifier. Things that cost time to learn:
   the elements. So arithmetic models — the throttle's delay, a truncation length — belong in the
   prover, and string-shaped recursion does not: `matchGlob`'s meaning is pinned by three
   implementations agreeing instead, which is written up as the boundary of the programme in
-  `SECURITY_REQUIREMENTS.md` (finding F5) rather than quietly worked around.
+  `SECURITY_REQUIREMENTS.md` (finding F5) rather than quietly worked around. The work-around that does
+  exist is to keep the strings fixed and recurse over an **index**: `prefixEq(a, b, n)` unfolds one
+  character at a time, and `prefixEq(a, b, p+1) == (prefixEq(a, b, p) && a[p] == b[p])` is provable.
+* **String slicing parses and has no theory.** `a[0:n]` type-checks in a spec and `a[0:0] == b[0:0]`
+  is *not* provable; nor is extensionality (equal length plus equal characters does not give
+  `a == b`). Write string properties with `len` and byte indices or they will not discharge.
+* **Specs in a `.go` file are comments, one clause per line.** `// @ ensures ...` above the signature;
+  loop specs (`// @ invariant`, `// @ decreases`) go *before* the `for`, not inside the body; a
+  lexicographic measure is a bare list, `decreases a, b`, not `decreases (a, b)`. gofmt reflows a
+  comment past about a hundred columns into an indented continuation Gobra cannot read, so a long
+  clause wants a named helper (`isSingleStar`, `sameText`) rather than a long line.
 * **There is no `delete`.** The builtins are `make`, `len`, `append`, `copy`, `min`, `max`.
   A map that forgets keys has to be rebuilt in a loop under a ghost "visited" set, which is
   why the throttle's *memory* bound is a Go test rather than a lemma.

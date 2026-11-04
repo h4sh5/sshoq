@@ -67,7 +67,7 @@ the classic way a restriction fails open.
 | SR-PERM-04 | `CheckRequest` denies exactly the requests the flags forbid: `pty-req` when `NoPty`, `env` when `NoEnv`, `x11-req` when `NoX11Forwarding`, `agent-forwarding` when `NoAgentForwarding`; it allows every other request type, and a `nil` option set allows everything. | `identity_options.go` (`CheckRequest`) | `proved` (`checkRequest`: refuses exactly the four forbidden request/flag pairs and allows everything else, unknown request types included) + `conformant` (64 field combinations x 9 request types, `nil` options included) |
 | SR-PERM-05 | `CheckChannelOpen` denies port/UDP/reverse-tcp channel opens and `sftp` when a forced command is set, and denies forwarding when `NoPortForwarding`; the check keys on the channel family, not on the parameter tail after `,`. | `identity_options.go` (`CheckChannelOpen`) | `proved` (`checkChannelOpen`) + `conformant` (64 field combinations x 13 channel types, including the `family,parameter` form). Note what the proof makes visible: `restrict` does **not** close `sftp`, only `command=` does — as in OpenSSH, and asserted as such so that a change of policy fails the proof. |
 | SR-PERM-06 | `from=` **fails closed**: a missing or unparsable peer address is refused when a `from=` restriction exists; a negated pattern that matches is refused; nothing matching is refused. | `identity_options.go` (`CheckSource`) | `proved` (model: `proof/sourcecheck/model.gobra`, `fromListDecides` — no restriction restricts nothing, a restriction with an undeterminable address refuses, an exclusion refuses whatever else the list says, and an accepted peer is one some pattern described and no negation excluded; plus `patternMatches` for the two guards and the choice between the three matching strategies) + `conformant` (`identity_options_source_conformance_test.go`: the table of real `from=` lists and real addresses, both orders of every list, and a check that the shipped verdict really is the function of the two disjunctions the model decides on). The `net.IP` and CIDR layer stays a premise in the model, as it must be; what that layer returns is asserted row by row there. |
-| SR-PERM-07 | `matchGlob` terminates, and a pattern containing no wildcard matches **exactly one** text (equality). `?` consumes exactly one character. | `identity_options.go` (`matchGlob`) | `conformant`, not `proved` — and the reason is a property of the prover, recorded as F5 alongside SR-RES-05: a recursive *pure* function in Gobra v26.09 has its measure checked but is then opaque, so `gm("a", "a", 0, 0)` cannot be derived from the definition. What pins the meaning instead is `identity_options_source_conformance_test.go`: agreement between the shipped matcher, the recursion it replaced, and an independently written linear matcher over 188 155 pattern/text triples, plus an exhaustive check that a wildcard-free pattern matches exactly the text equal to it, and `?` exactly one character. Termination is now structural — two pointers that only move forward — rather than a measure to be checked. |
+| SR-PERM-07 | `matchGlob` terminates, and a pattern containing no wildcard matches **exactly one** text (equality). `?` consumes exactly one character. | `glob.go` (`matchGlob`, verified where it ships) | `proved` for termination and for two endpoints, on the shipped function: Gobra checks a two-component measure (retries left, then pattern characters left) so the matcher terminates on *every* pattern and text, and that an empty pattern matches exactly the empty text and that `"*"` matches everything. `conformant` for the rest of the meaning, and the reason is a property of the prover, recorded as F5 alongside SR-RES-05: a recursive *pure* function in Gobra v26.09 has its measure checked but is then opaque, and the step the glob needs is induction over `string`. What pins the meaning instead is `identity_options_source_conformance_test.go`: agreement between the shipped matcher, the recursion it replaced, and an independently written linear matcher over 530 255 pattern/text triples (stars in the texts too, since F6), plus an exhaustive check that a wildcard-free pattern matches exactly the text equal to it, and `?` exactly one character. |
 | SR-PERM-08 | Option names are matched case-insensitively in a way that can only *add* restrictions: the case-folded name space contains only restricting names. | `identity_options.go` | `conformant` — `identity_options_fold_conformance_test.go` closes the step the model is handed (`strings.ToLower(name)`) over the spellings that can arrive. Every ASCII case variant of every enforced name is accepted with exactly the lower-case name's restriction state — 205 232 variants, `NO-X11-FORWARDING` included, since OpenSSH itself spells that one with a capital. Nothing else folds in: the Kelvin sign, long s, dotted and dotless I, Angstrom sign, full-width and mathematical forms — 22 spellings — are all *refused*, so a restriction written in a spelling the server does not know loses the login loudly instead of quietly doing nothing (`strings.ToLower` is a Unicode function: it maps U+212A to 'k', and this refusal is what stands behind that). Accepted options always restrict, enforced names never fold together, and on ASCII input `strings.ToLower` is exactly ASCII folding, which is the definition the model's name space needs. |
 | SR-PERM-09 | A forced command actually replaces the executed command, and the identity options attached to a conversation are the ones of the identity that authenticated it (set once, before any channel is handled). | `channel.go`, `conversation.go` | **out of scope for Gobra** (conversation state is entangled with QUIC streams); covered by integration tests + `cmd` tests |
 | SR-PERM-11 | Repeating a scalar option (`identity_type`, `client_id`, `command`) with different values is either merged or refused, and never silently half-applied. | `identity_options.go` (`ParseIdentityOptions`) | **open** — modelled and documented as-is by the identityopts unit (`parseIsFailClosed`: every listed option is processed, scalars by last assignment), so today the contract is "last wins"; see finding **F2** for why that is a deviation from the documentation rather than a memory-safety bug. |
@@ -92,7 +92,7 @@ pre-authentication input.
 | SR-RES-01 | The login throttle remembers at most `capacity` keys; `startWindowLocked` evicts before inserting, so the memory an attacker can force is independent of the number of source addresses they spoof. | `server_auth/login_policy.go` | `proved` (`proof/throttle/model.gobra`: the delay handed to an attacker never exceeds `maxDelay`, for every failure count, step and cap) |
 | SR-RES-02 | `truncate(s, max)` returns a string of length at most `max + 3`, equal to `s` when `len(s) <= max`, empty when `max <= 0`, and never indexes out of bounds. | `server_auth/login_policy.go` | `proved` (`proof/truncation/model.gobra`: the cut lands on a character boundary, `len(res) <= max+3`, and memory safety for every `s` and `max`) + `conformant` (`server_auth/truncate_conformance_test.go`) |
 | SR-RES-03 | The OIDC replay store holds at most `maxEntries` tokens, and `maxEntries < 1` is normalised to 1 at construction, so it cannot grow with network input nor degenerate into an accept-everything store. | `auth/oidc/replay.go` | `proved` (`proof/replay/model.gobra`: `run` proves `len <= capacity` for every trace, and `len <= len(trace)`; the normalisation is proved to leave a store that still catches the replay of the token just accepted) + `conformant` (`auth/oidc/replay_conformance_test.go`). Unlike the login throttle (SR-RES-01), this store's stale-order rebuild keeps its bound — checked, not assumed. |
-| SR-RES-05 | Matching a `from=` pattern takes time linear in `len(pattern) + len(text)`: the number of wildcard characters in a pattern cannot be used to make the server work, because `from=` arrives with the identity and is matched on every login attempt that carries one. | `identity_options.go` (`matchGlob`) | `conformant` (bound: eight star-heavy patterns, the worst 60 stars against an 80-character text, in 1.9µs, guarded by `TestConformanceMatchGlobIsBounded`; meaning: three-implementation agreement over 188 155 triples) — the recursion this replaced was exponential, 2m56s for fourteen stars on that text; see finding **F5** |
+| SR-RES-05 | Matching a `from=` pattern takes time linear in `len(pattern) + len(text)`: the number of wildcard characters in a pattern cannot be used to make the server work, because `from=` arrives with the identity and is matched on every login attempt that carries one. | `glob.go` (`matchGlob`) | `proved` for termination and two endpoints on the shipped function, `conformant` for the rest of the meaning (bound: eight star-heavy patterns, the worst 60 stars against an 80-character text, in 1.9µs, guarded by `TestConformanceMatchGlobIsBounded`; meaning: three-implementation agreement over 530 255 triples, stars in the texts included since **F6**) — the recursion this replaced was exponential, 2m56s for fourteen stars on that text; see finding **F5** |
 | SR-RES-04 | Delay granted to an attacker per failed attempt is capped by `maxDelay` (so throttling cannot be turned into an amplification/lock-up of server workers). | `server_auth/login_policy.go` | `proved` (`proof/throttle/model.gobra`: the delay never exceeds `maxDelay`, for every failure count, step and cap) |
 
 ## 5. Untrusted wire data — `PARSE`
@@ -254,8 +254,9 @@ Fixed by replacing the recursion with the two-pointer matcher (`matchGlob` now),
 beyond its own frame and runs in `len(pattern)+len(text)`: the same eight worst-case patterns, 60
 stars included, now take 1.9µs in total. The rewrite is pinned by agreement rather than by argument —
 the old recursion is kept verbatim in `identity_options_source_conformance_test.go` and compared with
-the shipped matcher and a third, differently-written linear matcher over 188 155 triples, and the
-time bound is a test so that a future "simpler" recursion fails CI.
+the shipped matcher and a third, differently-written linear matcher over 530 255 triples, and the
+time bound is a test so that a future "simpler" recursion fails CI. That the agreement corpus had to
+be widened for this rewrite to be pinned at all is F6.
 
 This is also the finding that says where the boundary of the proof programme is. SR-PERM-07 asks for
 termination of a recursive string function, which is exactly the shape Gobra v26.09 will not take: a
@@ -266,14 +267,54 @@ belongs in the prover; recursion over strings is settled by reference implementa
 agreement. That is a line, drawn by experiment, and the catalogue now says which side of it each
 requirement is on.
 
+### F6: the linear matcher read a `*` in the *text* as a wildcard (SR-PERM-07)
+
+The annotations Gobra checks in `glob.go` are the first written against shipped code instead of a
+model, and the first thing they turned up. Both linear implementations — `matchGlob` and the
+independently written `conformanceGlob` — tested "this pattern character equals this text character"
+*before* "this pattern character is a star". A `*` arriving in the **text** is an ordinary character,
+but it is equal to the `*` in the pattern, so it was consumed by the literal-equality case, no star
+position was saved, and when the tail of the pattern failed there was nothing left to retry against:
+
+```go
+matchGlob("a*", "a*b") // was false; OpenSSH's match_pattern() — and the recursion the linear
+                       // rewrite replaced — both say true: the star may stand for "*b"
+```
+
+Three things about it are worth writing down.
+
+* *Reachability*: none, in the server. `matchesSourcePattern` applies the glob only to `ip.String()`
+  (and to `ip.To4().String()`), and a formatted address never contains a star, so no `from=` value
+  could be affected — and the error was in the *rejecting* direction, which refuses a login rather
+  than granting one. It is recorded because the class is right even though the instance is harmless:
+  the matcher is a general-purpose function with a documented meaning, and it did not have that
+  meaning.
+* *Why the safety net missed it*: the agreement corpus generated texts from `{a, b, .}`. No text in
+  it could express the difference between the two orders, so 188 155 triples of agreement proved
+  nothing about it — and the two implementations that agreed with each other share the same folklore
+  about how a two-pointer glob matcher is written. Exhaustive agreement over a corpus that cannot
+  state the difference is not evidence; the prover found it because it was asked to show something
+  about `"*"` rather than shown examples.
+* *What fixed it*: the star case moved in front of the equality case in both linear implementations;
+  `*` joined the *text* alphabet, so the corpus is 530 255 triples and the two orders now separate
+  (`TestConformanceMatchGlobIsTheGlob` fails on the old order); and
+  `TestConformanceMatchGlobStarInText` keeps the hand-written cases with the old recursion as the
+  reference, since that recursion is the implementation which encodes OpenSSH's order.
+
+The proof of the ordering itself is not in Gobra — the prover cannot say "this case is tried first"
+about a `switch`; what it can say, and now does, is what the function returns for the patterns whose
+behaviour the two orders disagree on.
+
 ## Roadmap
 
 1. **Phase 1 (this work)** — toolchain (`scripts/setup-gobra.sh`, `make proof`,
-   `make proof-conformance`, the `proof.yml` workflow), this catalogue, and nine proof files:
+   `make proof-conformance`, the `proof.yml` workflow), this catalogue, and eleven proof files:
    eight verification units (`authflow`, `truncation`, `throttle`, `identityopts`, `replay`,
-   `bearer`, `knownhosts`, `sourcecheck`) plus the canary. Any bug a proof or a conformance test
+   `bearer`, `knownhosts`, `sourcecheck`), the canary, and `glob.go` — a shipped file carrying its own
+   specs. Any bug a proof or a conformance test
    surfaces gets fixed and recorded here with the requirement ID it violates: F1 (the throttle's
-   memory bound, fixed), F5 (a `from=` pattern could cost exponential time, fixed), and F2, F3, F4
+   memory bound, fixed), F5 (a `from=` pattern could cost exponential time, fixed), F6 (the linear
+   matcher mis-read a star arriving in the text, fixed), and F2, F3, F4
    (behaviours the tests pinned rather than changed, each waiting on a product decision).
 2. **Phase 2** — what is left of the non-crypto surface, in the order that buys the most: the
    x509/base64 layer of `ParseKnownHosts` (SR-TR-02 is proved for the classifier; whether a line's
@@ -297,10 +338,15 @@ requirement is on.
    `docs/server_config.md` and the requirement's own text should say that the restriction is
    conditional on the flag keeping its default, since the proof models the refusing behaviour and the
    deployed server may not.
-4. **Phase 3** — push specifications into the production files themselves where Gobra can
-   read them (`identity_options.go` is the best candidate: no cgo, no reflection, and the
-   decision logic is already separated from `net` by three small functions), so that the
-   annotated code *is* the verified code and no transcription is involved.
+4. **Phase 3 (started)** — push specifications into the production files themselves where Gobra can
+   read them, so that the annotated code *is* the verified code and no transcription is involved.
+   `glob.go` is the first: `matchGlob` moved out of `identity_options.go` unchanged, carries its
+   `// @` specs, terminates on a checked measure, and is verified by `make proof`. What decides which
+   files can follow is imports, not difficulty: Gobra v26.09 ships stubs with real specs for `strings`
+   and `net`, and stubs that say "we do not support members defined in this package" for `fmt` — so a
+   file that formats an error with `fmt.Errorf` cannot be verified where it lives until the formatting
+   is separated from the decision. `identity_options.go` is the next candidate and that is the
+   separation it needs; `known_hosts.go` needs the same for its parser errors.
 5. **Phase 4** — `message/` wire parsing (bounded slicing for every message type) and the
    SFTP path handling in `sftp/server.go`, where directory traversal and permissions are the
    interesting properties.
