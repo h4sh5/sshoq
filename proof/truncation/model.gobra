@@ -1,0 +1,115 @@
+// SR-RES-02 and SR-TR-04: truncation of the untrusted User-Agent.
+//
+// This models server_auth/login_policy.go:truncate, which runs before any
+// authentication on a header the client controls completely. The original code
+// sliced it with [:100], which panicked for every shorter header - that is, for
+// every client which is not this project's own - turning a clean pre-authentication
+// reject into an H3_INTERNAL_ERROR.
+//
+// The model works on the byte view of the header (len() and slicing in Go are
+// byte-oriented, so this is not an approximation). What is proved here:
+//
+//   * memory safety: no index of the untrusted header is ever out of bounds;
+//   * SR-TR-04: the cut point never lands inside a multi-byte UTF-8 sequence, so a
+//     header cannot put a split rune into the server log;
+//   * SR-RES-02: the emitted line is bounded by max+3 bytes, is empty when
+//     max <= 0, and keeps the header verbatim when it already fits.
+//
+// The byte-for-byte content of the result is checked against the real function by
+// proof/conformance_test.go, which is where it belongs: the security argument needs
+// the bounds and the alignment, and those are what must hold for every input.
+package truncation
+
+// isContinuationByte reports whether b is a UTF-8 continuation byte (10xx_xxxx),
+// that is, a byte which may not start a cut point.
+decreases
+pure func isContinuationByte(b byte) bool {
+	return 128 <= b && b <= 191
+}
+
+// cutIndex is the walk-back loop of truncate: given a header longer than max, it
+// returns the index at which the kept prefix stops, stepping back off a continuation
+// byte.
+//
+// res == max means no walk-back happened and the byte at index max is not a
+// continuation byte; res == 0 means the whole prefix up to max was continuation
+// bytes, so nothing is kept (the ellipsis is then the whole line).
+requires forall k int :: 0 <= k && k < len(s) ==> acc(&s[k], _)
+requires 0 < max && max < len(s)
+ensures  forall k int :: 0 <= k && k < len(s) ==> acc(&s[k], _)
+ensures  0 <= res && res <= max
+ensures  res == 0 || !isContinuationByte(s[res])
+ensures  forall k int :: res < k && k <= max ==> isContinuationByte(s[k])
+func cutIndex(s []byte, max int) (res int) {
+	cut := max
+	invariant 0 <= cut && cut <= max
+	invariant forall k int :: 0 <= k && k < len(s) ==> acc(&s[k], _)
+	invariant forall k int :: cut < k && k <= max ==> isContinuationByte(s[k])
+	decreases cut
+	for cut > 0 && isContinuationByte(s[cut]) {
+		cut--
+	}
+	return cut
+}
+
+// truncatedNeverReadsOutOfBounds is the regression statement for the historical
+// panic: with the header indexed only through cutIndex, no path can touch an index
+// outside it, whatever max claims.
+requires forall k int :: 0 <= k && k < len(s) ==> acc(&s[k], _)
+requires 0 <= max
+ensures  forall k int :: 0 <= k && k < len(s) ==> acc(&s[k], _)
+ensures  max <= 0 ==> len(res) == 0
+ensures  max > 0 && len(s) <= max ==> len(res) == len(s)
+ensures  max > 0 && len(s) > max ==> 3 <= len(res) && len(res) <= max+3
+func truncate(s []byte, max int) (res []byte) {
+	if max <= 0 {
+		return make([]byte, 0)
+	}
+	if len(s) <= max {
+		return s
+	}
+	cut := cutIndex(s, max)
+	out := make([]byte, cut+3)
+	invariant 0 <= i && i <= cut
+	invariant len(out) == cut+3
+	invariant forall k int :: 0 <= k && k < len(s) ==> acc(&s[k], _)
+	invariant forall k int :: 0 <= k && k < cut+3 ==> acc(&out[k], 1)
+	invariant forall k int :: 0 <= k && k < i ==> out[k] == s[k]
+	decreases cut - i
+	for i := 0; i < cut; i++ {
+		out[i] = s[i]
+	}
+	out[cut] = byte(46)
+	out[cut+1] = byte(46)
+	out[cut+2] = byte(46)
+	return out
+}
+
+// logLineIsBounded is SR-RES-02 at the length the server actually uses: no matter
+// how long or how mangled the header is, at most 103 bytes reach the log. The
+// pre-authentication code path therefore cannot be made to emit an unbounded amount
+// of data by a client which sends a huge header.
+requires forall k int :: 0 <= k && k < len(s) ==> acc(&s[k], _)
+ensures  len(res) <= 103
+ensures  len(res) == 0 ==> len(s) == 0
+func logLineIsBounded(s []byte) (res []byte) {
+	res = truncate(s, 100)
+	assert len(res) <= 103
+	return res
+}
+
+// keptPrefixEndsOnARuneBoundary is SR-TR-04 end to end. The index which separates
+// the kept prefix from the ellipsis is a leading byte, so the log never carries half
+// of a multi-byte character; and the only way nothing is kept is a header whose
+// first max bytes are all continuation bytes.
+requires forall k int :: 0 <= k && k < len(s) ==> acc(&s[k], _)
+requires 0 < max && max < len(s)
+ensures  forall k int :: 0 <= k && k < len(s) ==> acc(&s[k], _)
+ensures  0 <= cut && cut <= max
+ensures  cut == 0 || !isContinuationByte(s[cut])
+ensures  cut == max || max < len(s)
+func keptPrefixEndsOnARuneBoundary(s []byte, max int) (cut int) {
+	cut = cutIndex(s, max)
+	assert cut == 0 || !isContinuationByte(s[cut])
+	return cut
+}

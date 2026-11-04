@@ -1,0 +1,53 @@
+name: Formal proofs (Gobra)
+
+# The proofs are the artifact: a change that breaks a proof obligation, or that
+# makes a model drift away from the code it models, must not merge silently.
+on:
+  pull_request:
+    paths:
+      - 'proof/**'
+      - 'scripts/setup-gobra.sh'
+      - 'scripts/run-proofs.sh'
+      - 'identity_options.go'
+      - 'known_hosts.go'
+      - 'server_auth/**'
+      - 'auth/oidc/**'
+      - 'util/util.go'
+      - '.github/workflows/proof.yml'
+      - 'Makefile'
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  proofs:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+
+      # Gobra publishes no binaries, so the toolchain (JDK 17..21, sbt, Z3, a
+      # Gobra build pinned by proof/gobra.version) is built from source and
+      # cached. The cache key contains the pinned Gobra tag: changing the pin
+      # rebuilds, which is exactly what should happen when the annotation
+      # language moves.
+      - name: Cache the proof toolchain
+        id: cache-tools
+        uses: actions/cache@v4
+        with:
+          path: .proof-tools
+          key: proof-tools-${{ runner.os }}-${{ hashFiles('proof/gobra.version', 'scripts/setup-gobra.sh') }}
+
+      - name: Install the proof toolchain
+        run: ./scripts/setup-gobra.sh
+
+      - name: Model/implementation conformance
+        run: make -e proof-conformance
+
+      - name: Formal verification
+        run: make -e proof

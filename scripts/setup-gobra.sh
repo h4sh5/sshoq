@@ -119,6 +119,10 @@ if [[ ! -x "$Z3_BIN" ]]; then
 	chmod +x "$Z3_BIN"
 	ln -sf "$Z3_BIN" "$TOOLS_DIR/bin/z3"
 fi
+# Z3 ships as a glibc 2.39 build: on an older distro the binary exists but cannot
+# be executed, which has to fail here rather than inside a proof run.
+"$Z3_BIN" --version >/dev/null 2>&1 \
+	|| die "z3 $Z3_VERSION is not runnable here (it needs glibc >= 2.38; CI uses ubuntu-24.04)"
 "$Z3_BIN" --version | sed 's/^/[setup-gobra] /'
 Z3_EXE="$Z3_BIN"
 export Z3_EXE
@@ -136,15 +140,20 @@ fi
 ( cd "$GOBRA_SRC" && git submodule sync --recursive >/dev/null && \
 	git submodule update --init --recursive --depth 1 )
 
+# sbt assembly writes target/scala-2.13/gobra.jar (build.sbt overrides the
+# default <name>-assembly-<version>.jar name), so accept both spellings.
 ASSEMBLY_DIR="$GOBRA_SRC/target/scala-2.13"
-GOBRA_JAR="$(ls "$ASSEMBLY_DIR"/gobra-assembly-*.jar 2>/dev/null | head -1 || true)"
+find_jar() {
+	ls -1t "$ASSEMBLY_DIR"/gobra.jar "$ASSEMBLY_DIR"/gobra-assembly-*.jar 2>/dev/null | head -1 || true
+}
+GOBRA_JAR="$(find_jar)"
 if [[ -z "$GOBRA_JAR" ]]; then
 	log "building gobra ($GOBRA_REF) with sbt assembly -- several minutes on a cold cache"
 	# SBT_OPTS: silver/silicon are large Scala projects; the default heap OOMs.
 	( cd "$GOBRA_SRC" && SBT_OPTS="-Xmx6G -Xss16m" \
 		"$SBT_BIN" -batch -Dsbt.color=false -Dsbt.supershell=false assembly )
-	GOBRA_JAR="$(ls "$ASSEMBLY_DIR"/gobra-assembly-*.jar 2>/dev/null | head -1 || true)"
-	[[ -n "$GOBRA_JAR" ]] || die "sbt assembly produced no jar"
+	GOBRA_JAR="$(find_jar)"
+	[[ -n "$GOBRA_JAR" ]] || die "sbt assembly produced no jar in $ASSEMBLY_DIR"
 fi
 
 ln -sf "$GOBRA_JAR" "$TOOLS_DIR/share/gobra.jar"

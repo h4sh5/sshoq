@@ -1,0 +1,256 @@
+// SR-AUTH-01..10: nobody reaches an SSH conversation without acceptable
+// authentication material.
+//
+// This models the authentication phase of server_auth/auth.go:HandleAuths, the
+// handler which runs before any conversation exists. It keeps the order and the
+// shape of the real decision tree - user-agent gate, version gate, 0-RTT gate,
+// conversation setup, user lookup, authorized-identities load, plugin verifiers,
+// then the Basic or the Bearer branch - and drops only the SSH and HTTP plumbing.
+// Each leaf returns the status code the implementation writes plus whether
+// handlerFunc ran, i.e. whether the client got a session.
+//
+// The contract below is the whole decision table, so the security statements are
+// corollaries of it and not separate assumptions; proof/conformance_test.go checks
+// the same table against the real handler over all 2^16 argument combinations.
+package authflow
+
+// The status codes the handler can write, as in net/http.
+const statusOK int = 200
+const statusUnauthorized int = 401
+const statusForbidden int = 403
+const statusTooEarly int = 425
+const statusTooManyRequests int = 429
+const statusServerError int = 500
+
+// handleAuths is HandleAuths. Its arguments are the outcomes of the steps the real
+// handler performs, in the order it performs them:
+//
+//	userAgentOK          -- ssh3.ParseVersionString(r.UserAgent()) succeeded
+//	versionSupported     -- ssh3.IsVersionSupported(peerVersion)
+//	handshakeComplete    -- QUIC ConnectionState().TLS.HandshakeComplete
+//	conversationUsable   -- NewServerConversation returned no error
+//	userKnown            -- unix_util.GetUser(username) returned a user
+//	identitiesLoaded     -- GetAuthorizedIdentities(user) returned no error
+//	pluginVerified       -- a WrappedPluginVerifier accepted the request
+//	passwordLoginEnabled -- -enable-password-login
+//	basicOffered         -- the Authorization header starts with "Basic "
+//	basicParseOK         -- r.BasicAuth() returned ok
+//	throttleAllows       -- both passwordLogins.beforeAttempt calls returned nil
+//	passwordVerified     -- unix_util.UserPasswordAuthentication returned (true, nil)
+//	bearerOffered        -- the Authorization header starts with "Bearer "
+//	bearerParseOK        -- ParseBearerAuth returned ok
+//	tokenMaterialValid   -- signature, issuer, e-mail and conversation binding all ok
+//	tokenNotSeenBefore   -- oidc.AcceptedTokenStore.Accept returned true
+//
+// The decision table. Every line states the gates which had to be passed to reach
+// that branch, because each earlier branch wins over the later ones.
+ensures !userAgentOK ==> status == statusForbidden && !session
+ensures userAgentOK && !versionSupported ==> status == statusForbidden && !session
+ensures userAgentOK && versionSupported && !handshakeComplete ==>
+	status == statusTooEarly && !session
+ensures userAgentOK && versionSupported && handshakeComplete && !conversationUsable ==>
+	status == statusServerError && !session
+ensures userAgentOK && versionSupported && handshakeComplete && conversationUsable &&
+	!userKnown ==> status == statusUnauthorized && !session
+ensures userAgentOK && versionSupported && handshakeComplete && conversationUsable &&
+	userKnown && !identitiesLoaded ==> status == statusUnauthorized && !session
+ensures userAgentOK && versionSupported && handshakeComplete && conversationUsable &&
+	userKnown && identitiesLoaded && pluginVerified ==> status == statusOK && session
+ensures userAgentOK && versionSupported && handshakeComplete && conversationUsable &&
+	userKnown && identitiesLoaded && !pluginVerified && passwordLoginEnabled &&
+	basicOffered && !basicParseOK ==> status == statusUnauthorized && !session
+ensures userAgentOK && versionSupported && handshakeComplete && conversationUsable &&
+	userKnown && identitiesLoaded && !pluginVerified && passwordLoginEnabled &&
+	basicOffered && basicParseOK && !throttleAllows ==>
+	status == statusTooManyRequests && !session
+ensures userAgentOK && versionSupported && handshakeComplete && conversationUsable &&
+	userKnown && identitiesLoaded && !pluginVerified && passwordLoginEnabled &&
+	basicOffered && basicParseOK && throttleAllows && !passwordVerified ==>
+	status == statusUnauthorized && !session
+ensures userAgentOK && versionSupported && handshakeComplete && conversationUsable &&
+	userKnown && identitiesLoaded && !pluginVerified && passwordLoginEnabled &&
+	basicOffered && basicParseOK && throttleAllows && passwordVerified ==>
+	status == statusOK && session
+ensures userAgentOK && versionSupported && handshakeComplete && conversationUsable &&
+	userKnown && identitiesLoaded && !pluginVerified &&
+	!(passwordLoginEnabled && basicOffered) && bearerOffered && !bearerParseOK ==>
+	status == statusUnauthorized && !session
+ensures userAgentOK && versionSupported && handshakeComplete && conversationUsable &&
+	userKnown && identitiesLoaded && !pluginVerified &&
+	!(passwordLoginEnabled && basicOffered) && bearerOffered && bearerParseOK &&
+	!(tokenMaterialValid && tokenNotSeenBefore) ==> status == statusUnauthorized && !session
+ensures userAgentOK && versionSupported && handshakeComplete && conversationUsable &&
+	userKnown && identitiesLoaded && !pluginVerified &&
+	!(passwordLoginEnabled && basicOffered) && bearerOffered && bearerParseOK &&
+	tokenMaterialValid && tokenNotSeenBefore ==> status == statusOK && session
+ensures userAgentOK && versionSupported && handshakeComplete && conversationUsable &&
+	userKnown && identitiesLoaded && !pluginVerified &&
+	!(passwordLoginEnabled && basicOffered) && !bearerOffered ==>
+	status == statusUnauthorized && !session
+// SR-AUTH-01: a session always rests on material, and on the gates which precede it.
+ensures session ==> userAgentOK && versionSupported && handshakeComplete &&
+	conversationUsable && userKnown && identitiesLoaded &&
+	(pluginVerified ||
+		(passwordLoginEnabled && basicOffered && basicParseOK && throttleAllows &&
+			passwordVerified) ||
+		(!(passwordLoginEnabled && basicOffered) && bearerOffered && bearerParseOK &&
+			tokenMaterialValid && tokenNotSeenBefore))
+func handleAuths(userAgentOK bool, versionSupported bool, handshakeComplete bool,
+	conversationUsable bool, userKnown bool, identitiesLoaded bool, pluginVerified bool,
+	passwordLoginEnabled bool, basicOffered bool, basicParseOK bool, throttleAllows bool,
+	passwordVerified bool, bearerOffered bool, bearerParseOK bool, tokenMaterialValid bool,
+	tokenNotSeenBefore bool) (status int, session bool) {
+	// Gate: the untrusted User-Agent, judged before anything is trusted from the
+	// request (SR-TR-03).
+	if !userAgentOK {
+		return statusForbidden, false
+	}
+	if !versionSupported {
+		return statusForbidden, false
+	}
+	// Gate: no early data, otherwise the authentication itself could be a 0-RTT
+	// replay (SR-AUTH-09).
+	if !handshakeComplete {
+		return statusTooEarly, false
+	}
+	if !conversationUsable {
+		return statusServerError, false
+	}
+	// Gate: the account must exist, and its authorized identities must have loaded.
+	// An unknown account gets the plain 401 a wrong password gets too (SR-AUTH-03).
+	if !userKnown {
+		return statusUnauthorized, false
+	}
+	if !identitiesLoaded {
+		return statusUnauthorized, false
+	}
+	// Plugin verifiers. The restrictions carried by the identity line are attached to
+	// the conversation here, which is what makes SR-PERM-01 possible at all.
+	if pluginVerified {
+		return statusOK, true
+	}
+	if passwordLoginEnabled && basicOffered {
+		if !basicParseOK {
+			return statusUnauthorized, false
+		}
+		if !throttleAllows {
+			return statusTooManyRequests, false
+		}
+		if !passwordVerified {
+			return statusUnauthorized, false
+		}
+		return statusOK, true
+	} else if bearerOffered {
+		if !bearerParseOK {
+			return statusUnauthorized, false
+		}
+		if tokenMaterialValid && tokenNotSeenBefore {
+			return statusOK, true
+		}
+		return statusUnauthorized, false
+	}
+	return statusUnauthorized, false
+}
+
+// SR-AUTH-01 as a standalone obligation: with no plugin, no password match and no
+// fresh token, nothing authenticates.
+ensures !pluginVerified && !passwordVerified && !tokenNotSeenBefore ==> !session
+func noSessionWithoutMaterial(userAgentOK bool, versionSupported bool,
+	handshakeComplete bool, conversationUsable bool, userKnown bool, identitiesLoaded bool,
+	pluginVerified bool, passwordLoginEnabled bool, basicOffered bool, basicParseOK bool,
+	throttleAllows bool, passwordVerified bool, bearerOffered bool, bearerParseOK bool,
+	tokenMaterialValid bool, tokenNotSeenBefore bool) (status int, session bool) {
+	status, session = handleAuths(userAgentOK, versionSupported, handshakeComplete,
+		conversationUsable, userKnown, identitiesLoaded, pluginVerified,
+		passwordLoginEnabled, basicOffered, basicParseOK, throttleAllows,
+		passwordVerified, bearerOffered, bearerParseOK, tokenMaterialValid,
+		tokenNotSeenBefore)
+	assert !session || status == statusOK
+	assert !pluginVerified && !passwordVerified && !tokenNotSeenBefore ==> !session
+}
+
+// SR-AUTH-02: password authentication must not succeed when the password login
+// method is disabled - whatever the client offers, whatever the password, even a
+// correct one for a known account.
+func disabledPasswordAuthNeverSucceeds() {
+	status, session := handleAuths(true, true, true, true, true, true, false, false,
+		true, true, true, true, false, false, false, false)
+	assert !session
+	assert status == statusUnauthorized
+}
+
+// SR-AUTH-02, for the client which sends no header at all once the method is off.
+func disabledPasswordAuthEmptyHeader() {
+	status, session := handleAuths(true, true, true, true, true, true, false, false,
+		false, false, false, false, false, false, false, false)
+	assert !session && status == statusUnauthorized
+}
+
+// SR-AUTH-03, SR-AUTH-04, SR-AUTH-05: an unknown account and a wrong password get
+// the same answer, and neither is a session, so the status code cannot say which it
+// was.
+func uniformFailureShape() {
+	unknownStatus, unknownSession := handleAuths(true, true, true, true, false, true, false,
+		true, true, true, true, true, false, false, false, false)
+	wrongStatus, wrongSession := handleAuths(true, true, true, true, true, true, false, true,
+		true, true, true, false, false, false, false, false)
+	assert !unknownSession && !wrongSession
+	assert unknownStatus == wrongStatus
+	assert unknownStatus == statusUnauthorized
+}
+
+// SR-AUTH-07: a replayed OIDC token - one the store has already accepted - is not a
+// session, and the answer looks like any other authentication failure.
+func replayedTokenIsNotASession() {
+	status, session := handleAuths(true, true, true, true, true, true, false, false, false,
+		false, false, false, true, true, true, false)
+	assert !session
+	assert status == statusUnauthorized
+}
+
+// SR-AUTH-06: a token which is not bound to this conversation, whose issuer or
+// e-mail does not match the identity line, or whose signature does not check out,
+// is not a session either.
+func unboundTokenIsNotASession() {
+	_, session := handleAuths(true, true, true, true, true, true, false, false, false,
+		false, false, false, true, true, false, true)
+	assert !session
+}
+
+// SR-AUTH-10: once the throttle refuses, not even the right password gets a session.
+func throttledPasswordIsNotASession() {
+	status, session := handleAuths(true, true, true, true, true, true, false, true, true,
+		true, false, true, false, false, false, false)
+	assert !session
+	assert status == statusTooManyRequests
+}
+
+// SR-AUTH-09: early data is never authenticated, so a replayed 0-RTT request cannot
+// open a conversation.
+func earlyDataIsNotAuthenticated() {
+	status, session := handleAuths(true, true, false, true, true, true, true, true, true,
+		true, true, true, true, true, true, true)
+	assert !session
+	assert status == statusTooEarly
+}
+
+// A session always comes with 200, and a failure never claims success: there is no
+// path which leaves the response in the state where the client cannot tell whether
+// it authenticated.
+ensures status == statusOK ==> session
+ensures status == statusUnauthorized ==> !session
+ensures status == statusTooManyRequests ==> !session
+ensures status == statusTooEarly ==> !session
+ensures status == statusForbidden ==> !session
+func statusAndSessionAgree(userAgentOK bool, versionSupported bool, handshakeComplete bool,
+	conversationUsable bool, userKnown bool, identitiesLoaded bool, pluginVerified bool,
+	passwordLoginEnabled bool, basicOffered bool, basicParseOK bool, throttleAllows bool,
+	passwordVerified bool, bearerOffered bool, bearerParseOK bool, tokenMaterialValid bool,
+	tokenNotSeenBefore bool) (status int, session bool) {
+	status, session = handleAuths(userAgentOK, versionSupported, handshakeComplete,
+		conversationUsable, userKnown, identitiesLoaded, pluginVerified,
+		passwordLoginEnabled, basicOffered, basicParseOK, throttleAllows,
+		passwordVerified, bearerOffered, bearerParseOK, tokenMaterialValid,
+		tokenNotSeenBefore)
+	return status, session
+}

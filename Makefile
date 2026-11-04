@@ -59,6 +59,33 @@ integration-tests:
 integration-tests-setup:
 	./setup_integration_tests.sh
 
+# -----------------------------------------------------------------------------
+# Formal verification (Gobra) -- see proof/SECURITY_REQUIREMENTS.md
+#
+# `make proof` runs Gobra over the annotated models in proof/ and fails if any
+# proof obligation cannot be discharged. `make proof-conformance` checks that the
+# models still behave like the Go functions they model: the proofs are only as
+# meaningful as that correspondence, so both are run in CI
+# (.github/workflows/proof.yml).
+# -----------------------------------------------------------------------------
+
+# Installs JDK 17..21, sbt, Z3 and a pinned Gobra build into .proof-tools.
+# Idempotent: the second run only re-checks the pins.
+proof-setup:
+	./scripts/setup-gobra.sh
+
+# The proofs proper. GOBRA_SETUP=1 installs the toolchain on the fly, which is
+# what the CI job does when its cache missed.
+proof:
+	./scripts/run-proofs.sh
+
+# Model/implementation conformance: the models in proof/ must agree with the
+# functions the server actually runs.
+proof-conformance:
+	$(TEST_OPTS) go test ./proof/...
+
+proof-all: proof-setup proof-conformance proof
+
 install:
 	$(GO_OPTS) go install $(BUILDFLAGS) ./cmd/sshoq
 	$(GO_OPTS) go install $(BUILDFLAGS) ./cmd/sshoq-server
