@@ -71,7 +71,14 @@ const (
 // certificate at all, and pinMatches says whether that certificate's host hash (HostHash: SHA-256 of
 // its DER, the string the server prints) is the pinned one; when certSeen is false, pinMatches means
 // nothing and is not looked at.
-func handshakePinAccepts(pin string, certSeen bool, pinMatches bool) bool {
+// The contract is three clauses and they are exhaustive: with no pin everything is accepted; with
+// a pin and no certificate everything is accepted (the resumed-session case above); with a pin and
+// a certificate, only a match.
+//
+// @ ensures pin == "" ==> res
+// @ ensures pin != "" && !certSeen ==> res
+// @ ensures pin != "" && certSeen ==> res == pinMatches
+func handshakePinAccepts(pin string, certSeen bool, pinMatches bool) (res bool) {
 	if pin == "" {
 		return true
 	}
@@ -105,7 +112,46 @@ func handshakePinAccepts(pin string, certSeen bool, pinMatches bool) bool {
 //     machine-in-the-middle case, and a prompt would train people to type yes to it;
 //   - an unknown certificate must at least be self-signed;
 //   - and then, and only then, the person is asked.
-func trustAfterFailedHandshake(pin string, certSeen bool, pinMatches bool, alreadyRecorded bool, refusedByCrypto bool, knownEntry bool, selfSigned bool, hasTerminal bool, asked bool, userSaysYes bool) hostTrust {
+//
+// The contract is the fifteen clauses below, one per outcome, each read in both directions: the
+// left-hand side says when the outcome happens, the right-hand side says the outcome means the left
+// held. Together they are not a description of the code but a partition of the inputs - every
+// combination of the ten facts lands in exactly one of them - which is what makes this file the
+// place the client's trust decision is proved rather than merely written down.
+//
+// @ ensures pin != "" && !certSeen ==> res == hostTrustRefuseNoCertificate
+// @ ensures res == hostTrustRefuseNoCertificate ==> (pin != "" && !certSeen) || (pin == "" && refusedByCrypto && hasTerminal && !knownEntry && !certSeen)
+// @ ensures pin != "" && certSeen && !pinMatches ==> res == hostTrustRefusePinMismatch
+// @ ensures res == hostTrustRefusePinMismatch ==> pin != "" && certSeen && !pinMatches
+// @ ensures pin != "" && certSeen && pinMatches && alreadyRecorded ==> res == hostTrustRefuseAlreadyRecorded
+// @ ensures res == hostTrustRefuseAlreadyRecorded ==> pin != "" && certSeen && pinMatches && alreadyRecorded
+// @ ensures pin != "" && certSeen && pinMatches && !alreadyRecorded ==> res == hostTrustRecord
+// @ ensures pin == "" && !refusedByCrypto ==> res == hostTrustRefuseTransport
+// @ ensures res == hostTrustRefuseTransport ==> pin == "" && !refusedByCrypto
+// @ ensures pin == "" && refusedByCrypto && !hasTerminal ==> res == hostTrustRefuseNoTerminal
+// @ ensures res == hostTrustRefuseNoTerminal ==> pin == "" && refusedByCrypto && !hasTerminal
+// @ ensures pin == "" && refusedByCrypto && hasTerminal && knownEntry ==> res == hostTrustRefuseKnownHost
+// @ ensures res == hostTrustRefuseKnownHost ==> pin == "" && refusedByCrypto && hasTerminal && knownEntry
+// @ ensures pin == "" && refusedByCrypto && hasTerminal && !knownEntry && certSeen && !selfSigned ==> res == hostTrustRefuseNotSelfSigned
+// @ ensures res == hostTrustRefuseNotSelfSigned ==> pin == "" && refusedByCrypto && hasTerminal && !knownEntry && certSeen && !selfSigned
+// @ ensures pin == "" && refusedByCrypto && hasTerminal && !knownEntry && certSeen && selfSigned && !asked ==> res == hostTrustAsk
+// @ ensures res == hostTrustAsk ==> pin == "" && refusedByCrypto && hasTerminal && !knownEntry && certSeen && selfSigned && !asked
+// @ ensures pin == "" && refusedByCrypto && hasTerminal && !knownEntry && certSeen && selfSigned && asked && userSaysYes ==> res == hostTrustRecord
+// @ ensures res == hostTrustRecord ==> (pin != "" && certSeen && pinMatches && !alreadyRecorded) || (pin == "" && refusedByCrypto && hasTerminal && !knownEntry && certSeen && selfSigned && asked && userSaysYes)
+// @ ensures pin == "" && refusedByCrypto && hasTerminal && !knownEntry && certSeen && selfSigned && asked && !userSaysYes ==> res == hostTrustDeclined
+// @ ensures res == hostTrustDeclined ==> pin == "" && refusedByCrypto && hasTerminal && !knownEntry && certSeen && selfSigned && asked && !userSaysYes
+//
+// Three things follow from those clauses and are worth stating where they are read, because they
+// are the ones a change would break:
+//
+//   - `res == hostTrustAsk ==> hasTerminal && !knownEntry && certSeen && selfSigned && pin == ""`: a
+//     person is asked only about an unknown, self-signed certificate for a host nothing has been
+//     trusted for, and never where there is no terminal to ask in.
+//   - `res == hostTrustRecord ==> certSeen`: nothing is trusted that the handshake did not present.
+//   - `pin == "" && !asked ==> res != hostTrustRecord`: an answer nobody was asked for records
+//     nothing. The first draft of this decision tested the answer before the asking, and this is
+//     the clause that caught it.
+func trustAfterFailedHandshake(pin string, certSeen bool, pinMatches bool, alreadyRecorded bool, refusedByCrypto bool, knownEntry bool, selfSigned bool, hasTerminal bool, asked bool, userSaysYes bool) (res hostTrust) {
 	if pin != "" {
 		if !certSeen {
 			return hostTrustRefuseNoCertificate

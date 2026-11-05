@@ -103,10 +103,13 @@ func conformanceRepoFiles(t *testing.T) []string {
 func TestConformanceCatalogueRowShape(t *testing.T) {
 	rows := conformanceRows(t, conformanceCatalogue)
 	seen := map[string]int{}
-	id := regexp.MustCompile(`^SR-(AUTH|PERM|TR|RES|PARSE)-[0-9]{2}$`)
+	// The categories are a closed set on purpose: a new one is a statement that the catalogue has
+	// grown a subject, which is a decision someone notices rather than a typo in a row. SR-DAC joined
+	// when the SFTP server's file-access decision was split out into sftp/dac_rules.go and proved.
+	id := regexp.MustCompile(`^SR-(AUTH|PERM|TR|RES|PARSE|DAC)-[0-9]{2}$`)
 	for _, r := range rows {
 		if !id.MatchString(r[0]) {
-			t.Errorf("requirement id %q is not SR-{AUTH,PERM,TR,RES,PARSE}-NN", r[0])
+			t.Errorf("requirement id %q is not SR-{AUTH,PERM,TR,RES,PARSE,DAC}-NN", r[0])
 		}
 		seen[r[0]]++
 		if r[1] == "" || r[2] == "" || r[3] == "" {
@@ -340,4 +343,135 @@ func uniqueMatches(re *regexp.Regexp, s string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// conformanceInPlaceUnits reads the list of shipped files that carry their own specs out of
+// scripts/run-proofs.sh. They are listed, not discovered, because a file belongs to the proof when its
+// specs do; this test is what makes that choice safe in both directions.
+func conformanceInPlaceUnits(t *testing.T) []string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("scripts", "run-proofs.sh"))
+	if err != nil {
+		t.Fatalf("reading the proof runner: %v", err)
+	}
+	block := ""
+	if start := strings.Index(string(data), "INPLACE_UNITS=("); start >= 0 {
+		rest := string(data)[start:]
+		if end := strings.Index(rest, "\n)"); end >= 0 {
+			block = rest[:end]
+		}
+	}
+	if block == "" {
+		t.Fatal("scripts/run-proofs.sh no longer has an INPLACE_UNITS list; this test has to be told where the list lives")
+	}
+	var units []string
+	for _, m := range regexp.MustCompile(`"\$REPO_ROOT/([^"]+)"`).FindAllStringSubmatch(block, -1) {
+		units = append(units, m[1])
+	}
+	sort.Strings(units)
+	return units
+}
+
+// TestConformanceEveryInPlaceUnitIsAnnotated is the guard against the failure this programme was closest
+// to repeating: a shipped file listed in INPLACE_UNITS, `make proof` reporting OK for it, and the ledger
+// counting that as a proof of a requirement -- while the file contained no annotation at all. Gobra is
+// happy to verify a package that specifies nothing; the verdict is then about nothing, and nothing in the
+// output says so.
+//
+// It checks the other direction too. A file whose specs are no longer run is worse than a file with no
+// specs, because the specs still read like a contract and still get edited, and the day they drift from
+// the code nobody is told.
+func TestConformanceEveryInPlaceUnitIsAnnotated(t *testing.T) {
+	units := conformanceInPlaceUnits(t)
+
+	annotated := map[string]int{}
+	for _, path := range conformanceRepoFiles(t) {
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		n := 0
+		for _, line := range strings.Split(string(data), "\n") {
+			switch {
+			case strings.HasPrefix(line, "// @ ensures"),
+				strings.HasPrefix(line, "// @ requires"),
+				strings.HasPrefix(line, "// @ pure"),
+				strings.HasPrefix(line, "// @ invariant"):
+				n++
+			}
+		}
+		if n > 0 {
+			annotated[path] = n
+		}
+	}
+
+	for _, unit := range units {
+		n, ok := annotated[unit]
+		if !ok {
+			t.Errorf("%s is listed as a proof unit and carries no @-annotation: `make proof` says OK about it, and that says nothing", unit)
+			continue
+		}
+		if n < 2 {
+			t.Errorf("%s carries a single annotation; a contract one clause deep proves almost nothing and reads like more", unit)
+		}
+	}
+
+	for path, n := range annotated {
+		found := false
+		for _, unit := range units {
+			if unit == path {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("%s carries %d annotations but is not in INPLACE_UNITS: its specs are never checked and will silently rot", path, n)
+		}
+	}
+
+	t.Logf("%d shipped files carry their own specs, every one of them checked", len(units))
+}
+
+// TestConformanceProvedOnShippedRowsNameAnnotatedFiles goes one step further and ties the *claim* to the
+// annotation: a row whose status says the decision is proved on the code that ships has to name a file
+// that actually carries specs. Without this, the ledger can be true about a proof and about a file and
+// still be false about the two being the same thing.
+func TestConformanceProvedOnShippedRowsNameAnnotatedFiles(t *testing.T) {
+	units := map[string]bool{}
+	for _, u := range conformanceInPlaceUnits(t) {
+		units[u] = true
+	}
+
+	checked := 0
+	for _, row := range conformanceRows(t, conformanceCatalogue) {
+		if len(row) < 4 {
+			continue
+		}
+		id, code, status := row[0], row[2], row[3]
+		if !strings.Contains(status, "proved:shipped") {
+			continue
+		}
+		checked++
+		ok := false
+		for _, m := range regexp.MustCompile("`([^`]+\\.go)`").FindAllStringSubmatch(code, -1) {
+			if units[m[1]] {
+				ok = true
+			}
+			for u := range units {
+				if filepath.Base(u) == filepath.Base(m[1]) {
+					ok = true
+				}
+			}
+		}
+		if !ok {
+			t.Errorf("%s claims `proved:shipped` but names no file whose specs are checked by make proof", id)
+		}
+	}
+	if checked < 5 {
+		t.Errorf("only %d rows claim a proof on shipped code; either the programme shrank or the status marker changed", checked)
+	}
+	t.Logf("%d rows claim a proof on shipped code, each naming a file make proof verifies", checked)
 }

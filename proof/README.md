@@ -12,26 +12,28 @@ make proof                # Gobra checks every proof obligation in proof/*/model
 
 ## State of the programme
 
-Nineteen verified files — ten model units (`proof/*/model.gobra`) plus nine shipped ones carrying
+Twenty verified files — nine model units (`proof/*/model.gobra`) plus eleven shipped ones carrying
 their own specs, [`../glob.go`](../glob.go), [`../identity_checks.go`](../identity_checks.go),
 [`../source_check.go`](../source_check.go),
 [`../server_auth/throttle_rules.go`](../server_auth/throttle_rules.go),
 [`../server_auth/truncate.go`](../server_auth/truncate.go),
 [`../util/equalfold.go`](../util/equalfold.go),
 [`../util/unix_util/account_rules.go`](../util/unix_util/account_rules.go),
-[`../util/varint.go`](../util/varint.go) and
-[`../version_rules.go`](../version_rules.go) — and **171 runs** of
-`TestConformance...` tests: 158 in the default build plus a second run of `./util/unix_util/`
+[`../util/varint.go`](../util/varint.go),
+[`../version_rules.go`](../version_rules.go),
+[`../cmd/host_trust_rules.go`](../cmd/host_trust_rules.go) and
+[`../sftp/dac_rules.go`](../sftp/dac_rules.go) — and **198 runs** of
+`TestConformance...` tests: 185 in the default build plus a second run of `./util/unix_util/`
 (13 more) against the other password implementation, in the packages of the code they check, and a
-catalogue of 42 requirements
+catalogue of 46 requirements
 ([`SECURITY_REQUIREMENTS.md`](SECURITY_REQUIREMENTS.md)) whose status column is the only place a
 claim about coverage is written:
 
 | token in the row | rows | what it means |
 |---|---|---|
 | `proved:model` + conformant | 16 | a Gobra unit proves the decision over all modelled inputs, and a test says the modelled function still behaves that way |
-| `proved:shipped` + conformant | 9 | the same, except the proof is of the function the server calls: SR-PERM-04 and SR-PERM-05 in `identity_checks.go`, SR-PERM-06 in `source_check.go`, SR-AUTH-08 in `server_auth/throttle_rules.go`, SR-TR-04 in `server_auth/truncate.go`, SR-PARSE-03 in `util/varint.go`, SR-PARSE-05 in `util/equalfold.go`, SR-TR-03 in `version_rules.go`, and SR-TR-06 in `cmd/host_trust_rules.go` -- the client's trust verdict, which was prose inside `setupQUICConnection` until it was split out. The model of each is a second opinion now, not the argument |
-| `conformant` | 10 | checked in Go alone, because the prover cannot hold the shape of the whole claim (the recursive glob: findings **F5**, **F6**) — `glob.go` does have a proved *part* of one of them, termination, in the shipped file — and rows where the claim is about strings, tokens or the filesystem rather than arithmetic, so enumeration is the honest control: SR-TR-05, the name a server is trusted under (**F13**), and SR-AUTH-12, the public-key credential, whose verifier had no test at all before it (**F15**); and SR-AUTH-13, the password comparison, where what is pinned is a two-line guard whose deletion would let any password open a locked account (**F16**); and SR-AUTH-14, the identity files themselves, whose three unasked questions -- a 64 KiB line ceiling that deletes the rest of the file without an error, an account with no home reading keys out of the server's working directory, and nobody asking who may write the file -- are **F17**; SR-PARSE-06, the SFTP frames, where the decode side survived 100% of truncations and single-byte mutations and the encode side turns out to announce a string over 64 KiB with a wrapped length (**F18**); and SR-TR-05 again, where the sweep now also shows the identity string is injective on hostnames and address literals and *not* injective on a host field carrying a slash or a colon (**F19**) |
+| `proved:shipped` + conformant | 12 | the same, except the proof is of the function the server calls: SR-PERM-04 and SR-PERM-05 in `identity_checks.go`, SR-PERM-06 in `source_check.go`, SR-AUTH-08 in `server_auth/throttle_rules.go`, SR-TR-04 in `server_auth/truncate.go`, SR-PARSE-03 in `util/varint.go`, SR-PARSE-05 in `util/equalfold.go`, SR-TR-03 in `version_rules.go`, and SR-TR-06 in `cmd/host_trust_rules.go` -- the client's trust verdict, which was prose inside `setupQUICConnection` until it was split out; SR-DAC-01, SR-DAC-02 and SR-DAC-03 in `sftp/dac_rules.go`, the file-access decision the SFTP request loop makes with its own privileges. The model of each is a second opinion now, not the argument |
+| `conformant` | 11 | checked in Go alone, because the prover cannot hold the shape of the whole claim (the recursive glob: findings **F5**, **F6**) — `glob.go` does have a proved *part* of one of them, termination, in the shipped file — and rows where the claim is about strings, tokens or the filesystem rather than arithmetic, so enumeration is the honest control: SR-TR-05, the name a server is trusted under (**F13**), and SR-AUTH-12, the public-key credential, whose verifier had no test at all before it (**F15**); and SR-AUTH-13, the password comparison, where what is pinned is a two-line guard whose deletion would let any password open a locked account (**F16**); and SR-AUTH-14, the identity files themselves, whose three unasked questions -- a 64 KiB line ceiling that deletes the rest of the file without an error, an account with no home reading keys out of the server's working directory, and nobody asking who may write the file -- are **F17**; SR-PARSE-06, the SFTP frames, where the decode side survived 100% of truncations and single-byte mutations and the encode side turns out to announce a string over 64 KiB with a wrapped length (**F18**); and SR-TR-05 again, where the sweep now also shows the identity string is injective on hostnames and address literals and *not* injective on a host field carrying a slash or a colon (**F19**); and SR-DAC-04, the claim that the permission bits above the nine are invisible to the SFTP access decision, which is exhausted over 917 504 modes because Gobra v26.09 cannot compare two decisions whose arguments differ in a bit it does not read (**F21**) |
 | `partial` | 3 | the decision function is proved, the surrounding machinery is a premise named in the row. The strongest of the three is SR-AUTH-11, the account policy gate, whose decisions are verified in the shipped `util/unix_util/account_rules.go`; what keeps it `partial` is that the fields come from `shadow(5)`, the day from a clock, and the two `nologin(8)` questions from the filesystem |
 | `out-of-scope` | 2 | QUIC conversation state; integration and unit tests are the control |
 | `open` | 1 | SR-PERM-11 / finding **F2**: a decision the maintainer owes, not a proof that is missing |
@@ -74,13 +76,20 @@ section. The first thing it caught was **F10** -- named in three places, describ
 never written up -- and then two conformance files that no row cited, which is the same drift in the other
 direction.
 
-Three further findings are behaviour
+Four further findings are behaviour
 documented rather than changed, each needing a product decision: **F2** above, **F3**
 (`-force-command-mismatch-exit=0` makes a forced command advisory, which the documentation does not
-say), and **F4** (modelling drift, mitigated mechanically and the argument for Phase 3).
+say), **F4** (modelling drift, mitigated mechanically and the argument for Phase 3), and **F20** --
+the SFTP server's file permissions are an emulation of `access(2)` that grants uid 0 nothing and sees
+no ACL, so it is stricter than the kernel on both counts and that is a policy to choose rather than a
+fact to inherit.
 
 The boundary of what this approach can prove is drawn by experiment and not asserted: recursion over
-strings is opaque in Gobra v26.09 (Gotchas below), crypto and `go-jose` discovery are premises, and
+strings is opaque in Gobra v26.09 (Gotchas below), a bit a spec does not mention cannot be proved
+irrelevant -- the claim that the file-type and setuid bits of `st.Mode` cannot change an SFTP access
+decision timed out at 60s and at 600s in every encoding tried, so the nine-bit core is proved and the
+irrelevance of the rest is enumerated over 917 504 modes (**F21**) -- crypto and `go-jose` discovery
+are premises, and
 nothing here says that a Go compiler, the OS, or `net` behave as assumed. Where a premise is
 load-bearing the catalogue row names it. Some of them are then checked by a named test — base64
 distinguishing conversation ids, what `net.ParseCIDR` decides, that a rejected spelling is refused —
@@ -114,7 +123,7 @@ green `go test ./...` is easy to read as more than it is.
 
 ## Verification in place: the specs live in the shipped file
 
-Ten files in the proof are not models. [`../glob.go`](../glob.go) is the `from=` matcher the server
+Eleven files in the proof are not models. [`../glob.go`](../glob.go) is the `from=` matcher the server
 calls, moved out of `identity_options.go` and annotated where it ships.
 [`../identity_checks.go`](../identity_checks.go) is the channel-request and channel-open gate -- the
 code that enforces `no-pty`, `restrict`, `no-port-forwarding` and a forced command -- separated from
@@ -149,11 +158,34 @@ reasons on its refusals so that the reporting cannot drift from the decision. It
 client where a wrong answer is a session with a stranger, and its ten inputs are enumerated rather than
 sampled -- which is how `asked` came to be tested before `userSaysYes`: the first draft of the extracted
 function trusted an answer nobody had asked for, and the table's formulas, written before the code was
-adjusted, said so. The prose it replaced could only have had that right by accident. `make proof` verifies all ten: the code that runs
+adjusted, said so. The prose it replaced could only have had that right by accident.
+[`../sftp/dac_rules.go`](../sftp/dac_rules.go) is the SFTP server's file-access decision, which is the
+only place in the tree where the process touches a path with its own privileges: which of the three
+Unix triads applies (owner, then group, then other), and the rule that an operation is granted only if
+the triad carries *every* bit it asked for. `checkStatPermission` now computes the triad and delegates
+the arithmetic here, so the code `os.Open` stands behind is the code with the contract. Its clauses are
+conjunctions over bits rather than case analyses over modes -- a grant is the product of its bits,
+asking for more can never help, and nothing about a request that would have been granted on its own is
+a reason to refuse a smaller one -- which is the shape of the argument that survives someone adding
+`sshFxFSetstat` to the open gate next week. What the emulation is *not* is also in the row: it gives
+uid 0 no bypass, so a root server refuses some accesses the kernel would have granted, and that
+divergence is written down (**F20**). `make proof` verifies all eleven: the code that runs
 in production is the code the proof talks about, with no transcription step in between. That is
 roadmap Phase 3, and what decides whether a file can join it is **what the prover can read**, not
 difficulty:
 
+* Being listed is not the same as being verified, and the difference was found the hard way:
+  `cmd/host_trust_rules.go` sat in `INPLACE_UNITS` for two commits, `make proof` reported OK for the
+  package, and the ledger counted that as two proofs of shipped code -- while the file contained not
+  one annotation, because Gobra is content to verify a package that specifies nothing and its verdict
+  is then about nothing (**F22**). `TestConformanceEveryInPlaceUnitIsAnnotated` now reads `INPLACE_UNITS` out of
+  `scripts/run-proofs.sh` and fails on a listed file with fewer than two `@`-clauses, and on a file
+  whose clauses are not in the list, which is the same drift in the other direction: specs that are no
+  longer run still read like contracts and get edited until they lie.
+  `TestConformanceProvedOnShippedRowsNameAnnotatedFiles` closes the last gap by tying the *row* to the
+  file -- a row that says `proved:shipped` has to name a file whose specs are checked -- and it failed
+  the day it was written, on SR-TR-03, whose row pointed at `server_auth/auth.go` while the proof lived
+  in `version_rules.go`.
 * Gobra v26.09 ships stubs with real specs for `strings`, `net`, `strconv`, `errors`, `time`, `sync`,
   `bytes` and `encoding` (`.proof-tools/src/gobra/src/main/resources/stubs/`), so a file that uses
   only those is readable — which is why `net.ParseCIDR` and the `strings` helpers in this server are

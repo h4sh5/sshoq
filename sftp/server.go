@@ -623,33 +623,39 @@ func (s *ServerSession) checkFDPermission(fd int, required int) error {
 	return s.checkStatPermission(st.Uid, st.Gid, uint32(st.Mode), required)
 }
 
+// checkStatPermission applies the session's credentials to a file the server is about to
+// touch with its own. It gathers the three facts - does the session own this file, is it in
+// the group which owns this file, what does the operation need - and hands them to the
+// verified rule in dac_rules.go; the refusal is os.ErrPermission in every case, as
+// access(2) returns, without distinguishing which bit was missing.
+//
+// The credentials are the session's (s.user), not the server process's, because it is the
+// session which asked for the operation. Where they differ from what the process actually
+// holds - a server running as root - the emulation is the stricter of the two, which is
+// proved as nobodyIsSuperuserHere and contradicted nowhere: it can refuse an access the
+// kernel would have granted, never grant one it would have refused.
 func (s *ServerSession) checkStatPermission(uid, gid, mode uint32, required int) error {
 	sessionUID := uint32(os.Getuid())
 	if s.user != nil {
 		sessionUID = uint32(s.user.Uid)
 	}
 
-	perm := mode & 0o7
 	sessionGroups := s.groups
 	if len(sessionGroups) == 0 {
 		sessionGroups = buildGroupSet(s.user)
 		s.groups = sessionGroups
 	}
 
-	switch {
-	case uid == sessionUID:
-		perm = (mode >> 6) & 0o7
-	case sessionGroups[gid]:
-		perm = (mode >> 3) & 0o7
-	}
-
-	if required&accessR != 0 && perm&0o4 == 0 {
-		return os.ErrPermission
-	}
-	if required&accessW != 0 && perm&0o2 == 0 {
-		return os.ErrPermission
-	}
-	if required&accessX != 0 && perm&0o1 == 0 {
+	// The decision itself - which triad of the mode applies, and whether it carries what
+	// was asked for - is the verified rule in dac_rules.go. Two things about this call are
+	// worth keeping in mind when changing it. The group membership is looked up here rather
+	// than inside the rule, because the rule takes the fact and not the map: the rule is
+	// then about numbers, and nothing else, which is what makes it provable. And the mode is
+	// masked to its nine permission bits before it is handed over, which is what makes the
+	// argument legal on a platform where an int is 32 bits and a mode with the file-type bits
+	// set would arrive negative; the rule proves the mask changes nothing, so the two
+	// conventions cannot disagree.
+	if !accessIsAllowed(int(mode&dacModePerm), uid == sessionUID, sessionGroups[gid], required) {
 		return os.ErrPermission
 	}
 

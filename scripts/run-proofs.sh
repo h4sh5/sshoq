@@ -53,6 +53,7 @@ source "$TOOLS_DIR/env.sh"
 INPLACE_UNITS=(
 	"$REPO_ROOT/cmd/host_trust_rules.go"
 	"$REPO_ROOT/glob.go"
+	"$REPO_ROOT/sftp/dac_rules.go"
 	"$REPO_ROOT/identity_checks.go"
 	"$REPO_ROOT/source_check.go"
 	"$REPO_ROOT/server_auth/throttle_rules.go"
