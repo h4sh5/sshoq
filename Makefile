@@ -22,6 +22,10 @@ TESTUSER_ECDSA_PRIVKEY ?= $(SSH3_INTEGRATION_TESTS_KEY_DIR)/testuser_id_ecdsa
 TESTUSER_USERNAME ?= ssh3-testuser
 ECDSATESTUSER_USERNAME ?= ssh3-ecdsa-testuser
 
+# `proof` is also a directory, so without this `make proof` silently does nothing.
+.PHONY: default build clean lint test integration-tests integration-tests-setup \
+        proof-setup proof proof-conformance proof-all install
+
 default: build
 
 clean:
@@ -58,6 +62,39 @@ integration-tests:
 #   sudo make integration-tests-setup
 integration-tests-setup:
 	./setup_integration_tests.sh
+
+# -----------------------------------------------------------------------------
+# Formal verification (Gobra) -- see proof/SECURITY_REQUIREMENTS.md
+#
+# `make proof` runs Gobra over the annotated models in proof/ and fails if any
+# proof obligation cannot be discharged. `make proof-conformance` checks that the
+# models still behave like the Go functions they model: the proofs are only as
+# meaningful as that correspondence, so both are run in CI
+# (.github/workflows/proof.yml).
+# -----------------------------------------------------------------------------
+
+# Installs JDK 17..21, sbt, Z3 and a pinned Gobra build into .proof-tools.
+# Idempotent: the second run only re-checks the pins.
+proof-setup:
+	./scripts/setup-gobra.sh
+
+# The proofs proper. GOBRA_SETUP=1 installs the toolchain on the fly, which is
+# what the CI job does when its cache missed.
+proof:
+	./scripts/run-proofs.sh
+
+# Model/implementation conformance: the models in proof/ must agree with the functions the
+# server actually runs. Those tests sit in the package of the code they check, and every one of
+# them is named TestConformance..., which is how this target selects exactly the correspondence
+# checks: the root package holds the identity-option gates and the known_hosts store, server_auth
+# the truncation and the Bearer header parser, auth/oidc the replay store. Without them the
+# proofs are only as meaningful as the assumption that each model still describes the Go
+# function it models.
+proof-conformance:
+	$(TEST_OPTS) go test . ./cmd/ ./server_auth/ ./auth/oidc/ ./util/ ./util/unix_util/ ./sftp/ ./internal/ ./auth/plugins/pubkey_authentication/server/ -run 'TestConformance' -count=1 -v
+	$(TEST_OPTS) go test -tags disable_password_auth ./util/unix_util/ -run 'TestConformance' -count=1 -v
+
+proof-all: proof-setup proof-conformance proof
 
 install:
 	$(GO_OPTS) go install $(BUILDFLAGS) ./cmd/sshoq

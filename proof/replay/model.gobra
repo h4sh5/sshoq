@@ -1,0 +1,227 @@
+// SR-AUTH-07 and SR-RES-03: an accepted OpenID Connect token is accepted once, and the
+// memory the remembering costs is bounded by the store's own configuration and not by the
+// traffic it is fed.
+//
+// This models auth/oidc/replay.go. Two transcription choices, neither of which the statements
+// below is sensitive to:
+//
+//   * the store maps issuer+"|"+id to the time until which the token is remembered. The
+//     implementation asks that clock exactly two questions - is the remembered entry still
+//     live, and does this token carry no exp claim - so the model takes the two answers as
+//     booleans. The sweep of expired entries then coincides with the sweep which makes room,
+//     which is how the code itself orders them.
+//   * the map is modelled as a ghost sequence of token keys in the order they were first
+//     accepted. That is the order the implementation already keeps in orderUsed to decide what
+//     to forget first, and it lets the memory bound be stated as a length. Sequences are pure
+//     values, so none of this needs permissions; Gobra 26.09 has no delete builtin, which is
+//     the practical reason a map would have hurt.
+//
+// What is proved - in the contracts below, which are therefore universal over every store
+// state and every token, and in run, which is every trace of tokens:
+//   * a token with no identifier is never accepted: there is nothing to deduplicate on, so
+//     accepting it would be accepting the replay of a token of unknown identity;
+//   * a token is refused exactly when it is remembered and still live - first use accepted,
+//     second use a replay - and a refusal leaves the store exactly as it was, so replay
+//     attempts can neither evict anything nor make the server forget what it knows;
+//   * the store never exceeds its capacity, whatever sequence of tokens is presented to it;
+//   * a new token with room is simply added; in a full store it replaces the token accepted
+//     first, and nothing else changes;
+//   * a capacity below one is normalised to one, which still catches the replay of the
+//     immediately previous token: the bound cannot degenerate into an accept-everything store.
+package replay
+
+// mem is set membership in the remembered sequence. It is defined by peeling the last
+// element, which is the end the store grows at; the ensures says the definition agrees with
+// the obvious set-membership reading.
+ghost
+decreases len(s)
+ensures res == exists j int :: 0 <= j && j < len(s) && s[j] == key
+pure func mem(ghost s seq[string], ghost key string) (res bool) {
+	return len(s) > 0 && (s[len(s) - 1] == key || mem(s[0:len(s) - 1], key))
+}
+
+// drop is the room-making step: the token accepted first is given up, which is also the one
+// remembered for the shortest remaining time.
+ghost
+requires 1 <= len(s)
+decreases
+ensures len(res) == len(s) - 1
+ensures forall i int :: 0 <= i && i < len(res) ==> res[i] == s[i+1]
+pure func drop(ghost s seq[string]) (res seq[string]) {
+	return s[1:len(s)]
+}
+
+// newCapacity is NewAcceptedTokenStore's normalisation: a store configured to hold fewer than
+// one token still holds one, so it stays a store instead of becoming a no-op.
+ensures res == (max < 1 ? 1 : max)
+ensures res >= 1
+func newCapacity(max int) (res int) {
+	if max < 1 {
+		return 1
+	}
+	return max
+}
+
+// verdict is what Accept returns for one token. rememberedLive stands for "the entry is in the
+// map and the time it is remembered until is still in the future", which is the condition the
+// implementation refuses on; expiryIsZero stands for a token with no exp claim, which the
+// implementation treats as "remembered unconditionally" and so never consults the clock for.
+ghost
+decreases
+ensures key == "" ==> !res
+ensures key != "" ==> res == !(mem(s, key) && (expiryIsZero || rememberedLive))
+pure func verdict(ghost s seq[string], ghost key string, expiryIsZero bool, rememberedLive bool) (res bool) {
+	return key != "" && !(mem(s, key) && (expiryIsZero || rememberedLive))
+}
+
+// insert records a token which is not yet remembered: added when there is room, otherwise the
+// first token is given up and this one takes its place at the end.
+ghost
+requires capacity >= 1
+requires len(s) <= capacity
+requires !mem(s, key)
+decreases
+ensures len(res) <= capacity
+ensures len(res) == (len(s) < capacity ? len(s) + 1 : len(s))
+ensures mem(res, key)
+ensures len(s) < capacity ==> res == s ++ seq[string]{key}
+ensures len(s) >= capacity ==>
+	len(s) > 0 && res == drop(s) ++ seq[string]{key} && res[len(res) - 1] == key
+ensures 1 < len(s) && len(s) >= capacity ==> res[0] == s[1]
+pure func insert(ghost s seq[string], ghost key string, capacity int) (res seq[string]) {
+	return len(s) < capacity ? s ++ seq[string]{key} : drop(s) ++ seq[string]{key}
+}
+
+// storeAfter is the state Accept moves to for one token: unchanged when the token is refused,
+// and unchanged as a set when it was already remembered and its entry is merely overwritten
+// (the order list keeps its single name for it); otherwise the token is inserted.
+ghost
+requires capacity >= 1
+requires len(s) <= capacity
+decreases
+ensures len(res) <= capacity
+ensures len(res) <= len(s) + 1
+// refused: inert. Nothing recorded and nothing evicted, so a replay attempt cannot make the
+// server forget what it already knows, nor grow the table
+ensures !verdict(s, key, expiryIsZero, rememberedLive) ==> res == s
+// remembered but no longer live: re-accepted, entry overwritten, set unchanged
+ensures verdict(s, key, expiryIsZero, rememberedLive) && mem(s, key) ==> res == s
+// new token, with room: the store plus this token, and nothing else
+ensures verdict(s, key, expiryIsZero, rememberedLive) && !mem(s, key) && len(s) < capacity ==>
+	len(res) == len(s) + 1 && res == s ++ seq[string]{key}
+// new token, full: the first one goes, this one comes, nothing else changes
+ensures verdict(s, key, expiryIsZero, rememberedLive) && !mem(s, key) && len(s) >= capacity ==>
+	len(s) > 0 && len(res) == len(s) && res[len(res) - 1] == key
+ensures verdict(s, key, expiryIsZero, rememberedLive) && !mem(s, key) && 1 < len(s) && len(s) >= capacity ==>
+	res[0] == s[1]
+pure func storeAfter(ghost s seq[string], ghost key string, capacity int, expiryIsZero bool, rememberedLive bool) (
+	res seq[string]) {
+	return !verdict(s, key, expiryIsZero, rememberedLive) || mem(s, key) ? s : insert(s, key, capacity)
+}
+
+// run is the store after a whole trace of tokens was presented, each one a credential the
+// server had not seen. Its contract is the claim for every trace of every length: the memory
+// is bounded by the configuration and by what was presented, and by nothing else.
+ghost
+requires capacity >= 1
+decreases len(trace)
+ensures len(res) <= capacity
+ensures len(res) <= len(trace)
+ensures len(trace) == 0 ==> len(res) == 0
+pure func run(ghost trace seq[string], capacity int) (res seq[string]) {
+	return len(trace) == 0 ? seq[string]{} :
+		storeAfter(run(trace[0:len(trace) - 1], capacity), trace[len(trace) - 1], capacity, false, false)
+}
+
+// firstUseAcceptedReplayRefused is the property the store exists for, played out: the same live
+// token, presented twice, is accepted once, and the second presentation changes nothing.
+func firstUseAcceptedReplayRefused() {
+	ghost var empty seq[string] = seq[string]{}
+	assert verdict(empty, "https://idp/|token-1", false, false)
+	ghost var afterFirst seq[string] = storeAfter(empty, "https://idp/|token-1", 4, false, false)
+	assert mem(afterFirst, "https://idp/|token-1")
+	assert !verdict(afterFirst, "https://idp/|token-1", false, true)
+	ghost var afterSecond seq[string] = storeAfter(afterFirst, "https://idp/|token-1", 4, false, true)
+	assert afterSecond == afterFirst
+	assert len(afterSecond) == 1
+}
+
+// replayWithoutExpiryClaimIsRefusedOnSight: a token with no exp claim is refused whenever it is
+// in the store, whatever the clock says - the implementation does not consult it.
+func replayWithoutExpiryClaimIsRefusedOnSight() {
+	ghost var s seq[string] = seq[string]{"https://idp/|no-exp"}
+	assert !verdict(s, "https://idp/|no-exp", true, false)
+}
+
+// noIdentifierIsNeverAccepted, in every state: with nothing to deduplicate on, accepting a
+// token would mean accepting a replay of a token whose identity is unknown. The universal form
+// is the first clause of verdict's contract; here it is the same claim seen from a store which
+// is full of unrelated tokens.
+func noIdentifierIsNeverAccepted() {
+	ghost var s seq[string] = seq[string]{"a", "b", "c", "d"}
+	assert !verdict(s, "", false, false)
+	assert !verdict(s, "", true, true)
+	assert storeAfter(s, "", 4, true, true) == s
+}
+
+// replayAttemptsCannotEmptyTheStore: a client which only replays - the same token over and over
+// - cannot make the server forget what it accepted, nor grow the table. In the implementation
+// the refusal happens before the eviction step, and this is what pins that down.
+func replayAttemptsCannotEmptyTheStore() {
+	ghost var empty seq[string] = seq[string]{}
+	ghost var added seq[string] = storeAfter(empty, "a", 2, false, false)
+	assert len(added) == 1
+	assert !verdict(added, "a", false, true)
+	ghost var replayed seq[string] = storeAfter(added, "a", 2, false, true)
+	assert replayed == added
+	assert mem(replayed, "a")
+}
+
+// oneEntryStoreStillCatchesThePreviousReplay: the normalisation is not a way to turn replay
+// protection off. A store configured with 0 holds one token, and that one token is exactly the
+// one just accepted.
+func oneEntryStoreStillCatchesThePreviousReplay() {
+	c := newCapacity(0)
+	assert c == 1
+	ghost var empty seq[string] = seq[string]{}
+	ghost var afterFirst seq[string] = storeAfter(empty, "https://idp/|only", c, false, false)
+	assert len(afterFirst) == 1
+	assert !verdict(afterFirst, "https://idp/|only", false, true)
+	ghost var afterSecond seq[string] = storeAfter(afterFirst, "https://idp/|only", c, false, true)
+	assert len(afterSecond) == 1 && afterSecond == afterFirst
+}
+
+// atCapacityTheOldestIsTheOneForgotten: making room gives up the token accepted first and adds
+// nothing besides the new one. The horizon this implies - a token becomes replayable again once
+// it has been forgotten - is the price of the bound, and it is why an entry is kept until the
+// token's expiry: what is forgotten is what can no longer be presented as valid anyway.
+func atCapacityTheOldestIsTheOneForgotten() {
+	ghost var full seq[string] = seq[string]{"oldest", "newer"}
+	ghost var after seq[string] = storeAfter(full, "incoming", 2, false, false)
+	assert len(after) == 2
+	assert after[0] == "newer"
+	assert after[1] == "incoming"
+	assert !mem(seq[string]{"newer", "incoming"}, "oldest")
+}
+
+// theBoundForATraceWhichNeverRunsOut: run over a trace much longer than the capacity leaves the
+// store exactly at the capacity, holding the most recent tokens - which is the whole point of
+// evicting in acceptance order.
+func theBoundForATraceWhichNeverRunsOut() {
+	ghost var trace seq[string] = seq[string]{"t1", "t2", "t3", "t4", "t5", "t6"}
+	ghost var s seq[string] = run(trace, 2)
+	// the general bound, applied to a trace three times the capacity
+	assert len(s) <= 2
+	// and the same store built step by step, to see what it holds: the two most recent tokens,
+	// with the earlier four forgotten
+	ghost var s1 seq[string] = storeAfter(seq[string]{}, "t1", 2, false, false)
+	ghost var s2 seq[string] = storeAfter(s1, "t2", 2, false, false)
+	ghost var s3 seq[string] = storeAfter(s2, "t3", 2, false, false)
+	ghost var s4 seq[string] = storeAfter(s3, "t4", 2, false, false)
+	ghost var s5 seq[string] = storeAfter(s4, "t5", 2, false, false)
+	ghost var s6 seq[string] = storeAfter(s5, "t6", 2, false, false)
+	assert len(s1) == 1 && len(s2) == 2 && len(s3) == 2 && len(s6) == 2
+	assert s3[0] == "t2" && s3[1] == "t3"
+	assert s6[0] == "t5" && s6[1] == "t6"
+	assert !mem(s6, "t4") && mem(s6, "t6")
+}

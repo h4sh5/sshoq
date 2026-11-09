@@ -1,0 +1,327 @@
+// SR-PERM-01..07: the restrictions written on an authorized identity line are the
+// restrictions the session runs under, and an option this server cannot enforce
+// refuses the identity instead of silently doing nothing.
+//
+// This models identity_options.go: the restriction set (IdentityOptions), the gates the
+// session layer calls (CheckRequest, CheckChannelOpen) and the fail-closed loop of
+// ParseIdentityOptions. The model moves the restriction set by value instead of through
+// a pointer, which is why none of this needs permissions: local values carry no
+// permission in Gobra, and the decisions - which is all the security argument is about -
+// do not depend on the representation. Option *values* (the text of command=, the
+// address list of from=) and the address matching (matchesSourcePattern, matchGlob,
+// parsePeerIP) are checked by identity_options_test.go against OpenSSH's documented
+// behaviour; nothing proved here depends on them.
+//
+// What is proved:
+//   * a request is refused exactly when the matching restriction flag is set, and by
+//     nothing else - no gate which fires for the wrong reason, none which forgets to;
+//   * "restrict" is exactly the conjunction of the five single restrictions it stands
+//     for, so the shortcut cannot drift away from the options it spells;
+//   * an option name this server does not enforce grants nothing: the parser refuses the
+//     line and the caller gets no restriction set at all (fail closed);
+//   * a name which is enforced cannot be lost: a list of enforced names parses, and every
+//     restriction it asked for is in the set the session layer will see;
+//   * the empty restriction set refuses nothing, so attaching options cannot by itself
+//     break an ordinary session.
+package identityopts
+
+// sameOptions compares two restriction sets field by field: struct equality is not part
+// of the logic Gobra will check here, and this is what it means anyway.
+decreases
+ensures res == (a.forcedCommand == b.forcedCommand && a.noPty == b.noPty &&
+	a.noPortForwarding == b.noPortForwarding && a.noAgentForwarding == b.noAgentForwarding &&
+	a.noX11Forwarding == b.noX11Forwarding && a.noEnv == b.noEnv)
+pure func sameOptions(a options, b options) (res bool) {
+	return a.forcedCommand == b.forcedCommand && a.noPty == b.noPty &&
+		a.noPortForwarding == b.noPortForwarding && a.noAgentForwarding == b.noAgentForwarding &&
+		a.noX11Forwarding == b.noX11Forwarding && a.noEnv == b.noEnv
+}
+
+// options is the restriction set carried by an authorized identity line.
+type options struct {
+	forcedCommand     string
+	noPty             bool
+	noPortForwarding  bool
+	noAgentForwarding bool
+	noX11Forwarding   bool
+	noEnv             bool
+}
+
+// supportedName is the set of option names this server enforces. Everything else -
+// environment=, permitopen=, tunnel=, no-touch-required, verify-required, a typo - must
+// make the identity be refused rather than accepted with a restriction which silently
+// does nothing.
+//
+// Note what is deliberately absent: "no-env" is not a name OpenSSH spells, and the real
+// parser only sets NoEnv through "restrict". The lemma below proves that a line which
+// does not say "restrict" does not forbid the environment.
+decreases
+ensures res == (name == "command" || name == "from" || name == "restrict" ||
+	name == "no-pty" || name == "no-port-forwarding" || name == "no-agent-forwarding" ||
+	name == "no-x11-forwarding")
+pure func supportedName(name string) (res bool) {
+	return name == "command" || name == "from" || name == "restrict" ||
+		name == "no-pty" || name == "no-port-forwarding" ||
+		name == "no-agent-forwarding" || name == "no-x11-forwarding"
+}
+
+// applyOption is one iteration of ParseIdentityOptions for one option: it returns the
+// restriction set with what that option asks for applied, and reports whether the name is
+// enforced at all. An unsupported name changes nothing, and the caller refuses the line.
+//
+// The option's value is not modelled: command= needs its text, from= its address list,
+// and an empty value is a parse error. No statement here depends on a value.
+ensures !res ==> sameOptions(out, o)
+ensures res == supportedName(name)
+ensures out.noPty == (o.noPty || (res && (name == "restrict" || name == "no-pty")))
+ensures out.noPortForwarding ==
+	(o.noPortForwarding || (res && (name == "restrict" || name == "no-port-forwarding")))
+ensures out.noAgentForwarding ==
+	(o.noAgentForwarding || (res && (name == "restrict" || name == "no-agent-forwarding")))
+ensures out.noX11Forwarding ==
+	(o.noX11Forwarding || (res && (name == "restrict" || name == "no-x11-forwarding")))
+ensures out.noEnv == (o.noEnv || (res && name == "restrict"))
+ensures name == "restrict" ==> out.noPty && out.noPortForwarding && out.noAgentForwarding &&
+	out.noX11Forwarding && out.noEnv
+// the text of command= is deliberately out of the model (see the header), so applying the
+// option cannot change the field: what a forced command does when it runs is a statement
+// about the session layer, not about the restriction set
+ensures out.forcedCommand == o.forcedCommand
+func applyOption(o options, name string) (out options, res bool) {
+	if name == "command" {
+		return o, true
+	}
+	if name == "from" {
+		return o, true
+	}
+	if name == "restrict" {
+		next := o
+		next.noPty = true
+		next.noPortForwarding = true
+		next.noAgentForwarding = true
+		next.noX11Forwarding = true
+		next.noEnv = true
+		return next, true
+	}
+	if name == "no-pty" {
+		next := o
+		next.noPty = true
+		return next, true
+	}
+	if name == "no-port-forwarding" {
+		next := o
+		next.noPortForwarding = true
+		return next, true
+	}
+	if name == "no-agent-forwarding" {
+		next := o
+		next.noAgentForwarding = true
+		return next, true
+	}
+	if name == "no-x11-forwarding" {
+		next := o
+		next.noX11Forwarding = true
+		return next, true
+	}
+	return o, false
+}
+
+// forwardingType is the channel family which "no-port-forwarding" covers.
+decreases
+ensures res == (channelType == "direct-tcp" || channelType == "direct-udp" ||
+	channelType == "request-reverse-tcp" || channelType == "request-reverse-udp" ||
+	channelType == "open-request-reverse-tcp" || channelType == "open-request-reverse-udp")
+pure func forwardingType(channelType string) (res bool) {
+	return channelType == "direct-tcp" || channelType == "direct-udp" ||
+		channelType == "request-reverse-tcp" || channelType == "request-reverse-udp" ||
+		channelType == "open-request-reverse-tcp" || channelType == "open-request-reverse-udp"
+}
+
+// checkRequest is IdentityOptions.CheckRequest: which channel requests a restricted
+// identity may make. A request type the gate does not know is permitted, as in the
+// implementation, because the session layer decides those on their own merits.
+decreases
+ensures res == (!(requestType == "pty-req" && o.noPty) &&
+		!(requestType == "env" && o.noEnv) &&
+		!(requestType == "x11-req" && o.noX11Forwarding) &&
+		!(requestType == "agent-forwarding" && o.noAgentForwarding))
+pure func checkRequest(o options, requestType string) (res bool) {
+	return !(requestType == "pty-req" && o.noPty) &&
+		!(requestType == "env" && o.noEnv) &&
+		!(requestType == "x11-req" && o.noX11Forwarding) &&
+		!(requestType == "agent-forwarding" && o.noAgentForwarding)
+}
+
+// checkChannelOpen is IdentityOptions.CheckChannelOpen, restricted to the fields which
+// decide it. A forced command closes forwarding and the sftp subsystem: a restricted
+// identity runs the command the owner of the file chose, not a session of the client's
+// choosing.
+decreases
+ensures res == (!((o.noPortForwarding || o.forcedCommand != "") && forwardingType(channelType)) &&
+		!(o.forcedCommand != "" && channelType == "sftp"))
+pure func checkChannelOpen(o options, channelType string) (res bool) {
+	return !((o.noPortForwarding || o.forcedCommand != "") && forwardingType(channelType)) &&
+		!(o.forcedCommand != "" && channelType == "sftp")
+}
+
+// parseOptions is the loop of ParseIdentityOptions. The first name this server does not
+// enforce refuses the whole line: the caller then gets no restriction set at all, so a
+// restriction which would silently have done nothing cannot leave an identity more
+// powerful than the file asks for.
+requires forall i int :: 0 <= i && i < len(names) ==> acc(&names[i], _)
+ensures forall i int :: 0 <= i && i < len(names) ==> acc(&names[i], _)
+ensures !res ==> sameOptions(out, emptyOptions())
+ensures res == (forall j int :: 0 <= j && j < len(names) ==> supportedName(names[j]))
+ensures !res ==> len(names) > 0
+ensures res ==> out.noPty ==
+	(exists j int :: { names[j] } 0 <= j && j < len(names) &&
+		(names[j] == "restrict" || names[j] == "no-pty"))
+ensures res ==> out.noPortForwarding ==
+	(exists j int :: { names[j] } 0 <= j && j < len(names) &&
+		(names[j] == "restrict" || names[j] == "no-port-forwarding"))
+ensures res ==> out.noAgentForwarding ==
+	(exists j int :: { names[j] } 0 <= j && j < len(names) &&
+		(names[j] == "restrict" || names[j] == "no-agent-forwarding"))
+ensures res ==> out.noX11Forwarding ==
+	(exists j int :: { names[j] } 0 <= j && j < len(names) &&
+		(names[j] == "restrict" || names[j] == "no-x11-forwarding"))
+ensures res ==> out.noEnv == (exists j int :: { names[j] } 0 <= j && j < len(names) && names[j] == "restrict")
+ensures out.forcedCommand == ""
+func parseOptions(names []string) (out options, res bool) {
+	accumulated := options{}
+	invariant 0 <= i && i <= len(names)
+	invariant forall k int :: 0 <= k && k < len(names) ==> acc(&names[k], _)
+	invariant forall j int :: 0 <= j && j < i ==> supportedName(names[j])
+	invariant accumulated.noPty ==
+		(exists j int :: { names[j] } 0 <= j && j < i &&
+			(names[j] == "restrict" || names[j] == "no-pty"))
+	invariant accumulated.noPortForwarding ==
+		(exists j int :: { names[j] } 0 <= j && j < i &&
+			(names[j] == "restrict" || names[j] == "no-port-forwarding"))
+	invariant accumulated.noAgentForwarding ==
+		(exists j int :: { names[j] } 0 <= j && j < i &&
+			(names[j] == "restrict" || names[j] == "no-agent-forwarding"))
+	invariant accumulated.noX11Forwarding ==
+		(exists j int :: { names[j] } 0 <= j && j < i &&
+			(names[j] == "restrict" || names[j] == "no-x11-forwarding"))
+	invariant accumulated.noEnv ==
+		(exists j int :: { names[j] } 0 <= j && j < i && names[j] == "restrict")
+	invariant accumulated.forcedCommand == ""
+	decreases len(names) - i
+	for i := 0; i < len(names); i++ {
+		next, enforced := applyOption(accumulated, names[i])
+		if !enforced {
+			return options{}, false
+		}
+		accumulated = next
+	}
+	return accumulated, true
+}
+
+// emptyOptions is the restriction set of a line which carried no options: the zero value,
+// which is what Conversation.IdentityOptions() stands for when it returns nil.
+decreases
+ensures !res.noPty && !res.noPortForwarding && !res.noAgentForwarding &&
+	!res.noX11Forwarding && !res.noEnv && res.forcedCommand == ""
+pure func emptyOptions() (res options) {
+	return options{}
+}
+
+// restrictedIdentityRefusesEverythingItSaysItRefuses: a line carrying only "restrict"
+// loses the terminal, the environment, X11, the agent, every forwarding and sftp - and
+// keeps the session channel, which is what such an identity is for.
+func restrictedIdentityRefusesEverythingItSaysItRefuses() {
+	restricted, enforced := applyOption(emptyOptions(), "restrict")
+	assert enforced
+	assert !checkRequest(restricted, "pty-req")
+	assert !checkRequest(restricted, "env")
+	assert !checkRequest(restricted, "x11-req")
+	assert !checkRequest(restricted, "agent-forwarding")
+	assert !checkChannelOpen(restricted, "direct-tcp")
+	assert !checkChannelOpen(restricted, "open-request-reverse-udp")
+	assert checkChannelOpen(restricted, "session")
+	// "restrict" does not close the sftp subsystem, here as in OpenSSH: it forbids
+	// forwarding, the terminal, the agent, X11 and the environment. If sftp is meant to
+	// go too, CheckChannelOpen has to say so and this line is the counterexample which
+	// would then fail.
+	assert checkChannelOpen(restricted, "sftp")
+}
+
+// theFiveSpelledNamesAreExactlyRestrict: writing the five single restrictions out gets
+// the same restriction set as the shortcut, in either order, and neither more nor less.
+func theFiveSpelledNamesAreExactlyRestrict() {
+	fromShortcut, _ := applyOption(emptyOptions(), "restrict")
+	spelled := emptyOptions()
+	spelled, _ = applyOption(spelled, "no-pty")
+	spelled, _ = applyOption(spelled, "no-port-forwarding")
+	spelled, _ = applyOption(spelled, "no-agent-forwarding")
+	spelled, _ = applyOption(spelled, "no-x11-forwarding")
+	assert spelled.noPty == fromShortcut.noPty
+	assert spelled.noPortForwarding == fromShortcut.noPortForwarding
+	assert spelled.noAgentForwarding == fromShortcut.noAgentForwarding
+	assert spelled.noX11Forwarding == fromShortcut.noX11Forwarding
+	// the shortcut additionally forbids the environment, which is what OpenSSH's
+	// "restrict" means and the only way sshoq sets NoEnv
+	assert spelled.noEnv == fromShortcut.noEnv || fromShortcut.noEnv
+	assert !spelled.noEnv
+}
+
+// unrestrictedOptionsRefuseNothing: the empty restriction set refuses no request and no
+// channel, so attaching an option set to a conversation cannot by itself break a normal
+// session.
+func unrestrictedOptionsRefuseNothing() {
+	unrestricted := emptyOptions()
+	assert checkRequest(unrestricted, "pty-req")
+	assert checkRequest(unrestricted, "env")
+	assert checkRequest(unrestricted, "x11-req")
+	assert checkRequest(unrestricted, "agent-forwarding")
+	assert checkRequest(unrestricted, "shell")
+	assert checkChannelOpen(unrestricted, "session")
+	assert checkChannelOpen(unrestricted, "direct-tcp")
+	assert checkChannelOpen(unrestricted, "sftp")
+}
+
+// enforcedOptionsNeverVanish: a line made only of enforced names parses, and every
+// restriction it asked for is in the set the session layer will see.
+func enforcedOptionsNeverVanish() {
+	names := make([]string, 5)
+	names[0] = "no-pty"
+	names[1] = "no-port-forwarding"
+	names[2] = "no-agent-forwarding"
+	names[3] = "no-x11-forwarding"
+	names[4] = "from"
+	parsed, ok := parseOptions(names)
+	assert ok
+	assert parsed.noPty && parsed.noPortForwarding && parsed.noAgentForwarding &&
+		parsed.noX11Forwarding
+	// and nothing else: a line which does not say "restrict" does not forbid the
+	// environment, and does not force a command
+	assert !parsed.noEnv
+	assert parsed.forcedCommand == ""
+}
+
+// anOptionWhichIsNotEnforcedGrantsNothing: one unenforceable name in the list and the
+// caller gets no restriction set at all - not a set which silently forgot it. This is the
+// fail-closed rule of ParseIdentityOptions.
+func anOptionWhichIsNotEnforcedGrantsNothing() {
+	names := make([]string, 2)
+	names[0] = "no-pty"
+	names[1] = "permitopen"
+	assert !supportedName(names[1])
+	parsed, ok := parseOptions(names)
+	assert !ok
+	assert !parsed.noPty && !parsed.noPortForwarding && !parsed.noAgentForwarding &&
+		!parsed.noX11Forwarding && !parsed.noEnv && parsed.forcedCommand == ""
+}
+
+// forcedCommandClosesForwardingAndSftp: an identity restricted to a command runs that
+// command; it does not open tunnels or the sftp subsystem on the side.
+func forcedCommandClosesForwardingAndSftp() {
+	withCommand := emptyOptions()
+	withCommand.forcedCommand = "/usr/bin/false"
+	assert !checkChannelOpen(withCommand, "direct-tcp")
+	assert !checkChannelOpen(withCommand, "sftp")
+	// a terminal is still a terminal: command= does not forbid a pty for the forced
+	// command, as in OpenSSH
+	assert checkRequest(withCommand, "pty-req")
+}

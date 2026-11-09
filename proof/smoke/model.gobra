@@ -1,0 +1,37 @@
+// Package smoke is the toolchain self-check: if this unit does not verify, the
+// proofs of the security requirements cannot be trusted to have run at all.
+package smoke
+
+requires 0 <= n
+ensures  sum == n * (n + 1) / 2
+func sum(n int) (sum int) {
+	sum = 0
+	invariant 0 <= i && i <= n + 1
+	invariant sum == i * (i - 1) / 2
+	for i := 0; i <= n; i++ {
+		sum += i
+	}
+	return sum
+}
+
+decreases
+pure func isContinuation(b byte) bool {
+	return b >= 128 && b <= 191
+}
+
+requires forall k int :: 0 <= k && k < len(s) ==> acc(&s[k], _)
+requires 0 < max
+requires max < len(s)
+ensures  forall k int :: 0 <= k && k < len(s) ==> acc(&s[k], _)
+ensures  0 <= res && res <= max
+ensures  res == 0 || !isContinuation(s[res])
+func cutIndex(s []byte, max int) (res int) {
+	cut := max
+	invariant 0 <= cut && cut <= max
+	invariant forall k int :: 0 <= k && k < len(s) ==> acc(&s[k], _)
+	decreases cut
+	for cut > 0 && isContinuation(s[cut]) {
+		cut--
+	}
+	return cut
+}

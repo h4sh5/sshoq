@@ -1,0 +1,137 @@
+// SR-RES-02 and SR-TR-04: truncation of the untrusted User-Agent.
+//
+// Tracked files: server_auth/truncate.go (the shipped truncate, which now carries its own
+// proof of memory safety and of the length and identity clauses) and
+// server_auth/truncate_conformance_test.go (the correspondence). What this unit still proves on
+// its own is the character-boundary claim -- that the cut never splits a multi-byte character --
+// which the shipped file cannot state because the prover has no rule for the characters of a
+// string concatenation.
+//
+// This models server_auth/truncate, which runs before any
+// authentication on a header the client controls completely. Slicing it with [:100]
+// used to panic for every shorter header - that is, for every client which is not this
+// project's own - turning a clean pre-authentication 403 into an H3_INTERNAL_ERROR.
+//
+// The model is over `string`, exactly like the real function: len() and slicing in Go
+// are byte-oriented, so the byte semantics below are not an approximation. Strings are
+// immutable, so no permissions are needed and everything here is a decidable formula.
+//
+// What is proved:
+//   * memory safety: every index of the untrusted header is in range, whatever max
+//     claims (the historical panic);
+//   * SR-TR-04: the cut point never lands inside a multi-byte UTF-8 sequence, so a
+//     header cannot put a split rune into the server log;
+//   * SR-RES-02: the emitted line is empty when max <= 0, keeps the header verbatim
+//     when it already fits, and is otherwise at most max+3 bytes.
+package truncation
+
+// isContinuationByte reports whether b is a UTF-8 continuation byte (10xx_xxxx): a byte
+// which may not start the cut point. This mirrors the (s[cut] & 0xC0) == 0x80 test,
+// written as a range because Gobra has no bitwise operators.
+decreases
+ensures res == (128 <= b && b <= 191)
+pure func isContinuationByte(b byte) (res bool) {
+	return b >= 128 && b <= 191
+}
+
+// validContinuationPrefix says which byte values the walk-back may stop on: the real
+// code masks with 0xC0, which is exactly the continuation range.
+decreases
+ensures res == isContinuationByte(b)
+pure func validContinuationPrefix(b byte) (res bool) {
+	return 128 <= b && b <= 191
+}
+
+// cutIndex is the walk-back loop: given a header longer than max, it returns the index
+// at which the kept prefix stops, stepping back off a continuation byte.
+//
+// res == max means no walk-back happened, so the byte at index max is a leading byte;
+// res == 0 means everything up to max was a continuation byte and nothing is kept.
+requires 0 < max && max < len(s)
+ensures  0 <= res && res <= max
+ensures  res == 0 || !isContinuationByte(s[res])
+ensures  forall k int :: res < k && k <= max ==> isContinuationByte(s[k])
+func cutIndex(s string, max int) (res int) {
+	cut := max
+	invariant 0 <= cut && cut <= max
+	invariant forall k int :: cut < k && k <= max ==> isContinuationByte(s[k])
+	decreases cut
+	for cut > 0 && isContinuationByte(s[cut]) {
+		cut--
+	}
+	return cut
+}
+
+// truncate is the model of the real function. Its contract is the whole of SR-RES-02 and
+// the memory safety of the header read.
+ensures max <= 0 ==> res == ""
+ensures max > 0 && len(s) <= max ==> res == s
+ensures max > 0 && len(s) > max ==> 3 <= len(res) && len(res) <= max+3
+ensures max > 0 ==> len(res) >= 3 || res == s
+func truncate(s string, max int) (res string) {
+	if max <= 0 {
+		return ""
+	}
+	if len(s) <= max {
+		return s
+	}
+	cut := cutIndex(s, max)
+	return s[:cut] + "..."
+}
+
+// truncateNeverReadsOutOfBounds is the regression statement for the historical panic: the
+// only index expression used on the untrusted header is the one cutIndex bounds, so no
+// value of max can make the read go out of range.
+requires 0 <= max
+ensures max > 0 && len(s) > max ==> 0 <= max && max < len(s)
+ensures len(res) <= len(s)+3
+ensures max > 0 ==> len(res) <= max+3
+func truncateNeverReadsOutOfBounds(s string, max int) (res string) {
+	res = truncate(s, max)
+	assert len(res) <= len(s)+3
+	return res
+}
+
+// logLineIsBounded is SR-RES-02 at the length the server uses: however long or mangled
+// the header is, at most 103 bytes reach the log, and a huge header cannot make the
+// pre-authentication path emit an unbounded amount of data.
+ensures len(res) <= 103
+ensures len(res) == 0 ==> len(s) == 0
+func logLineIsBounded(s string) (res string) {
+	res = truncate(s, 100)
+	assert len(res) <= 103
+	return res
+}
+
+// keptPrefixEndsOnARuneBoundary is SR-TR-04 end to end: the index which separates the
+// kept prefix from the ellipsis is a leading byte, so the log never carries half of a
+// multi-byte character. The only way nothing is kept is a header whose first max bytes
+// are all continuation bytes.
+requires 0 < max && max < len(s)
+ensures  0 <= cut && cut <= max
+ensures  cut == 0 || !isContinuationByte(s[cut])
+func keptPrefixEndsOnARuneBoundary(s string, max int) (cut int) {
+	cut = cutIndex(s, max)
+	assert cut == 0 || !isContinuationByte(s[cut])
+	return cut
+}
+
+// asciiHeaderIsKeptWhole: a header whose first max bytes are single-byte characters -
+// which is what an ASCII User-Agent looks like, and what the conformance test checks with
+// utf8.RuneStart - is cut exactly at max, so truncation loses nothing for ordinary
+// clients.
+requires 0 < max && max < len(s)
+requires forall k int :: { s[k] } 0 <= k && k <= max ==> !isContinuationByte(s[k])
+ensures  cut == max
+ensures  0 < cut
+func asciiHeaderIsKeptWhole(s string, max int) (cut int) {
+	cut = cutIndex(s, max)
+	if cut < max {
+		// Read the first byte which would have been dropped. cutIndex says it is a
+		// continuation byte, the hypothesis says it is not, and reading it here is what
+		// gives Z3 the term to instantiate both quantifiers with.
+		next := s[cut+1]
+		assert !isContinuationByte(next)
+	}
+	return cut
+}

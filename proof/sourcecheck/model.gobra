@@ -1,0 +1,167 @@
+// SR-PERM-06, SR-PERM-07, SR-PERM-08: the `from=` restriction -- the only place where an identity
+// decides *where* a peer may come from. Models identity_options.go: matchesSourcePattern (an
+// address, a CIDR block, or a glob over the textual address) and CheckSource (the list of
+// possibly-negated patterns).
+//
+// Tracked files: identity_options.go (CheckSource, sourceMatches, matchesSourcePattern, parsePeerIP),
+// source_check.go (sourceVerdictFor, negatedMatch, inclusionMatch, isNegated), glob.go (matchGlob),
+// identity_options_source_conformance_test.go (the correspondence). The list decision proved below is
+// now also proved on shipped code in source_check.go, so this unit is a second opinion on the same
+// rule rather than the only argument for it; the address layer underneath it stays modelled here, as
+// it can only be.
+//
+// The layers that consult `net` are modelled by the facts they return, because Gobra cannot ingest
+// them: isCidr says "net.ParseCIDR accepted the pattern", contains says "the network holds the
+// address", parsesAsIp says "net.ParseIP accepted it", ipEquals is net.IP.Equal, wildcard is
+// strings.ContainsAny(pattern, "*?["), and globMatches is matchGlob. Each is a premise, so every
+// lemma here holds whatever those layers decide -- and identity_options_source_conformance_test.go
+// and identity_options_test.go say what they decide, over real CIDRs, the IPv4-in-IPv6 forms, real
+// globs and host names.
+//
+// What is proved:
+//   * fail-closed where it matters: an empty pattern matches nothing and an undeterminable address
+//     matches nothing, before any of the three strategies is consulted;
+//   * a CIDR pattern's verdict is exactly containment -- when ParseCIDR accepts a pattern nothing
+//     else runs for it, so a valid network which does not hold the peer refuses instead of falling
+//     through to the glob or to the literal comparison, which might have matched the text;
+//   * a pattern naming a host (neither network, nor address, nor glob) matches nothing: no DNS
+//     lookup is performed, and the absence of a lookup is a refusal rather than an open question;
+//   * a literal address pattern is exactly net.IP.Equal, and the recursive glob is consulted only
+//     for a pattern that really contains a wildcard -- so it never sees an address or a network,
+//     where "*" and "?" would have no meaning;
+//   * the `from=` list: no `from=` restricts nothing; under a restriction an undeterminable peer
+//     address refuses; an exclusion refuses whatever else the list says, including a positive match
+//     for the same address; and a peer accepted under a restriction is one some pattern described
+//     and no negation excluded. Since the decision reads only the two disjunctions the loop
+//     computes, the order of the list cannot change the answer -- which is what lets the loop walk
+//     the whole list, and what makes from="a,!b" and from="!b,a" one restriction.
+package sourcecheck
+
+// matchGlob itself -- the recursive glob -- is deliberately NOT a Gobra function, and the reason
+// is worth recording because it is a property of the prover, not of the code: in Gobra v26.09 a
+// *pure* function defined by recursion is opaque. Its `decreases` measure is checked, but a call
+// like gm("a", "a", 0, 0) cannot then be proved of it (nor gm("*", t) by induction), and indexing
+// a slice inside a pure function additionally needs permissions for the elements. Recursion over
+// plain integers does unfold -- `f(3)` and `h(2,2)` verify -- so arithmetic models like the
+// throttle's belong here, and string-shaped ones do not. See proof/README.md, "Gotchas".
+//
+// What the glob means, and why it terminates, is therefore pinned where it can be executed:
+// identity_options_source_conformance_test.go runs the real matchGlob against an independent
+// linear-time matcher over every pattern and text of a corpus, and proves there that a
+// wildcard-free pattern matches exactly the text equal to it (SR-PERM-07) and that the recursion
+// cannot be made to run away by a pattern of alternating stars. What stays in this unit is
+// everything the glob's result is *combined* with -- the three-strategy choice, the two guards,
+// and the negated list -- which is where fail-closed lives.
+//
+// patternMatches is matchesSourcePattern, in the order the real function tries its three
+// strategies (network, literal address, glob) and after its two guards.
+decreases 0
+pure func patternMatches(patternEmpty bool, addressKnown bool, isCidr bool, contains bool,
+	wildcard bool, parsesAsIp bool, ipEquals bool, globMatches bool) bool {
+	return !patternEmpty && addressKnown && ((isCidr && contains) ||
+		(!isCidr && !wildcard && parsesAsIp && ipEquals) ||
+		(!isCidr && wildcard && globMatches))
+}
+
+// guardsRefuseFirst: an empty pattern and an undeterminable address are refused before any of the
+// three strategies is consulted. Both are fail-closed: nothing in the pattern can be worth a
+// match if there is no pattern, and no pattern can be trusted against an address the server
+// cannot name.
+ensures !patternMatches(true, addressKnown, isCidr, contains, wildcard, parsesAsIp, ipEquals, globMatches)
+ensures !patternMatches(patternEmpty, false, isCidr, contains, wildcard, parsesAsIp, ipEquals, globMatches)
+func guardsRefuseFirst(patternEmpty bool, addressKnown bool, isCidr bool, contains bool,
+	wildcard bool, parsesAsIp bool, ipEquals bool, globMatches bool) {
+	assert !patternMatches(true, addressKnown, isCidr, contains, wildcard, parsesAsIp, ipEquals, globMatches)
+	assert !patternMatches(patternEmpty, false, isCidr, contains, wildcard, parsesAsIp, ipEquals, globMatches)
+}
+
+// aCidrPatternIsDecidedByContainmentAlone: when net.ParseCIDR accepts the pattern, the real code
+// returns network.Contains(ip) and nothing else runs. A valid network which does not hold the
+// peer therefore refuses, instead of falling through to a glob or a literal comparison that might
+// have matched the text by accident.
+ensures !patternEmpty && addressKnown && isCidr ==> res == contains
+func cidrIsDecidedByContainment(patternEmpty bool, addressKnown bool, isCidr bool, contains bool,
+	wildcard bool, parsesAsIp bool, ipEquals bool, globMatches bool) (res bool) {
+	res = patternMatches(patternEmpty, addressKnown, isCidr, contains, wildcard, parsesAsIp, ipEquals, globMatches)
+}
+
+// aHostnameMatchesNothing: a pattern that is not a network, holds no wildcard and does not parse
+// as an address names a host, and no DNS lookup is performed. Not "matches whatever a resolver
+// happens to answer" -- the absence of a lookup is a refusal, which is also why the code does not
+// resolve and cannot be made to by a pattern.
+ensures !isCidr && !wildcard && !parsesAsIp ==> !res
+func hostnameMatchesNothing(patternEmpty bool, addressKnown bool, isCidr bool, contains bool,
+	wildcard bool, parsesAsIp bool, ipEquals bool, globMatches bool) (res bool) {
+	res = patternMatches(patternEmpty, addressKnown, isCidr, contains, wildcard, parsesAsIp, ipEquals, globMatches)
+}
+
+// aLiteralAddressIsEquality: with no wildcard and a pattern that parses as an address, the verdict
+// is net.IP.Equal and nothing else. The one form of `from=` whose meaning is "this address", and
+// it cannot be widened by anything the glob would have accepted -- which matters because the glob
+// works on the *text*, and "[::1]" and "0:0:0:0:0:0:0:1" are the same address in two texts.
+ensures !patternEmpty && addressKnown && !isCidr && !wildcard && parsesAsIp ==> res == ipEquals
+func literalAddressIsEquality(patternEmpty bool, addressKnown bool, isCidr bool, contains bool,
+	wildcard bool, parsesAsIp bool, ipEquals bool, globMatches bool) (res bool) {
+	res = patternMatches(patternEmpty, addressKnown, isCidr, contains, wildcard, parsesAsIp, ipEquals, globMatches)
+}
+
+// theGlobRunsOnlyOnAGlob: matchGlob is consulted only for a pattern that is not a network and
+// really contains one of "*?[" -- so the recursive matcher never sees an address or a CIDR, where
+// those characters would have no meaning, and the verdict for a wildcard-free pattern is decided
+// without it.
+ensures addressKnown ==> res == (!patternEmpty && (!isCidr && !wildcard ==> parsesAsIp && ipEquals) && (isCidr ==> contains) && (!isCidr && wildcard ==> globMatches))
+func globRunsOnlyOnAGlob(patternEmpty bool, addressKnown bool, isCidr bool, contains bool,
+	wildcard bool, parsesAsIp bool, ipEquals bool, globMatches bool) (res bool) {
+	res = patternMatches(patternEmpty, addressKnown, isCidr, contains, wildcard, parsesAsIp, ipEquals, globMatches)
+}
+
+// fromListDecides is CheckSource: no `from=` restricts nothing; otherwise the peer address must be
+// determinable, some pattern must have described it, and no negated pattern may have matched. The
+// real loop keeps walking after a positive match, so an exclusion anywhere in the list -- before
+// or after -- is what decides.
+decreases 0
+pure func fromListDecides(restricted bool, addressKnown bool, positive bool, excluded bool) bool {
+	return !restricted || addressKnown && !excluded && positive
+}
+
+ensures !restricted ==> fromListDecides(restricted, addressKnown, positive, excluded)
+ensures restricted && !addressKnown ==> !fromListDecides(restricted, addressKnown, positive, excluded)
+func failClosedOnUnknownSource(restricted bool, addressKnown bool, positive bool, excluded bool) {
+	assert !restricted ==> fromListDecides(restricted, addressKnown, positive, excluded)
+	assert restricted && !addressKnown ==> !fromListDecides(restricted, addressKnown, positive, excluded)
+}
+
+// anExclusionCannotBeOutvoted: from="10.0.0.0/8,!10.0.0.5" means what it looks like it means --
+// the negation refuses the peer whatever the rest of the list says, including a positive match for
+// the same address.
+ensures restricted && excluded ==> !fromListDecides(restricted, addressKnown, true, excluded)
+ensures restricted && excluded ==> !fromListDecides(restricted, addressKnown, false, excluded)
+func exclusionCannotBeOutvoted(restricted bool, addressKnown bool, positive bool, excluded bool) {
+	assert restricted && excluded ==> !fromListDecides(restricted, addressKnown, true, excluded)
+}
+
+// acceptedMeansDescribed: a peer accepted under a `from=` restriction is one some pattern of the
+// list described and none of its negations excluded. There is no way in through an address that
+// matches nothing, an excluded address, or an address the server could not determine.
+ensures restricted && res ==> addressKnown && positive && !excluded
+func acceptedMeansDescribed(restricted bool, addressKnown bool, positive bool, excluded bool) (res bool) {
+	res = fromListDecides(restricted, addressKnown, positive, excluded)
+}
+
+// theVerdictDoesNotDependOnOrder: the decision reads the two disjunctions the loop computes over
+// the list, nothing else, so swapping them -- which is what any permutation of the list amounts to
+// -- cannot change the answer. This is why the loop can walk the whole list rather than stopping
+// at the first match, and why from="a,!b" and from="!b,a" are the same restriction.
+// anExclusionEndsTheWalkButChangesNothingElse: the real loop returns as soon as a negated pattern
+// matches, so a positive pattern written after it is never examined. That is safe only because the
+// verdict is refusal either way -- which is the same fact as exclusionCannotBeOutvoted, stated for
+// the half where the order of the list is what one would worry about. It is why from="!b,a" and
+// from="a,!b" are the same restriction, and the conformance test checks exactly that over real
+// pattern lists in both orders.
+ensures restricted && excluded ==> !fromListDecides(restricted, addressKnown, true, excluded)
+ensures restricted && !excluded && positive && addressKnown ==> fromListDecides(restricted, addressKnown, positive, excluded)
+func walkingStopsButTheVerdictStands(restricted bool, addressKnown bool, positive bool, excluded bool) {
+	assert restricted && excluded ==> !fromListDecides(restricted, addressKnown, true, excluded)
+	assert restricted && !excluded && positive && addressKnown ==>
+		fromListDecides(restricted, addressKnown, positive, excluded)
+}

@@ -151,12 +151,30 @@ func unquoteIdentityOptionValue(value string) string {
 
 // parsePeerIP extracts the IP of a peer address given as a string, generally
 // "ip:port" as http.Request.RemoteAddr is set by the HTTP/3 server.
+//
+// It stays on this side of the split because Gobra's stubs for net have no
+// SplitHostPort; see source_check.go for what the split is and why.
 func parsePeerIP(remoteAddr string) net.IP {
 	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
 		host = remoteAddr
 	}
 	return net.ParseIP(strings.Trim(host, "[]"))
+}
+
+// sourceMatches walks the "from=" patterns of an identity and reports, for each
+// one in order, whether it is an exclusion and whether it describes the address.
+// The verdict itself is sourceVerdictFor in source_check.go, which is proved;
+// this is the part that needs an address, and TestConformanceSourceMatchesSplits
+// keeps it equal to the single loop this file used to have.
+func sourceMatches(from []string, ip net.IP) (negated []bool, matched []bool) {
+	negated = make([]bool, len(from))
+	matched = make([]bool, len(from))
+	for i, pattern := range from {
+		negated[i] = isNegated(pattern)
+		matched[i] = matchesSourcePattern(strings.TrimPrefix(pattern, "!"), ip)
+	}
+	return negated, matched
 }
 
 // matchesSourcePattern tells whether ip is described by a single "from=" pattern:
@@ -190,41 +208,10 @@ func matchesSourcePattern(pattern string, ip net.IP) bool {
 	return false
 }
 
-// matchGlob is OpenSSH's match_pattern(): "*" stands for any sequence, "?" for a single
-// character. It is applied to the textual address only (never to the port and never to a
-// hostname), which is what "from=" globs mean here.
-func matchGlob(pattern, text string) bool {
-	var rec func(p, t string) bool
-	rec = func(p, t string) bool {
-		for len(p) > 0 {
-			switch p[0] {
-			case '*':
-				// a star stands for anything: try the rest of the pattern after every
-				// possible prefix of t, as OpenSSH does
-				for i := 0; ; i++ {
-					if rec(p[1:], t[i:]) {
-						return true
-					}
-					if i >= len(t) {
-						return false
-					}
-				}
-			case '?':
-				if len(t) == 0 {
-					return false
-				}
-				p, t = p[1:], t[1:]
-			default:
-				if len(t) == 0 || t[0] != p[0] {
-					return false
-				}
-				p, t = p[1:], t[1:]
-			}
-		}
-		return len(t) == 0
-	}
-	return rec(pattern, text)
-}
+// matchGlob, the "from=" pattern matcher, lives in glob.go: that file carries the Gobra annotations
+// and is verified as shipped code. That relocation is what makes it verifiable where it lives,
+// because Gobra v26.09 has no specs for fmt.Errorf and this file builds its errors with it.
+// See glob.go and proof/README.md.
 
 // CheckSource enforces the "from=" option: it returns an error when the peer
 // address is not one the identity accepts. It fails closed: a missing or
@@ -237,47 +224,40 @@ func (o *IdentityOptions) CheckSource(remoteAddr string) error {
 	if ip == nil {
 		return fmt.Errorf("cannot determine the source address of the peer, which is required by the from=\"...\" restriction of this identity")
 	}
-	accepted := false
-	for _, pattern := range o.From {
-		negated := strings.HasPrefix(pattern, "!")
-		trimmed := strings.TrimPrefix(pattern, "!")
-		if matchesSourcePattern(trimmed, ip) {
-			if negated {
-				return fmt.Errorf("source address %s is excluded by the from=\"...\" restriction of this identity", ip)
-			}
-			accepted = true
-		}
-	}
-	if !accepted {
+	// Everything past the two guards is the proved rule: sourceVerdictFor in
+	// source_check.go decides from four facts, and the first two of them are what
+	// those guards just established -- that a restriction exists and that its
+	// address can be named -- so they arrive as true rather than being recomputed.
+	// The other two come from the pure predicates over the per-pattern flags.
+	// Choosing to refuse here rather than inside the rule is only about the wording,
+	// and TestConformanceVerdictsAreReachableAndWorded holds each verdict to the
+	// wording it has always had.
+	negated, matched := sourceMatches(o.From, ip)
+	switch sourceVerdictFor(true, true, negatedMatch(negated, matched, 0), inclusionMatch(negated, matched, 0)) {
+	case sourceRefusedExcluded:
+		return fmt.Errorf("source address %s is excluded by the from=\"...\" restriction of this identity", ip)
+	case sourceRefusedNotListed:
 		return fmt.Errorf("source address %s is not allowed by the from=\"...\" restriction of this identity", ip)
 	}
 	return nil
 }
 
-// CheckChannelOpen tells whether a channel of the given type may be opened by a
-// client which authenticated with this identity.
 func (o *IdentityOptions) CheckChannelOpen(channelType string) error {
 	if o == nil {
 		return nil
 	}
 	// some channel types carry extra data after a comma, e.g.
 	// "open-request-reverse-tcp,<address>"
-	family := channelType
-	if i := strings.IndexByte(family, ','); i >= 0 {
-		family = family[:i]
-	}
-	switch family {
-	case "direct-tcp", "direct-udp", "request-reverse-tcp", "request-reverse-udp", "open-request-reverse-tcp", "open-request-reverse-udp":
-		if o.NoPortForwarding {
-			return fmt.Errorf("port forwarding is forbidden by the identity which authenticated this conversation")
-		}
-		if o.ForcedCommand != "" {
-			return fmt.Errorf("the identity which authenticated this conversation is restricted to the command \"%s\": forwarding is not available", o.ForcedCommand)
-		}
-	case "sftp":
-		if o.ForcedCommand != "" {
-			return fmt.Errorf("the identity which authenticated this conversation is restricted to the command \"%s\": the sftp subsystem is not available", o.ForcedCommand)
-		}
+	family := channelFamily(channelType, strings.IndexByte(channelType, ','))
+	// as above, the decision itself is channelVerdictFor and Gobra verifies it in
+	// identity_checks.go
+	switch channelVerdictFor(family, o.NoPortForwarding, o.ForcedCommand) {
+	case channelRefusedPortForwarding:
+		return fmt.Errorf("port forwarding is forbidden by the identity which authenticated this conversation")
+	case channelRefusedForwardingByCommand:
+		return fmt.Errorf("the identity which authenticated this conversation is restricted to the command \"%s\": forwarding is not available", o.ForcedCommand)
+	case channelRefusedSftpByCommand:
+		return fmt.Errorf("the identity which authenticated this conversation is restricted to the command \"%s\": the sftp subsystem is not available", o.ForcedCommand)
 	}
 	return nil
 }
@@ -289,23 +269,17 @@ func (o *IdentityOptions) CheckRequest(requestType string) error {
 	if o == nil {
 		return nil
 	}
-	switch requestType {
-	case "pty-req":
-		if o.NoPty {
-			return fmt.Errorf("a terminal was requested but the identity which authenticated this conversation forbids it (no-pty)")
-		}
-	case "env":
-		if o.NoEnv {
-			return fmt.Errorf("the identity which authenticated this conversation forbids setting environment variables (restrict)")
-		}
-	case "x11-req":
-		if o.NoX11Forwarding {
-			return fmt.Errorf("X11 forwarding is forbidden by the identity which authenticated this conversation")
-		}
-	case "agent-forwarding":
-		if o.NoAgentForwarding {
-			return fmt.Errorf("agent forwarding is forbidden by the identity which authenticated this conversation")
-		}
+	// the decision is requestVerdictFor, which Gobra verifies in identity_checks.go; what is left
+	// here is the message that goes with each refusal
+	switch requestVerdictFor(requestType, o.NoPty, o.NoEnv, o.NoX11Forwarding, o.NoAgentForwarding) {
+	case requestRefusedPty:
+		return fmt.Errorf("a terminal was requested but the identity which authenticated this conversation forbids it (no-pty)")
+	case requestRefusedEnv:
+		return fmt.Errorf("the identity which authenticated this conversation forbids setting environment variables (restrict)")
+	case requestRefusedX11:
+		return fmt.Errorf("X11 forwarding is forbidden by the identity which authenticated this conversation")
+	case requestRefusedAgent:
+		return fmt.Errorf("agent forwarding is forbidden by the identity which authenticated this conversation")
 	}
 	return nil
 }

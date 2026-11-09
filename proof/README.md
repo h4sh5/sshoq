@@ -1,0 +1,504 @@
+# Formal verification
+
+Three commands, in this order:
+
+```sh
+make proof-setup          # JDK, sbt, Z3, pinned Gobra -> .proof-tools (idempotent)
+make proof-conformance    # the models still behave like the Go code they model
+make proof                # Gobra checks every proof obligation in proof/*/model.gobra
+```
+
+`make proof-all` runs all three. CI does the same in `.github/workflows/proof.yml`.
+
+## State of the programme
+
+Twenty verified files — nine model units (`proof/*/model.gobra`) plus eleven shipped ones carrying
+their own specs, [`../glob.go`](../glob.go), [`../identity_checks.go`](../identity_checks.go),
+[`../source_check.go`](../source_check.go),
+[`../server_auth/throttle_rules.go`](../server_auth/throttle_rules.go),
+[`../server_auth/truncate.go`](../server_auth/truncate.go),
+[`../util/equalfold.go`](../util/equalfold.go),
+[`../util/unix_util/account_rules.go`](../util/unix_util/account_rules.go),
+[`../util/varint.go`](../util/varint.go),
+[`../version_rules.go`](../version_rules.go),
+[`../cmd/host_trust_rules.go`](../cmd/host_trust_rules.go) and
+[`../sftp/dac_rules.go`](../sftp/dac_rules.go) — and **198 runs** of
+`TestConformance...` tests: 185 in the default build plus a second run of `./util/unix_util/`
+(13 more) against the other password implementation, in the packages of the code they check, and a
+catalogue of 46 requirements
+([`SECURITY_REQUIREMENTS.md`](SECURITY_REQUIREMENTS.md)) whose status column is the only place a
+claim about coverage is written:
+
+| token in the row | rows | what it means |
+|---|---|---|
+| `proved:model` + conformant | 16 | a Gobra unit proves the decision over all modelled inputs, and a test says the modelled function still behaves that way |
+| `proved:shipped` + conformant | 12 | the same, except the proof is of the function the server calls: SR-PERM-04 and SR-PERM-05 in `identity_checks.go`, SR-PERM-06 in `source_check.go`, SR-AUTH-08 in `server_auth/throttle_rules.go`, SR-TR-04 in `server_auth/truncate.go`, SR-PARSE-03 in `util/varint.go`, SR-PARSE-05 in `util/equalfold.go`, SR-TR-03 in `version_rules.go`, and SR-TR-06 in `cmd/host_trust_rules.go` -- the client's trust verdict, which was prose inside `setupQUICConnection` until it was split out; SR-DAC-01, SR-DAC-02 and SR-DAC-03 in `sftp/dac_rules.go`, the file-access decision the SFTP request loop makes with its own privileges. The model of each is a second opinion now, not the argument |
+| `conformant` | 11 | checked in Go alone, because the prover cannot hold the shape of the whole claim (the recursive glob: findings **F5**, **F6**) — `glob.go` does have a proved *part* of one of them, termination, in the shipped file — and rows where the claim is about strings, tokens or the filesystem rather than arithmetic, so enumeration is the honest control: SR-TR-05, the name a server is trusted under (**F13**), and SR-AUTH-12, the public-key credential, whose verifier had no test at all before it (**F15**); and SR-AUTH-13, the password comparison, where what is pinned is a two-line guard whose deletion would let any password open a locked account (**F16**); and SR-AUTH-14, the identity files themselves, whose three unasked questions -- a 64 KiB line ceiling that deletes the rest of the file without an error, an account with no home reading keys out of the server's working directory, and nobody asking who may write the file -- are **F17**; SR-PARSE-06, the SFTP frames, where the decode side survived 100% of truncations and single-byte mutations and the encode side turns out to announce a string over 64 KiB with a wrapped length (**F18**); and SR-TR-05 again, where the sweep now also shows the identity string is injective on hostnames and address literals and *not* injective on a host field carrying a slash or a colon (**F19**); and SR-DAC-04, the claim that the permission bits above the nine are invisible to the SFTP access decision, which is exhausted over 917 504 modes because Gobra v26.09 cannot compare two decisions whose arguments differ in a bit it does not read (**F21**) |
+| `partial` | 3 | the decision function is proved, the surrounding machinery is a premise named in the row. The strongest of the three is SR-AUTH-11, the account policy gate, whose decisions are verified in the shipped `util/unix_util/account_rules.go`; what keeps it `partial` is that the fields come from `shadow(5)`, the day from a clock, and the two `nologin(8)` questions from the filesystem |
+| `out-of-scope` | 2 | QUIC conversation state; integration and unit tests are the control |
+| `open` | 1 | SR-PERM-11 / finding **F2**: a decision the maintainer owes, not a proof that is missing |
+| `phase-4` | 1 | SR-PARSE-01: the frame parser, where the slicing and the `io` around it still have to be split out of a file the prover cannot read. Its arithmetic half is already proved, in shipped code, as SR-PARSE-03 |
+
+Those seven tokens are not decoration. The five tests in `proof_ledger_conformance_test.go` re-derive every
+number in the column above from the rows themselves, and checks the rest of the ledger against the
+repository: that each row's referenced `.go` file exists, that every test named in either document is a
+function in some `*_test.go`, that every model unit in `proof/` is catalogued and every unit cited
+exists, that every finding an `F<digit>` reference points at has its section, and that every
+`*_conformance_test.go` file is cited by a row. It was written because the ledger had already gone wrong
+in three different ways by hand -- **F8**, **F9**, and the row whose status understated its own proof --
+and a table maintained by hand drifts from the artefacts it describes unless something checks it each
+time the tests run.
+
+Three real bugs came out of writing this, all fixed and recorded with the requirement they violated:
+the login throttle could grow past the capacity it documents (**F1**, `server_auth/login_policy.go`),
+a `from=` pattern with a handful of stars cost exponential time — fourteen stars, 2m56s of one
+core per authentication attempt (**F5**, `identity_options.go`), and the rewritten matcher read a `*`
+arriving in the *text* as a wildcard, so `matchGlob("a*", "a*b")` was false where OpenSSH says true
+(**F6**, `glob.go`) — the first bug the prover itself found rather than a test, and the reason
+"three implementations agree over half a million triples" is stated with its corpus next to it.
+A fourth came out of writing a sentence down: the comment above the login throttle said a key is
+refused after *more than* `maxFailures` failures while the code, and the model, have always said
+`>=` — one guessing attempt per window in the wrong direction, in a comment nobody tested (**F7**,
+`server_auth/login_policy.go`). The boundary is three spec lines and a test now.
+
+Two more came out of checking this document against the repository rather than trusting it. The
+allocation ceiling in `util/wire.go` was a remote denial of service with no requirement row and no
+direct test (**F8**), and SR-TR-03 claimed the version gate was "covered by unit tests" when no test in
+the tree called it — the gate that decides whether a peer may authenticate at all had never been
+asserted about (**F9**). Both rows are now backed by proofs and by the first tests their symbols have
+ever had; what is recorded in the catalogue is the method fix that comes with each, because a ledger
+with an unchecked entry in it is worse than an admitted gap.
+
+That last clause is mechanical now rather than aspirational: the five tests in
+`proof_ledger_conformance_test.go` re-derive the status column from the rows, resolve every file, test name
+and model unit cited in either document against the tree, and match every `F<digit>` reference to a
+section. The first thing it caught was **F10** -- named in three places, described in two commit messages,
+never written up -- and then two conformance files that no row cited, which is the same drift in the other
+direction.
+
+Four further findings are behaviour
+documented rather than changed, each needing a product decision: **F2** above, **F3**
+(`-force-command-mismatch-exit=0` makes a forced command advisory, which the documentation does not
+say), **F4** (modelling drift, mitigated mechanically and the argument for Phase 3), and **F20** --
+the SFTP server's file permissions are an emulation of `access(2)` that grants uid 0 nothing and sees
+no ACL, so it is stricter than the kernel on both counts and that is a policy to choose rather than a
+fact to inherit.
+
+The boundary of what this approach can prove is drawn by experiment and not asserted: recursion over
+strings is opaque in Gobra v26.09 (Gotchas below), a bit a spec does not mention cannot be proved
+irrelevant -- the claim that the file-type and setuid bits of `st.Mode` cannot change an SFTP access
+decision timed out at 60s and at 600s in every encoding tried, so the nine-bit core is proved and the
+irrelevance of the rest is enumerated over 917 504 modes (**F21**) -- crypto and `go-jose` discovery
+are premises, and
+nothing here says that a Go compiler, the OS, or `net` behave as assumed. Where a premise is
+load-bearing the catalogue row names it. Some of them are then checked by a named test — base64
+distinguishing conversation ids, what `net.ParseCIDR` decides, that a rejected spelling is refused —
+and the ones that are not (signature verification, the TLS exporter behind a conversation id) are the
+assumptions the argument rests on, listed as such rather than buried in a model header.
+
+Three things are worth saying plainly about where that leaves the programme, because each is the reason a
+row is not further along than it is.
+
+*The client's host-trust decision has now been lifted, and one half of it still cannot.* What was prose
+interleaved with sockets, logging, prompts and file writes in `cmd/sshoq.go` is `cmd/host_trust_rules.go`,
+importing nothing, verified in place as SR-TR-06 -- so the branch that decides whether a session happens at
+all is no longer a model. What stays `proved:model` is SR-TR-01 and SR-TR-02: reading and writing
+`known_hosts` means `ssh3.KnownHostsEntry` and `*x509.Certificate` from quic-go and `crypto/x509`, which the
+parser in Gobra v26.09 cannot read, so those two rows keep a model plus a conformance suite against the real
+file and the real types. That is a difference the status tokens draw on purpose.
+
+*The remaining `proved:model` rows are blocked by the prover's stdlib, not by ingenuity.* `io` and `bufio`
+have no stubs, so a reader in `message/` cannot be verified in place; `append` is not in a pure function's
+repertoire, so a function that accumulates bytes cannot either (both measured, both recorded under Phase 4
+and in `util/varint.go`'s header, which is why that file verifies lengths and not reads). `crypto/x509`,
+`go-jose` and the JWKS fetch are premises by construction: the argument is that *given* a verified
+signature the rest follows, and each row says so.
+
+*End-to-end behaviour is outside this harness on purpose, and is not being run by accident in a plain
+container.* `go test ./integration_tests/` passes here in 0.7 s, which is not 46 specs of QUIC: one
+`BeforeEach` skips all of them unless the setup script's user, keys and `sshoq-tests` URL path exist. So
+`make proof` and `make proof-conformance` are what guard a refactor in this working tree, and a change to
+the wire or the login path wants the integration suite run where it is configured -- written down because a
+green `go test ./...` is easy to read as more than it is.
+
+## Verification in place: the specs live in the shipped file
+
+Eleven files in the proof are not models. [`../glob.go`](../glob.go) is the `from=` matcher the server
+calls, moved out of `identity_options.go` and annotated where it ships.
+[`../identity_checks.go`](../identity_checks.go) is the channel-request and channel-open gate -- the
+code that enforces `no-pty`, `restrict`, `no-port-forwarding` and a forced command -- separated from
+the messages it produces and annotated there.
+[`../source_check.go`](../source_check.go) is the decision underneath `from=`: the rule that turns
+"which patterns are exclusions, which matched, is the address known" into a verdict, plus the pure
+predicates that read the flag arrays.
+[`../server_auth/throttle_rules.go`](../server_auth/throttle_rules.go) is the arithmetic of the login
+throttle -- when a window closes, when a count refuses, how long an attempt waits, how much of the
+window a refusal reports -- lifted out of `loginThrottle.check` and written in integer nanoseconds,
+because there is no `time` stub for Gobra to read.
+[`../server_auth/truncate.go`](../server_auth/truncate.go) is the `User-Agent` truncation that runs
+before any authentication, moved out of `login_policy.go` for the `fmt` reason; its specs are the
+bound on what one attacker-chosen header can do to a log line, and the bounds check that keeps the
+scan inside the string is the F10 panic class turned into a proof obligation.
+[`../util/varint.go`](../util/varint.go) is the first piece of the wire format: the arithmetic a peer
+chooses for you -- how wide a length is encoded, how big a ceiling it must clear before anything is
+allocated, how many bytes a length-prefixed field will cost -- proved over every announcement and
+every reader bound, with the readers themselves left beside it and pinned by tests.
+[`../version_rules.go`](../version_rules.go) is the gate that answers a peer's version announcement
+before a password, a token or a certificate is offered: `IsVersionSupported` in `version.go` is now the
+field-by-field handoff, and the constants that identify this release moved next to the proof because the
+spec is written against them. Its clauses are the ones SR-TR-03 needs — the protocol major and minor are
+checked strictly and nothing later can override them, so the legacy allowance cannot smuggle a peer onto
+another protocol revision; a spec version that is neither `alpha-00` nor the empty legacy one is refused,
+with no prefix matching and no "newer is fine"; and inside the legacy family the answer is exactly "patch
+at least 3", with a literal pinning `0.1.2` refused as well, because that boundary is history and a
+reader cannot recover it from first principles (**F9**).
+[`../cmd/host_trust_rules.go`](../cmd/host_trust_rules.go) is the client's side: the verdict on a server
+certificate, which was prose inside `setupQUICConnection` and is now the function that function calls, with
+reasons on its refusals so that the reporting cannot drift from the decision. It is the one place in the
+client where a wrong answer is a session with a stranger, and its ten inputs are enumerated rather than
+sampled -- which is how `asked` came to be tested before `userSaysYes`: the first draft of the extracted
+function trusted an answer nobody had asked for, and the table's formulas, written before the code was
+adjusted, said so. The prose it replaced could only have had that right by accident.
+[`../sftp/dac_rules.go`](../sftp/dac_rules.go) is the SFTP server's file-access decision, which is the
+only place in the tree where the process touches a path with its own privileges: which of the three
+Unix triads applies (owner, then group, then other), and the rule that an operation is granted only if
+the triad carries *every* bit it asked for. `checkStatPermission` now computes the triad and delegates
+the arithmetic here, so the code `os.Open` stands behind is the code with the contract. Its clauses are
+conjunctions over bits rather than case analyses over modes -- a grant is the product of its bits,
+asking for more can never help, and nothing about a request that would have been granted on its own is
+a reason to refuse a smaller one -- which is the shape of the argument that survives someone adding
+`sshFxFSetstat` to the open gate next week. What the emulation is *not* is also in the row: it gives
+uid 0 no bypass, so a root server refuses some accesses the kernel would have granted, and that
+divergence is written down (**F20**). `make proof` verifies all eleven: the code that runs
+in production is the code the proof talks about, with no transcription step in between. That is
+roadmap Phase 3, and what decides whether a file can join it is **what the prover can read**, not
+difficulty:
+
+* Being listed is not the same as being verified, and the difference was found the hard way:
+  `cmd/host_trust_rules.go` sat in `INPLACE_UNITS` for two commits, `make proof` reported OK for the
+  package, and the ledger counted that as two proofs of shipped code -- while the file contained not
+  one annotation, because Gobra is content to verify a package that specifies nothing and its verdict
+  is then about nothing (**F22**). `TestConformanceEveryInPlaceUnitIsAnnotated` now reads `INPLACE_UNITS` out of
+  `scripts/run-proofs.sh` and fails on a listed file with fewer than two `@`-clauses, and on a file
+  whose clauses are not in the list, which is the same drift in the other direction: specs that are no
+  longer run still read like contracts and get edited until they lie.
+  `TestConformanceProvedOnShippedRowsNameAnnotatedFiles` closes the last gap by tying the *row* to the
+  file -- a row that says `proved:shipped` has to name a file whose specs are checked -- and it failed
+  the day it was written, on SR-TR-03, whose row pointed at `server_auth/auth.go` while the proof lived
+  in `version_rules.go`.
+* Gobra v26.09 ships stubs with real specs for `strings`, `net`, `strconv`, `errors`, `time`, `sync`,
+  `bytes` and `encoding` (`.proof-tools/src/gobra/src/main/resources/stubs/`), so a file that uses
+  only those is readable — which is why `net.ParseCIDR` and the `strings` helpers in this server are
+  not obstacles.
+* For `fmt` the stub says "We do not support members defined in this package", so any file that
+  formats an error with `fmt.Errorf` — which is every decision file in this server that refuses
+  something — cannot be verified where it lives until the formatting is separated from the decision.
+  The related boundary is **library postconditions**: `strconv.Itoa` is stubbed as a signature with no
+  `ensures` clause, so a function whose interesting claim is about the decimal form of a number — the
+  port in `CanonicalHostFormat`, for instance — cannot be proved to have even one digit, which is why
+  SR-TR-05 is held by enumeration over spellings rather than by proof (**F19**).
+  `identity_checks.go` is that separation carried out: the gate returns an enum, the method in
+  `identity_options.go` switches over the enum to produce the wording, and the proof is of the gate.
+  The wording is not nothing -- a refusal that blamed the wrong flag would be a different gate -- so
+  `TestConformanceRequestVerdictIsTheGate` and `TestConformanceChannelVerdictIsTheGate` hold each
+  refusal to the phrase it has always used, against a locally rewritten copy of the pre-split code.
+* A verified file is handed to Gobra alone (`gobra -i glob.go`), so its package-mates are not its
+  problem — and are not available to it either: a verified file may not call a function that lives in
+  another file of package `ssh3`, which is why the address parsing stays behind. That also means such
+  a file must be self-contained, and `-i` reports the opposite as "got unknown identifier".
+  `scripts/run-proofs.sh` lists such files in `INPLACE_UNITS` rather than discovering them, so that
+  someone adding an import to a verified file sees the proof fail rather than watching it quietly
+  shrink.
+* The third boundary is **permissions**, and `source_check.go` is the shape the answer took. Slice
+  elements are heap in a spec, so `exists k :: negated[k] && matched[k]` written in an ordinary
+  function's contract is refused ("Method contract is not well-formed. Permission to negated[k] might
+  not suffice"); a pure function may ask for the array reads (`forall i :: acc(&negated[i])`, the form
+  Gobra's own `net/ip` stub uses) and then verifies; but an *impure* caller holding that quantified
+  permission cannot satisfy a pure callee's precondition — "Precondition of call
+  `negatedMatch(...)` might not hold. Permission to negated[i] might not suffice" — and that is a
+  Silicon limitation with quantified permissions, not a missing annotation. So the array readers are
+  pure and take the arrays plus the permissions, and the proved rule takes their answers as plain
+  `bool`s: every clause of SR-PERM-06 is then proved with no heap in sight.
+
+What `source_check.go` proves is the partition: its `ensures` clauses are bidirectional, so the four
+verdicts are shown to divide the four input facts exactly rather than merely to imply each other in
+the safe direction, and the fail-closed rule of SR-PERM-06 appears as a *precedence* — `!addressKnown`
+is asked before either match, so an address the server cannot name cannot be waved through by an empty
+pattern list. What it cannot prove is any of the address work: `net`'s stubs demand the address as an
+ownership predicate (`len(ip) == 4 || len(ip) == 16 && forall i :: acc(&ip[i])`) and have no
+`SplitHostPort`, so `parsePeerIP` and `matchesSourcePattern` stay on the message side, where
+`TestConformanceMatchesSourcePatternStrategies` asserts what they return row by row.
+
+What the annotations on `matchGlob` prove, and what they do not, is written in the file. In short:
+termination on a two-component measure (so the linear-time claim of **F5** is a theorem and not a
+reading of the code), an empty pattern matching exactly the empty text, and `"*"` matching
+everything. The equivalence with the declarative `globMatch` in the same file needs induction over
+`string`, which Silicon does not have — it has induction over inductive datatypes, which is exactly
+how `proof/sourcecheck` discharges the same decision over its own model. The soundness half
+(`res ==> globMatch(pattern, text, 0, 0)`) was written down and did not verify: it needs the invariant
+that every star earlier than the saved one has already failed at every longer stretch of the text,
+and stating *that* needs a predicate over a range of a string, which is the slicing the prover has no
+theory for.
+
+**The client's trust verdict is shipped code now** (SR-TR-06). It used to be prose inside
+`setupQUICConnection` -- a function that also does sockets, TLS configuration, prompts on `/dev/tty` and
+retries, and imports `crypto/tls`, `net` and quic-go, none of which Gobra v26.09 can read -- so the
+decision had a model (`accepts` in `proof/knownhosts/model.gobra`) and no proof. `cmd/host_trust_rules.go`
+is that decision extracted, importing nothing, verified in place; `setupQUICConnection` now gathers the ten
+facts, calls it, and switches on a verdict that carries its reason, because main has to *say* which refusal
+happened and a bare yes/no would send it back to re-deriving one. The extraction paid at once: with the two
+answer arguments tested in the other order -- `userSaysYes` before `asked` -- **an answer nobody asked for
+records a certificate**, so a caller arriving with a defaulted "yes" is trusted for it. The table's
+independent formulas require `asked && yes`, reported the disagreement, and the commit fixes it;
+`TestConformanceAnAnswerNobodyAskedForMeansNothing` is the property. What stays a premise is written in
+`cmd/sshoq_pinning_e2e_test.go`: a test run has no `/dev/tty` to answer with, so the end-to-end tests cover
+the pin, the file that gets written, and the refusal when nobody can be asked, while the table covers the
+prompting itself.
+
+## How the argument is built
+
+Gobra cannot read the server: the production files reach into `quic-go`, `x509`,
+`zerolog` and cgo-backed user lookups, and Gobra verifies a self-contained subset of Go
+with a partial standard library. So each unit here is a *model* of one decision — the
+authentication decision table, the identity-option gates, the `User-Agent` truncation, the
+throttle arithmetic — written with specs, verified over all inputs of the modelled
+function, with memory safety (no panic, no out-of-bounds, no nil dereference) proved for
+free on top.
+
+That leaves the obvious question: why should a proof about a model say anything about the
+server? The answer is the conformance tests, and it is the part of this directory that
+keeps the rest honest:
+
+* `identity_options_conformance_test.go` enumerates the input space of the identity-option
+  decisions — 64 combinations of the restriction fields against 9 request types and 13
+  channel types, and every enforced and unenforced option name in both orders — and
+  compares the real `CheckRequest`, `CheckChannelOpen` and `ParseIdentityOptions` with the
+  decision table, written out in Go, that the Gobra `ensures` clauses state.
+* `server_auth/truncate_conformance_test.go` does the same for `truncate`.
+* `server_auth/bearer_conformance_test.go` checks `ParseBearerAuth`, `HandleBearerAuth` and
+  `util.EqualFold`: the accepted spellings of the scheme, the boundary at seven bytes, the
+  verbatim token, the fact that the fold is ASCII-only rather than Unicode, and that an
+  unparseable header produces 401 without the verifier ever being called. It also pins the
+  seven ASCII bytes of the prefix, the one fact Gobra cannot check because it does not
+  evaluate string literals.
+* `identity_options_source_conformance_test.go` is where the `from=` glob lives, since Gobra cannot
+  hold a recursive string function (see Gotchas): the shipped `matchGlob`, the recursion it replaced
+  — kept verbatim as `legacyMatchGlob` — and an independently written linear matcher agree on 530 255
+  pattern/text triples, **stars in the texts included** (they were not, and that blind spot is
+  **F6**); a wildcard-free pattern is shown to match exactly the text equal to it;
+  star-heavy patterns are held to a time bound; and `matchesSourcePattern`, `parsePeerIP` and
+  `CheckSource` are run over real addresses, real CIDRs, the two textual forms of one IPv6 address,
+  host names, negations, and every permutation of every pattern list.
+* `server_auth/oidc_binding_source_conformance_test.go` is the step between `proof/oidcbinding` and
+  `Verify`, which cannot be called without a live issuer: it locates that one method by AST and holds
+  it to the claim order and compared values the proof assumes (refusing to be satisfied with a marker
+  comment, and failing with "change the model with it"), and it executes the one function between a
+  conversation id and the string the binding compares — `base64` of the 32 id bytes, i.e.
+  `ConversationID.String()` — showing it distinguishes ids, so that "a token is accepted for at most
+  one conversation" is a statement about conversations (SR-AUTH-06).
+* `known_hosts_conformance_test.go` parses real files with real self-signed certificates through
+  the real `ParseKnownHosts`, `Knows`, `KnowsHash` and `AppendKnownHost`: the grammar with good
+  lines interleaved with two-field, four-field, wrong-tag, non-base64 and non-certificate lines
+  (invalid line numbers asserted exactly), a missing file being an empty store rather than an
+  error, and the append-only property the trust argument rests on — after a certificate is
+  replaced, both are still on file.
+* `auth/oidc/replay_conformance_test.go` drives the real store over a seeded token stream,
+  including the cases the model's invariant is really about: a replay attempt must not evict,
+  a store of capacity one must still catch a replay, and a remembered token whose expiry claim
+  is unreadable must be refused on sight.
+
+Every one of them is named `TestConformance...`, which is how `make proof-conformance` selects
+exactly the correspondence checks and nothing else. The two tests that bound the throttle's
+memory and its lock-out live in `server_auth/login_policy_test.go` without that prefix, since
+they check no model output; Gobra cannot express them because it has no `delete`.
+
+The target runs two command lines, because `util/unix_util` chooses its password implementation by
+build tag: the default build exercises `linux_user.go` (real `crypt(3)`, real shadow fields), and
+`-tags disable_password_auth` exercises the fallback that any non-Linux Unix gets. The second line
+is recent -- before it, the fallback file had never been compiled or asserted by anything in this
+repository, which is what a build tag does to a test file that does not carry the matching one.
+
+Change the code without changing the table and `make proof-conformance` fails; change the
+model without changing the code and the same test fails from the other side. What remains
+uncovered is stated in `SECURITY_REQUIREMENTS.md`, requirement by requirement, including
+the requirements that are simply **open** because no unit exists yet.
+
+`SECURITY_REQUIREMENTS.md` is the contract: read it first, then the unit that cites it.
+It also holds the [findings](SECURITY_REQUIREMENTS.md#findings) — F1 is a bound that a
+conformance-style test disproved in the real code, which is the reason the tests exist.
+
+## Layout
+
+One Gobra package per unit, one unit per requirement cluster:
+
+| unit | requirements | models |
+|------|--------------|--------|
+| `smoke/` | — | toolchain canary, no security claim |
+| `authflow/` | SR-AUTH-01..05 | `HandleAuths`, `HandleBasicAuth`: 16-outcome decision table |
+| `identityopts/` | SR-PERM-01..05 | `IdentityOptions`, `ParseIdentityOptions`, `CheckRequest`, `CheckChannelOpen` |
+| `truncation/` | SR-TR-04, SR-RES-02 | `truncate`, the pre-authentication `User-Agent` path |
+| `throttle/` | SR-AUTH-08, SR-RES-04 | the delay and lock-out arithmetic of `loginThrottle` |
+| `replay/` | SR-AUTH-07, SR-RES-03 | `AcceptedTokenStore.Accept`, `evictExpired`, `NewAcceptedTokenStore` |
+| `bearer/` | SR-PARSE-02 | `ParseBearerAuth`, `util.EqualFold`, `util.lower` — pre-authentication header parsing |
+| `knownhosts/` | SR-TR-01, SR-TR-02 | `Knows`, `KnowsHash`, `ParseKnownHosts`, `AppendKnownHost`; the client's trust decision itself is proved in `cmd/host_trust_rules.go` (SR-TR-06) |
+| `oidcbinding/` | SR-AUTH-06 | `OpenIDConnectIdentity.Verify`'s binding decision: the claim precedence, the comparison against the server's own conversation id, the replay key |
+| `sourcecheck/` | SR-PERM-06, SR-PERM-07 | `matchesSourcePattern` and `CheckSource` — the `from=` restriction's guards, three matching strategies and negated list |
+
+`scripts/run-proofs.sh` discovers `proof/*/model.gobra` and runs Gobra once per unit, so a
+timeout or a failure in one unit cannot hide the verdict of another. The ten shipped units
+(`cmd/host_trust_rules.go`, `glob.go`, `identity_checks.go`, `source_check.go`,
+`server_auth/throttle_rules.go`, `server_auth/truncate.go`, `util/equalfold.go`,
+`util/unix_util/account_rules.go`, `util/varint.go`, `version_rules.go`) are listed separately, in
+`INPLACE_UNITS`.
+
+## Writing one, notes from the ones here
+
+The toolchain is pinned (`proof/gobra.version`, currently `v26.09`) because a proof means a
+specific version of a specific verifier. Things that cost time to learn:
+
+* **`assert` and specs need pure expressions.** A decision function that has to appear in
+  assertions must be `pure func` with a body that is a single `return` of a pure
+  expression; lemmas call it from ordinary code and assert about the result.
+* **`==` binds tighter than `&&` in specs.** `ensures res == !a && !b` is read as
+  `(res == !a) && !b`, i.e. it demands `!b` unconditionally. Parenthesise the right-hand
+  side of an equivalence.
+* **A helper predicate can swallow a claim.** `ensures gatesOk(...) && false` in an earlier
+  draft made three outcomes vacuous: fold decisions into an explicit table instead.
+* **A `pure func` body is one `return` of a pure expression.** No `if`/`else`, and no `? :`
+  either — the conditional expression is ghost-only, so a decision function must be written as
+  boolean arithmetic (`pinned && match || !pinned && !known && terminal && yes`) with the shape of
+  the Go code kept in the comment above it. Anything that cannot be written that way becomes a
+  lemma `func` that calls the pure part and `assert`s the case.
+* **Go's newline rules apply to specs.** A `return` (or `ensures`) expression that continues onto
+  the next line must break *after* an operator: `a &&` newline `b` parses, `a` newline `|| b` is
+  read as two statements and dies with "unexpected || in block, expecting '}'."
+* **Every `pure func` needs a `decreases` clause, even a non-recursive one** (`decreases 0`).
+* **Quantified variables need types in the Go frontend**: `forall k int ::`, `exists k int ::`. Bare
+  `forall k ::` is a parse error ("no viable alternative at input ':'"), which is easy to misread as a
+  problem with the clause rather than with the binder.
+* **A spec that names the result needs a named return.** `func lower(b byte) byte` with
+  `ensures res == b + foldGap` dies with "got unknown identifier res" pointing at the spec, not at the
+  signature; `(res byte)` is the fix. Cheap to state, and the error reads as if `res` were a missing
+  import.
+* **Loop annotations go above the `for`, never as its first statement.** With the `invariant` comments
+  inside the body, the frontend reports "unexpected if, expecting forStmt" at whatever the first real
+  statement is -- it has finished with the loop and is still being handed annotations.
+* **A loop needs its own `decreases`** (`decreases len(s) - i`); the function's measure is not visible to
+  it, and the complaint is "Function might not terminate. Required termination condition might not
+  hold." -- which also says why the *function* must be known to terminate before its postconditions are
+  believed.
+* **An empty `@ decreases` on a non-recursive function is a demand, not a no-op.** Written on `EqualFold`
+  it produced exactly that non-termination error; deleting the clause and letting the frontend infer is
+  what verified. The `decreases 0` rule above is about `pure func`s in model files, where an explicit
+  measure is required and `0` is a legal one.
+* **Give a helper a complete case definition instead of making it pure.** `lower` cannot be `pure` (two
+  returns), so no spec can call it -- but its contract states both branches, "inside the capitals it adds
+  the gap, outside them it changes nothing", and that is enough for the prover to reason about a *call* to
+  `lower` inside another function's postcondition and loop invariant. `util/equalfold.go` is the worked
+  example: the decision is quantified over bytes with the folding written out, and the helper stays
+  ordinary Go.
+* **`min` and `max` are unknown identifiers in a `.go` file**, though the model files use them; a cap
+  has to be an `if`, which makes the function impure, which means a spec cannot name it -- so a claim
+  quantified over a function's own inputs ("the delay never shrinks") goes in a separate lemma
+  function that calls it and asserts the comparison.
+* **`before` is a reserved word** (it belongs to the permission-ordering logic): `before := f(x)` is
+  "no viable alternative at input 'before :='", an error that points at the call and not the name.
+* **`append` cannot be written in a verified function at all.** Gobra models it as taking an explicit
+  permission argument and says so against ordinary Go: "append expects first argument of type perm
+  followed by a slice of type []Type and a variadic type Type... but got []byte, uint8". Neither `acc(b)`
+  nor `acc(b, 1/2)` on the parameter changes the diagnosis. A verified function may read, slice and
+  compare bytes but may not grow one, which puts encoders -- and any parser that accumulates into a
+  buffer -- outside the verified set whatever else they import.
+* **`time` *is* stubbed, with real specs** -- `Duration` arithmetic, and pure `Before`/`After` that
+  claims can be stated against -- so a verified file may import it and speak durations the way the
+  code around it does, which is what `server_auth/throttle_rules.go` does. The complete list of what
+  Gobra v26.09 ships is `bytes`, `encoding`, `errors`, `fmt` (signatures only, and its header says
+  the members are unsupported), `net`, `strconv`, `strings`, `sync`, `time`. Nothing for
+  `crypto/x509`, `crypto/ed25519`, `os`, `bufio` or `encoding/base64`, which is what stands between
+  this toolchain and a verified `known_hosts.go` or a verified reader in `message/`. An earlier note
+  here said the opposite about `time`, on the strength of one failed import whose cause was elsewhere.
+* **A verified file may live anywhere in the tree** -- Gobra is handed the directory as its package --
+  but it still sees neither its package-mates nor any unstubbed import. That is why the verified files
+  are leaves: `server_auth/throttle_rules.go` imports `time` and nothing else, and
+  `server_auth/truncate.go` imports nothing at all, because the files they came from pull in `fmt`.
+* **A recursive `pure func` is checked and then opaque.** Its `decreases` measure is verified, but
+  no concrete call can be proved of it afterwards: recursion over `int` unfolds (`f(3)` verifies),
+  recursion over `string` does not (`gm("a", "a", 0, 0)` stays unknown), recursion with several
+  call sites does not, and indexing a slice inside a pure function additionally demands `perm` for
+  the elements. So arithmetic models — the throttle's delay, a truncation length — belong in the
+  prover, and string-shaped recursion does not: `matchGlob`'s meaning is pinned by three
+  implementations agreeing instead, which is written up as the boundary of the programme in
+  `SECURITY_REQUIREMENTS.md` (finding F5) rather than quietly worked around. The work-around that does
+  exist is to keep the strings fixed and recurse over an **index**: `prefixEq(a, b, n)` unfolds one
+  character at a time, and `prefixEq(a, b, p+1) == (prefixEq(a, b, p) && a[p] == b[p])` is provable.
+* **String slicing parses and has no theory.** `a[0:n]` type-checks in a spec and `a[0:0] == b[0:0]`
+  is *not* provable; nor is extensionality (equal length plus equal characters does not give
+  `a == b`). Write string properties with `len` and byte indices or they will not discharge.
+* **Specs in a `.go` file are comments, one clause per line.** `// @ ensures ...` above the signature;
+  loop specs (`// @ invariant`, `// @ decreases`) go *before* the `for`, not inside the body; a
+  lexicographic measure is a bare list, `decreases a, b`, not `decreases (a, b)`. A clause may run on
+  over `// @`-prefixed continuation lines, and length is not a problem -- `identity_checks.go` has a
+  240-character `ensures` that verifies -- but a continuation line without the prefix is a parse
+  error, and there is no `<==>`: write `(A ==> B) && (B ==> A)`.
+* **A `pure` function must be one `return` of a pure expression.** No `switch`, no `if`, no loop.
+  That is why `isForwardingFamily` is a long boolean expression while the gate that uses the same set
+  is a `switch`: only the first can be named inside another function's postcondition. Note what
+  purity is *for* -- being called from a spec. `requestVerdictFor` and `channelVerdictFor` are not
+  `pure` (they are imperative, with `acc`-free value parameters), and their contracts are still
+  proved of their bodies; a function only needs `pure` if a spec has to talk about it.
+* **A contract on an impure function is still a theorem about its body.** The distinction worth
+  keeping is between proving a body satisfies its contract (what `make proof` does for every function
+  here, pure or not) and being able to *use* a function inside another spec (which needs `pure`, and
+  therefore needs the single-return shape).
+* **There is no `delete`.** The builtins are `make`, `len`, `append`, `copy`, `min`, `max`.
+  A map that forgets keys has to be rebuilt in a loop under a ghost "visited" set, which is
+  why the throttle's *memory* bound is a Go test rather than a lemma.
+* **Ghost sequences are the right shape for set-like state.** `ghost` + `seq[T]` gives a
+  store model with no permissions at all, eviction as `s[1:len(s)]` and insertion as
+  `s ++ seq[string]{k}`, so a memory bound is literally `len(res) <= capacity` and a
+  trace theorem is a recursive function (`run` in `replay/`) whose `ensures` holds for every
+  trace. Three catches, all learned the slow way: a function whose parameters or result are
+  ghost types needs the `ghost` modifier *first*, above its other annotations; a `pure func`
+  returning an `int`/`bool` cannot have a ghost body, so define conditionals with `&&`/`||`
+  or a ternary only where the result is itself ghost; and `s[1:]` on a sequence is not
+  accepted where `s[1:len(s)]` is.
+* **Membership and `++` do not mix by induction.** A `mem` defined by peeling the *last*
+  element discharges `mem(s ++ seq{k}, k)` in one step but cannot relate `mem(drop(s), k)` to
+  `mem(s, k)`. State eviction results as structural equalities and index facts
+  (`res == drop(s) ++ seq[string]{k}`, `res[0] == s[1]`) rather than as quantified
+  membership; guard every index in a contract (`1 < len(s) ==> res[0] == s[1]`), since
+  contracts are checked for well-formedness before the case split.
+* **Spec reads need a matching permission.** Every field or slice element a contract reads
+  must be covered by an `acc` in the same state, and a folded predicate is not always
+  unfolded where the contract needs it. Models that pass restriction sets *by value*
+  sidestep this entirely: locals carry no permission in Gobra.
+* **Quantifiers over slices want triggers** (`exists j int :: { names[j] } ...`) or the
+  prover never instantiates them.
+* `none` is a keyword.
+* **A claim about two calls of the same function under a hypothesis will not discharge.** "Away from the
+  legacy family the verdict does not depend on the software version" is true of the version gate, and its
+  shape is: call the gate twice, compare the two results, guard the claim with a condition over both
+  argument tuples. Silicon answers "Postcondition might not hold" — and keeps answering it with the
+  guarding condition written out inline instead of calling the pure predicate, which rules out pure-call
+  inlining as the cause and leaves no annotation to fix. Write such claims as Go enumeration instead
+  (`TestConformanceSoftwareVersionIsIrrelevantAwayFromTheLegacyFamily`, 304 pairs) and leave a note in the verified
+  file saying the universal form was tried, so the next person does not spend an afternoon on it.
+* **The prover reads the code better than a first reading of the prose.** The first draft of
+  `versionSupported`'s legacy clause said "inside the legacy family the verdict is `patch >= 3`". That is
+  false: the family is defined over the *software* version, while the gate's first check is over the
+  *protocol* version, so an announcement of protocol 2.0 with software 0.1.4 is inside the family and is
+  refused. Silicon reported the postcondition failing rather than letting the sentence through. The rule
+  it teaches: a clause about a nested branch has to carry the enclosing branch's condition in its
+  antecedent, and writing clauses in the order the code evaluates them is what makes you notice.
+* **Where a spec names constants, keep one literal somewhere.** `version_rules.go` holds the constants
+  that identify this release and states every clause against them, which is what a proof should do — but
+  it also means bumping `PROTOCOL_EXPERIMENTAL_SPEC_VERSION` leaves the unit verifying, because the gate
+  and its spec move together and only the wire meaning changed. The tests notice (`bump_spec` fails
+  `TestConformanceVerdictTable`), and one clause therefore pins a literal boundary
+  (`... && peerSoftwarePatch == 2 ==> !supported`) so a boundary constant cannot drift without someone
+  deciding to. Prover protects the shape of the rule, tests protect the numbers in it; say which is which
+  in the file.
+
+The style that works: state the decision as an exact table (`ensures res == <the whole
+formula>`), then write the security claims as small `func`s that build a case and `assert`
+the outcome. A table whose cell is wrong fails immediately and names the row.

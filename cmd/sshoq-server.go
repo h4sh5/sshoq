@@ -1447,25 +1447,25 @@ func ServerMain() int {
 	if unix_util.PasswordAuthAvailable() {
 		flag.BoolVar(&enablePasswordLogin, "enable-password-login", false, "if set, enable password authentication (disabled by default)")
 	}
-	remoteForward := flag.String("R", "", "connect to an existing remote sshoq server and ask it to open a port on its localhost, " +
-		"forwarding the traffic of that port to this local sshoq server. Syntax: user@host:port/url-path%remote-port " +
-		"(e.g. user@example.com:4443/sshoq-remote%4444). Users can then point a normal sshoq client at " +
-		"the remote host's localhost:remote-port to reach this server, even when it sits behind a NAT. " +
-		"The destination on this host defaults to this server's own -bind port and may be spelled out as " +
+	remoteForward := flag.String("R", "", "connect to an existing remote sshoq server and ask it to open a port on its localhost, "+
+		"forwarding the traffic of that port to this local sshoq server. Syntax: user@host:port/url-path%remote-port "+
+		"(e.g. user@example.com:4443/sshoq-remote%4444). Users can then point a normal sshoq client at "+
+		"the remote host's localhost:remote-port to reach this server, even when it sits behind a NAT. "+
+		"The destination on this host defaults to this server's own -bind port and may be spelled out as "+
 		"user@host:port/url-path%remote-port@localip@localport.")
 	flag.StringVar(remoteForward, "remote-forward", "", "alias for -R")
 	var remotePublicKeys stringSliceFlag
-	flag.Var(&remotePublicKeys, "rpub", "authorize a public key in the memory of this server run only, without adding it to " +
-		"~/.ssh3/authorized_identities, so that whoever holds the matching private key can connect - typically through the -R " +
-		"forwarded port - without a password and without the key being installed on any file, on either side of the connection. " +
-		"The argument is either the public key itself (\"ssh-ed25519 AAAA... comment\") or the name of a file containing one. " +
+	flag.Var(&remotePublicKeys, "rpub", "authorize a public key in the memory of this server run only, without adding it to "+
+		"~/.ssh3/authorized_identities, so that whoever holds the matching private key can connect - typically through the -R "+
+		"forwarded port - without a password and without the key being installed on any file, on either side of the connection. "+
+		"The argument is either the public key itself (\"ssh-ed25519 AAAA... comment\") or the name of a file containing one. "+
 		"May be specified multiple times.")
 	flag.Var(&remotePublicKeys, "remote-public-key", "alias for -rpub")
 	var cmdlinePubkeys stringSliceFlag
-	flag.Var(&cmdlinePubkeys, "pubkey", "authorize a public key for this server run only, exactly like -rpub, but with no " +
-		"relation to -R: the key is held in the memory of the server, it is never added to ~/.ssh3/authorized_identities " +
-		"nor to ~/.ssh/authorized_keys, and it stops being accepted as soon as the server stops. " +
-		"The argument is either the public key itself (\"ssh-ed25519 AAAA... comment\") or the name of a file containing one. " +
+	flag.Var(&cmdlinePubkeys, "pubkey", "authorize a public key for this server run only, exactly like -rpub, but with no "+
+		"relation to -R: the key is held in the memory of the server, it is never added to ~/.ssh3/authorized_identities "+
+		"nor to ~/.ssh/authorized_keys, and it stops being accepted as soon as the server stops. "+
+		"The argument is either the public key itself (\"ssh-ed25519 AAAA... comment\") or the name of a file containing one. "+
 		"May be specified multiple times.")
 	var remoteForwardIdentities stringSliceFlag
 	flag.Var(&remoteForwardIdentities, "R-identity", "private key file used to authenticate to the remote sshoq server given with -R. "+

@@ -1,0 +1,193 @@
+// SR-AUTH-06: an OIDC ID token is a bearer credential, and it is only worth what the conversation
+// it was issued for is worth. This models the binding decision of
+// server_auth/authorized_identities.go (`OpenIDConnectIdentity.Verify`): the token must carry a
+// claim binding it to the conversation the server is authenticating, that claim must name *this*
+// conversation, and the token must not have been seen before.
+//
+// The code, in the order it runs:
+//
+//     valid := token != nil && claims.EmailVerified && claims.Email == i.email      // identity
+//     bound := claims.Conversation                                                  // ssh3_conv_id
+//     if bound == "" { bound = claims.UniqueID }                                    // jti
+//     if bound == "" { return false }                                               // unbound
+//     if bound != base64ConversationID { return false }                             // elsewhere
+//     unique := claims.UniqueID; if unique == "" { unique = bound }                 // replay key
+//     if !acceptedOIDCTokens.Accept(token.Issuer, unique, token.Expiry) { false }   // replay
+//
+// What is proved here is that this leaves a captured token nowhere to go. It cannot be replayed on
+// another conversation of the same server, because the value it is compared against is the server's
+// own conversation id and one token can therefore satisfy the check for at most one conversation; it
+// cannot be replayed on the conversation it belongs to, because the replay store (proved in
+// proof/replay) accepts a given (issuer, key) at most once; and it cannot arrive carrying nothing,
+// because an unbound token is refused rather than treated as bound to whatever is asking.
+//
+// The crypto layer -- signature, `iss`, `aud`, `exp` (SR-AUTH-01..04) -- is not here: it is a
+// premise, exactly as the store's answer `storeAccepts` is a premise below. What this unit owns is
+// the decision made out of those answers, and it holds whatever the crypto layer decides.
+// server_auth/oidc_binding_source_conformance_test.go is the step that says the real block reads the
+// claims in this order and compares against the server's id and not the token's.
+package oidcbinding
+
+// hasBindingClaim: does the token carry anything that could bind it? `ssh3_conv_id` first, `jti`
+// second. Both empty means the token is a bearer credential with no destination written on it.
+decreases
+pure func hasBindingClaim(convClaim string, jtiClaim string) (res bool) {
+	return convClaim != "" || jtiClaim != ""
+}
+
+// boundTo: the value the server compares against its own conversation id. The precedence belongs to
+// the code, not to the token's issuer: a token which carries an `ssh3_conv_id` is bound by it, and
+// `jti` is consulted only when that claim is absent.
+decreases
+pure func boundTo(convClaim string, jtiClaim string, want string) (res bool) {
+	return convClaim != "" && want == convClaim || convClaim == "" && want == jtiClaim
+}
+
+// replayKey: the id handed to the replay store -- `jti` when the token has one, and otherwise the
+// binding value. Two tokens carrying the same `jti` are therefore one token as far as the store is
+// concerned, which is the intended reading of the claim.
+decreases
+pure func replayKey(convClaim string, jtiClaim string, want string) (res bool) {
+	return jtiClaim != "" && want == jtiClaim || jtiClaim == "" && boundTo(convClaim, jtiClaim, want)
+}
+
+// replayKeyNonEmpty is what the store needs from its caller: proof/replay proves an empty id is
+// never accepted, and the caller must not hand it one anyway -- otherwise every token in the world
+// would share one replay slot.
+decreases
+pure func replayKeyNonEmpty(convClaim string, jtiClaim string) (res bool) {
+	return jtiClaim != "" || convClaim != ""
+}
+
+// bindingDecision is the whole of Verify's decision once the crypto layer has said the token is
+// signed by the right issuer and is unexpired: the identity the token asserts, the binding claim,
+// the server's own conversation id `conversation`, and the answer `storeAccepts` of the replay
+// store. Nothing else in Verify can refuse the token.
+decreases
+pure func bindingDecision(identityEmail string, tokenEmail string, emailVerified bool,
+	convClaim string, jtiClaim string, conversation string, storeAccepts bool) (res bool) {
+	return emailVerified && tokenEmail == identityEmail &&
+		hasBindingClaim(convClaim, jtiClaim) &&
+		boundTo(convClaim, jtiClaim, conversation) &&
+		storeAccepts
+}
+
+// unboundTokenIsRefused: a token carrying neither `ssh3_conv_id` nor `jti` is refused, whatever else
+// is true of it. The refusal is quantified over everything else on purpose: it must not depend on a
+// cooperative issuer, on the e-mail matching, or on the replay store having room.
+requires !hasBindingClaim(convClaim, jtiClaim)
+func unboundTokenIsRefused(identityEmail string, tokenEmail string, emailVerified bool,
+	convClaim string, jtiClaim string, conversation string, storeAccepts bool) {
+	assert !bindingDecision(identityEmail, tokenEmail, emailVerified, convClaim, jtiClaim,
+		conversation, storeAccepts)
+	// the premise is not vacuous: two empty claims are exactly the pair it describes
+	assert !hasBindingClaim("", "")
+	assert convClaim == "" && jtiClaim == ""
+}
+
+// oneTokenAtMostOneConversation: two different conversations cannot both accept the same token.
+// This is the anti-replay property, and it is why the right-hand side of the comparison is the
+// server's own id -- the token does not get to choose what it is bound to.
+requires c1 != c2
+requires bindingDecision(identityEmail, tokenEmail, emailVerified, convClaim, jtiClaim, c1, store1)
+requires bindingDecision(identityEmail, tokenEmail, emailVerified, convClaim, jtiClaim, c2, store2)
+func oneTokenAtMostOneConversation(identityEmail string, tokenEmail string, emailVerified bool,
+	convClaim string, jtiClaim string, c1 string, c2 string, store1 bool, store2 bool) {
+	assert false
+}
+
+// boundElsewhereIsRefused: a token whose binding claim names another conversation is refused, and a
+// `jti` naming this one does not rescue it. The claim which is present is the claim that binds.
+requires convClaim != "" && convClaim != conversation
+requires jtiClaim == conversation
+func boundElsewhereIsRefused(identityEmail string, tokenEmail string, emailVerified bool,
+	convClaim string, jtiClaim string, conversation string, storeAccepts bool) {
+	assert !bindingDecision(identityEmail, tokenEmail, emailVerified, convClaim, jtiClaim,
+		conversation, storeAccepts)
+}
+
+// acceptanceImpliesBoundHere: everything the decision needed, spelled out, so that a reader of the
+// requirement sees the acceptance condition and not only its negation.
+requires bindingDecision(identityEmail, tokenEmail, emailVerified, convClaim, jtiClaim,
+	conversation, storeAccepts)
+func acceptanceImpliesBoundHere(identityEmail string, tokenEmail string, emailVerified bool,
+	convClaim string, jtiClaim string, conversation string, storeAccepts bool) {
+	assert emailVerified
+	assert tokenEmail == identityEmail
+	assert hasBindingClaim(convClaim, jtiClaim)
+	assert boundTo(convClaim, jtiClaim, conversation)
+	assert storeAccepts
+}
+
+// acceptanceHandsTheReplayStoreANonEmptyKey: the id computed for acceptedOIDCTokens.Accept is never
+// the empty string at a point where the token is accepted.
+requires bindingDecision(identityEmail, tokenEmail, emailVerified, convClaim, jtiClaim,
+	conversation, storeAccepts)
+func acceptanceHandsTheReplayStoreANonEmptyKey(identityEmail string, tokenEmail string,
+	emailVerified bool, convClaim string, jtiClaim string, conversation string,
+	storeAccepts bool) {
+	assert replayKeyNonEmpty(convClaim, jtiClaim)
+}
+
+// replayKeyFollowsTheDocumentedPrecedence: with a `jti`, that is the key; without one, the binding
+// value is. A token cannot be bound by one claim and remembered under another.
+requires jtiClaim != ""
+func replayKeyFollowsTheDocumentedPrecedence(convClaim string, jtiClaim string) {
+	assert replayKey(convClaim, jtiClaim, jtiClaim)
+}
+
+requires jtiClaim == ""
+requires convClaim != ""
+func replayKeyFallsBackToTheBindingClaim(convClaim string, jtiClaim string) {
+	assert replayKey(convClaim, jtiClaim, convClaim)
+	assert boundTo(convClaim, jtiClaim, convClaim)
+}
+
+// storeRefusalRefusesTheToken: the replay store's answer is not advisory.
+func storeRefusalRefusesTheToken(identityEmail string, tokenEmail string, emailVerified bool,
+	convClaim string, jtiClaim string, conversation string) {
+	assert !bindingDecision(identityEmail, tokenEmail, emailVerified, convClaim, jtiClaim,
+		conversation, false)
+}
+
+// unverifiedEmailIsRefused, mismatchedEmailIsRefused: a token cannot buy a conversation on somebody
+// else's identity by carrying a binding claim for it -- the identity check comes first, and the
+// binding is never consulted.
+requires !emailVerified
+requires hasBindingClaim(convClaim, jtiClaim)
+requires boundTo(convClaim, jtiClaim, conversation)
+func unverifiedEmailIsRefused(identityEmail string, tokenEmail string, emailVerified bool,
+	convClaim string, jtiClaim string, conversation string, storeAccepts bool) {
+	assert !bindingDecision(identityEmail, tokenEmail, emailVerified, convClaim, jtiClaim,
+		conversation, storeAccepts)
+}
+
+requires tokenEmail != identityEmail
+requires hasBindingClaim(convClaim, jtiClaim)
+requires boundTo(convClaim, jtiClaim, conversation)
+func mismatchedEmailIsRefused(identityEmail string, tokenEmail string, convClaim string,
+	jtiClaim string, conversation string, storeAccepts bool) {
+	assert !bindingDecision(identityEmail, tokenEmail, true, convClaim, jtiClaim, conversation,
+		storeAccepts)
+}
+
+// aProperlyBoundTokenIsAccepted: the decision is satisfiable -- all of the above is not a proof that
+// nothing is ever accepted. The shape is the one an sshoq client produces: the conversation id the
+// server announced, carried in `ssh3_conv_id`, and a `jti` for the replay store.
+func aProperlyBoundTokenIsAccepted() {
+	assert bindingDecision("alice@example.org", "alice@example.org", true,
+		"3qJ8kP0mZ4tLwQvXhN7yAg", "token-2026-11-04-0001", "3qJ8kP0mZ4tLwQvXhN7yAg", true)
+	// the same token on a different conversation: refused
+	assert !bindingDecision("alice@example.org", "alice@example.org", true,
+		"3qJ8kP0mZ4tLwQvXhN7yAg", "token-2026-11-04-0001", "Bd9cR2sT6uVwXyZ0aE1fGh", true)
+	// the same token on the conversation it belongs to, second time round: refused by the store
+	assert !bindingDecision("alice@example.org", "alice@example.org", true,
+		"3qJ8kP0mZ4tLwQvXhN7yAg", "token-2026-11-04-0001", "3qJ8kP0mZ4tLwQvXhN7yAg", false)
+	// a token carrying no binding claim at all: refused
+	assert !bindingDecision("alice@example.org", "alice@example.org", true, "", "",
+		"3qJ8kP0mZ4tLwQvXhN7yAg", true)
+	// a token bound only by `jti`, presented where its jti is this conversation: accepted, since
+	// that is the fallback the code documents
+	assert bindingDecision("alice@example.org", "alice@example.org", true, "",
+		"3qJ8kP0mZ4tLwQvXhN7yAg", "3qJ8kP0mZ4tLwQvXhN7yAg", true)
+}

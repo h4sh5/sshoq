@@ -45,12 +45,12 @@ func TestParseReverseTunnelSpec_ExplicitLocalDestination(t *testing.T) {
 
 func TestParseReverseTunnelSpec_Errors(t *testing.T) {
 	for _, spec := range []string{
-		"example.com:4443/sshoq-remote",   // no % separator
-		"%4444",                           // no URL
-		"example.com:4443%4444",           // no URL path
-		"example.com:4443/srv%4444",       // no username in the URL
-		"u@example.com:4443/srv%0",        // port out of range
-		"u@example.com:4443/srv%abc",      // not a number
+		"example.com:4443/sshoq-remote",       // no % separator
+		"%4444",                               // no URL
+		"example.com:4443%4444",               // no URL path
+		"example.com:4443/srv%4444",           // no username in the URL
+		"u@example.com:4443/srv%0",            // port out of range
+		"u@example.com:4443/srv%abc",          // not a number
 		"u@example.com:4443/srv%4444@1.2.3.4", // incomplete local destination
 	} {
 		if _, err := parseReverseTunnelSpec(spec, "0.0.0.0:443"); err == nil {

@@ -1,0 +1,118 @@
+// SR-AUTH-08: a password guess costs a bounded amount of work, and the number of
+// guesses one source gets inside a window is bounded.
+//
+// This models the decision inside server_auth/login_policy.go:check and the way
+// HandleAuths uses it: check is called before the expensive Argon2id evaluation and
+// failure() is called for every rejected attempt. Keys are modelled as one source's
+// failure counter, because that is the quantity the decision depends on.
+//
+// Tracked files: server_auth/login_policy.go (loginThrottle.check, failure, success,
+// startWindowLocked) and server_auth/throttle_rules.go (windowElapsed, attemptIsRefused,
+// failureDelay, retryAfter), whose own proof covers the same delay and refusal arithmetic on the
+// code that runs -- which makes this unit a second opinion on it, plus the part this unit can say
+// and that one cannot: what a whole sequence of guesses adds up to.
+//
+// Gobra v26.09 has no delete builtin for maps (only make, len, append, copy, min and
+// max -- the last two of which the Go frontend of a verified `.go` file does not accept), so the
+// table itself cannot be shrunk inside a proof. The bound on how many
+// sources the table remembers - SR-RES-01, which is about the map and its eviction ring
+// - is therefore proved as an executable property test in
+// server_auth/login_policy_capacity_test.go, next to the code it constrains.
+package throttle
+
+// atMost is the minimum of two values, spelled out because Gobra has no min function
+// (min and max are members of sequences and sets only). It is ghost: the conditional
+// expression is ghost syntax, and nothing in this file needs to call it from actual code.
+ghost
+decreases
+ensures res <= a && res <= b
+ensures a <= b ==> res == a
+ensures b < a ==> res == b
+ensures 0 <= a && 0 <= b ==> 0 <= res
+pure func atMost(a int, b int) (res int) {
+	return a <= b ? a : b
+}
+
+// delayFor is the growing wait check() puts in front of the password hash.
+//
+// The wait is what makes a network-funded guessing run expensive; it is capped so that
+// one client cannot make the server hold a connection for an unbounded time.
+requires 0 <= failures
+requires 0 <= delayStep
+requires 0 <= maxDelay
+ensures 0 <= res && res <= maxDelay
+ensures failures * delayStep <= maxDelay ==> res == failures * delayStep
+ensures failures * delayStep > maxDelay ==> res == maxDelay
+func delayFor(failures int, delayStep int, maxDelay int) (res int) {
+	delay := failures * delayStep
+	if delay > maxDelay {
+		delay = maxDelay
+	}
+	return delay
+}
+
+// attemptIsRefused is the whole of check()'s answer once a window is open for the
+// source: as soon as the recorded failures reach the limit, further attempts are
+// refused before any password is hashed.
+requires 0 <= failures
+requires 0 <= maxFailures
+ensures res == (failures >= maxFailures)
+func attemptIsRefused(failures int, maxFailures int) (res bool) {
+	return failures >= maxFailures
+}
+
+// guessingIsBounded is SR-AUTH-08: a source which makes `attempts` failed guesses
+// against one account inside one window is allowed to reach the password hash at most
+// maxFailures times, and never more often than it tried. Whatever the attacker does,
+// the Argon2id work per window per source is bounded by the limit alone.
+requires 0 <= attempts
+requires 0 <= maxFailures
+ensures allowed <= maxFailures
+ensures allowed <= attempts
+ensures allowed == atMost(attempts, maxFailures)
+ensures attempts > maxFailures ==> allowed == maxFailures
+func guessingIsBounded(attempts int, maxFailures int) (allowed int) {
+	allowed = 0
+	failures := 0
+	invariant 0 <= i && i <= attempts
+	invariant allowed == failures
+	invariant failures <= maxFailures
+	invariant allowed <= i
+	invariant allowed == atMost(i, maxFailures)
+	decreases attempts - i
+	for i := 0; i < attempts; i++ {
+		if !attemptIsRefused(failures, maxFailures) {
+			allowed++
+			// failure() records the rejected attempt for this source
+			failures++
+		}
+	}
+	return allowed
+}
+
+// sprayingIsBounded is the other half of SR-AUTH-08: the per-address bucket counts
+// every username, so a spray across a list of accounts is closed too. A source which
+// makes `attempts` guesses from one address - spread over as many usernames as it likes -
+// reaches the password hash at most maxPerAddress times, because the address bucket is
+// incremented by every rejected attempt regardless of the username.
+requires 0 <= attempts
+requires 0 < maxPerAddress
+ensures allowed <= maxPerAddress
+ensures allowed <= attempts
+ensures allowed == atMost(attempts, maxPerAddress)
+func sprayingIsBounded(attempts int, maxPerAddress int) (allowed int) {
+	allowed = 0
+	addressFailures := 0
+	invariant 0 <= i && i <= attempts
+	invariant allowed == addressFailures
+	invariant addressFailures <= maxPerAddress
+	invariant allowed == atMost(i, maxPerAddress)
+	decreases attempts - i
+	for i := 0; i < attempts; i++ {
+		if !attemptIsRefused(addressFailures, maxPerAddress) {
+			allowed++
+			addressFailures++
+		}
+	}
+	return allowed
+}

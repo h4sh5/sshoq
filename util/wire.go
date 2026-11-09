@@ -8,36 +8,15 @@ import (
 	"io"
 )
 
-// taken from the QUIC draft
-const (
-	// Min is the minimum value allowed for a QUIC varint.
-	Min = 0
-
-	// Max is the maximum allowed value for a QUIC varint (2^62-1).
-	Max = maxVarInt8
-
-	maxVarInt1 = 63
-	maxVarInt2 = 16383
-	maxVarInt4 = 1073741823
-	maxVarInt8 = 4611686018427387903
-)
+// The varint format constants, MaxFieldLength, VarIntLen, MinUint64 and the two SSH field-length
+// helpers live in varint.go, where Gobra checks them; this file is the I/O around them and imports
+// packages the prover cannot read.
 
 // Reader implements both the io.ByteReader and io.Reader interfaces.
 type Reader interface {
 	io.ByteReader
 	io.Reader
 }
-
-const (
-	// MaxFieldLength is the absolute ceiling applied to any length-prefixed field
-	// (an SSH string, an SSH byte string) read from a peer. Without such a ceiling,
-	// a 10-byte message announcing a 2^62-1 length makes the process allocate up to
-	// 4 EiB of address space, and any length above Go's maxAlloc makes `make`
-	// panic ("makeslice: len out of range"), which kills the whole process.
-	// Readers which know a tighter bound (a channel knows the maximum packet size it
-	// negotiated with the peer) must use it, see NewLengthLimitedReader.
-	MaxFieldLength uint64 = 1 << 24
-)
 
 // MaxLengthAware is implemented by readers which know the maximum length of a
 // length-prefixed field they are willing to accept from the peer.
@@ -85,13 +64,11 @@ func (r *lengthLimitedReader) ReadByte() (byte, error) {
 // checkFieldLength refuses a length received from the peer when it is larger than
 // what the reader is prepared to allocate for it.
 func checkFieldLength(buf Reader, length uint64) error {
-	max := uint64(MaxFieldLength)
+	max := MaxFieldLength
 	if aware, ok := buf.(MaxLengthAware); ok {
-		if limited := aware.MaxFieldLength(); limited < max {
-			max = limited
-		}
+		max = fieldCeiling(aware.MaxFieldLength())
 	}
-	if length > max {
+	if !fieldLengthAcceptable(length, max) {
 		return fmt.Errorf("peer announced a %d bytes field, the maximum accepted length is %d bytes", length, max)
 	}
 	return nil
@@ -248,28 +225,6 @@ func AppendVarIntWithLen(b []byte, i uint64, length uint64) []byte {
 	return b
 }
 
-// VarIntLen determines the number of bytes that will be needed to write the number i.
-func VarIntLen(i uint64) uint64 {
-	if i <= maxVarInt1 {
-		return 1
-	}
-	if i <= maxVarInt2 {
-		return 2
-	}
-	if i <= maxVarInt4 {
-		return 4
-	}
-	if i <= maxVarInt8 {
-		return 8
-	}
-	// Don't use a fmt.Sprintf here to format the error message.
-	// The function would then exceed the inlining budget.
-	panic(struct {
-		message string
-		num     uint64
-	}{"value doesn't fit into 62 bits: ", i})
-}
-
 func ParseSSHString(buf Reader) (string, error) {
 	length, err := ReadVarInt(buf)
 	if err != nil {
@@ -337,19 +292,4 @@ func WriteSSHBytes(out []byte, in []byte) (int, error) {
 	copied := copy(out, buf)
 	copied += copy(out[copied:], in)
 	return copied, nil
-}
-
-func SSHStringLen(s string) int {
-	return int(VarIntLen(uint64(len(s)))) + len(s)
-}
-
-func SSHBytesLen(s []byte) int {
-	return int(VarIntLen(uint64(len(s)))) + len(s)
-}
-
-func MinUint64(a uint64, b uint64) uint64 {
-	if a <= b {
-		return a
-	}
-	return b
 }
